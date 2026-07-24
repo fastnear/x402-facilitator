@@ -89,6 +89,27 @@ pub struct ServiceConfig {
     pub sponsorship: SponsorshipConfig,
     #[serde(default)]
     pub payment_identifier: PaymentIdentifierConfig,
+    /// EVM (eip155) settlement parameters. Present iff `chain_kind` is `eip155`;
+    /// omitted (and `None`) for NEAR configs so they parse unchanged.
+    #[serde(default)]
+    pub eip155: Option<Eip155Config>,
+}
+
+/// EVM-specific settlement parameters, selected when `chain_kind` is `eip155`.
+/// The shared [`ServiceConfig`] fields carry the rest (RPC URLs, USDC asset,
+/// signer identity, sponsorship/gas budgets); this block holds only what has no
+/// NEAR analog.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Eip155Config {
+    /// EVM chain id (Base mainnet `8453`, Base Sepolia `84532`). Must agree with
+    /// `network` (`eip155:<chain_id>`) and the deployment `environment`.
+    pub chain_id: u64,
+    /// Confirmation depth a settlement must reach before it is trusted terminal.
+    /// This is the reorg-safety policy; `1` accepts a single confirmation.
+    pub required_confirmations: u64,
+    /// Gas limit for the ERC-3009 `transferWithAuthorization` submission.
+    pub gas_limit: u64,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -301,10 +322,74 @@ impl ServiceConfig {
         }
         match self.chain_kind {
             ChainKind::Near => self.validate_near(),
-            ChainKind::Eip155 => Err(ConfigError::Invalid(
-                "eip155 (EVM) settlement configuration is not yet supported".to_owned(),
-            )),
+            ChainKind::Eip155 => self.validate_eip155(),
         }
+    }
+
+    /// EVM-specific configuration policy: the eip155 block presence, network /
+    /// chain-id / environment agreement, the canonical Base USDC contract, and
+    /// the EVM signer + gas parameters. The chain-agnostic launch policy (RPC
+    /// independence, HTTPS, loopback bind, USDC symbol, sponsorship thresholds)
+    /// is enforced in [`Self::validate`] before this runs.
+    fn validate_eip155(&self) -> Result<(), ConfigError> {
+        // Base only (per the launch decision): mainnet 8453, Sepolia 84532, with
+        // Circle's canonical USDC on each. Bind the tier to a specific chain so a
+        // testnet deploy can never point at mainnet USDC (or vice versa).
+        const BASE_MAINNET_USDC: &str = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913";
+        const BASE_SEPOLIA_USDC: &str = "0x036cbd53842c5426634e7929541ec2318f3dcf7e";
+        let (expected_chain_id, expected_usdc) = match self.environment {
+            Environment::Mainnet => (8453_u64, BASE_MAINNET_USDC),
+            Environment::Testnet => (84532_u64, BASE_SEPOLIA_USDC),
+        };
+
+        let Some(eip155) = &self.eip155 else {
+            return Err(ConfigError::Invalid(
+                "eip155 chain_kind requires an eip155 configuration block".to_owned(),
+            ));
+        };
+        if eip155.chain_id != expected_chain_id {
+            return Err(ConfigError::Invalid(format!(
+                "eip155.chain_id must be {expected_chain_id} for environment {:?}",
+                self.environment
+            )));
+        }
+        if self.network != format!("eip155:{expected_chain_id}") {
+            return Err(ConfigError::Invalid(format!(
+                "network must be eip155:{expected_chain_id} for environment {:?}",
+                self.environment
+            )));
+        }
+        if !self.asset.eq_ignore_ascii_case(expected_usdc) {
+            return Err(ConfigError::Invalid(format!(
+                "asset must be the canonical Circle USDC contract {expected_usdc} for {}",
+                self.network
+            )));
+        }
+        if !is_evm_address(&self.relayer_account_id) {
+            return Err(ConfigError::Invalid(
+                "relayer_account_id must be the EVM signer's 0x address".to_owned(),
+            ));
+        }
+        // max_inner_gas is a NEAR gas ceiling with no EVM meaning; require the
+        // sentinel 0 so an EVM config never silently carries a stale NEAR value.
+        if self.max_inner_gas != 0 {
+            return Err(ConfigError::Invalid(
+                "max_inner_gas must be 0 for eip155 (EVM has no inner-gas ceiling)".to_owned(),
+            ));
+        }
+        if eip155.required_confirmations == 0 {
+            return Err(ConfigError::Invalid(
+                "eip155.required_confirmations must be at least 1".to_owned(),
+            ));
+        }
+        // A transferWithAuthorization settlement is ~60k–100k gas; bound the limit
+        // to a sane band so a typo cannot under-fund or wildly over-reserve.
+        if !(21_000..=1_000_000).contains(&eip155.gas_limit) {
+            return Err(ConfigError::Invalid(
+                "eip155.gas_limit must be between 21000 and 1000000".to_owned(),
+            ));
+        }
+        Ok(())
     }
 
     /// NEAR-specific configuration policy: network identity, the canonical USDC
@@ -523,6 +608,15 @@ fn ensure_private_mode(_path: &Path) -> Result<(), ConfigError> {
     Ok(())
 }
 
+/// Whether `value` is a syntactically valid EVM address: `0x` followed by
+/// exactly 40 hex digits. Case is not checked (EIP-55 checksums are accepted in
+/// either case); on-chain identity is case-insensitive.
+fn is_evm_address(value: &str) -> bool {
+    value
+        .strip_prefix("0x")
+        .is_some_and(|hex| hex.len() == 40 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
 fn validate_unsigned_decimal(name: &str, value: &str) -> Result<(), ConfigError> {
     if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(ConfigError::Invalid(format!(
@@ -575,12 +669,111 @@ mod tests {
                 balance_hard_stop_yocto_near: "250000000000000000000000".to_owned(),
             },
             payment_identifier: PaymentIdentifierConfig::default(),
+            eip155: None,
+        }
+    }
+
+    fn valid_base_sepolia_config() -> ServiceConfig {
+        ServiceConfig {
+            environment: Environment::Testnet,
+            chain_kind: ChainKind::Eip155,
+            network: "eip155:84532".to_owned(),
+            bind_address: SocketAddr::from(([127, 0, 0, 1], 8404)),
+            primary_rpc_url: Url::parse("https://sepolia.base.org")
+                .unwrap_or_else(|_| std::process::abort()),
+            backup_rpc_url: Url::parse("https://base-sepolia-rpc.publicnode.com")
+                .unwrap_or_else(|_| std::process::abort()),
+            asset: "0x036CbD53842c5426634e7929541eC2318f3dCF7e".to_owned(),
+            asset_symbol: "USDC".to_owned(),
+            minimum_amount: "1000".to_owned(),
+            relayer_account_id: "0x51f2dbe5c2e1f3f0d9a5b6c7e8f9a0b1c2d3e4f5".to_owned(),
+            max_inner_gas: 0,
+            database_max_connections: 10,
+            request_limits: RequestLimits::default(),
+            sponsorship: SponsorshipConfig {
+                // Wei gas budgets (the *_yocto_near names are v2 naming debt).
+                global_daily_yocto_near: "500000000000000000".to_owned(),
+                default_client_daily_yocto_near: "100000000000000000".to_owned(),
+                reservation_yocto_near: "10000000000000000".to_owned(),
+                balance_warning_yocto_near: "1000000000000000000".to_owned(),
+                balance_hard_stop_yocto_near: "250000000000000000".to_owned(),
+            },
+            payment_identifier: PaymentIdentifierConfig::default(),
+            eip155: Some(Eip155Config {
+                chain_id: 84532,
+                required_confirmations: 2,
+                gas_limit: 120_000,
+            }),
         }
     }
 
     #[test]
     fn accepts_launch_mainnet_policy() {
         assert!(valid_mainnet_config().validate().is_ok());
+    }
+
+    #[test]
+    fn accepts_base_sepolia_eip155_policy() {
+        assert!(valid_base_sepolia_config().validate().is_ok());
+    }
+
+    #[test]
+    fn eip155_usdc_asset_is_case_insensitive() {
+        let mut lower = valid_base_sepolia_config();
+        lower.asset = "0x036cbd53842c5426634e7929541ec2318f3dcf7e".to_owned();
+        assert!(lower.validate().is_ok());
+    }
+
+    #[test]
+    fn rejects_eip155_missing_block_or_mismatched_identity() {
+        let mut missing = valid_base_sepolia_config();
+        missing.eip155 = None;
+        assert!(missing.validate().is_err());
+
+        // Mainnet chain id under a testnet deployment.
+        let mut wrong_chain = valid_base_sepolia_config();
+        wrong_chain.eip155 = Some(Eip155Config {
+            chain_id: 8453,
+            required_confirmations: 2,
+            gas_limit: 120_000,
+        });
+        assert!(wrong_chain.validate().is_err());
+
+        let mut wrong_network = valid_base_sepolia_config();
+        wrong_network.network = "eip155:8453".to_owned();
+        assert!(wrong_network.validate().is_err());
+
+        // Base *mainnet* USDC under a testnet deployment.
+        let mut wrong_asset = valid_base_sepolia_config();
+        wrong_asset.asset = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913".to_owned();
+        assert!(wrong_asset.validate().is_err());
+
+        let mut near_signer = valid_base_sepolia_config();
+        near_signer.relayer_account_id = "relayer.mike.testnet".to_owned();
+        assert!(near_signer.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_eip155_out_of_policy_gas_and_confirmations() {
+        let mut stale_inner_gas = valid_base_sepolia_config();
+        stale_inner_gas.max_inner_gas = 30_000_000_000_000;
+        assert!(stale_inner_gas.validate().is_err());
+
+        let mut zero_confirmations = valid_base_sepolia_config();
+        zero_confirmations.eip155 = Some(Eip155Config {
+            chain_id: 84532,
+            required_confirmations: 0,
+            gas_limit: 120_000,
+        });
+        assert!(zero_confirmations.validate().is_err());
+
+        let mut tiny_gas = valid_base_sepolia_config();
+        tiny_gas.eip155 = Some(Eip155Config {
+            chain_id: 84532,
+            required_confirmations: 2,
+            gas_limit: 5,
+        });
+        assert!(tiny_gas.validate().is_err());
     }
 
     #[test]
