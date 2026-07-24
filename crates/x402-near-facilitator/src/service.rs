@@ -720,7 +720,16 @@ async fn settle_inner(state: &AppState, request: Request) -> Response {
     };
     // The neutral verified payment drives the journal; the NEAR reservation row
     // still records delegate identity fields (generalized at migration 0002).
-    let VerifiedDetail::Near(near_verified) = &verified.detail;
+    // The EVM reservation path (populating the eip155 journal columns) lands in
+    // 5d-B; until then this endpoint is NEAR-only. EVM is not yet configurable,
+    // so this branch is unreachable at runtime.
+    let VerifiedDetail::Near(near_verified) = &verified.detail else {
+        return ApiError::unavailable(
+            "evm_reservation_unsupported",
+            "EVM settlement reservation is not yet wired in this build",
+        )
+        .into_response();
+    };
     if verified.payment_hash != decoded.payment_hash {
         return ApiError::unavailable(
             "verification_inconsistent",
@@ -794,7 +803,7 @@ async fn settle_inner(state: &AppState, request: Request) -> Response {
                 &SettleResponse::failure(
                     "duplicate_settlement",
                     None,
-                    Some(verified.payer.to_string()),
+                    Some(verified.payer.clone()),
                     String::new(),
                     state.config.network.clone(),
                 ),
@@ -1145,7 +1154,7 @@ async fn run_new_settlement(
             return;
         }
         Err(rejection) => {
-            terminal_protocol_failure(&state, settlement_id, rejection.reason, None, None).await;
+            terminal_protocol_failure(&state, settlement_id, &rejection.reason, None, None).await;
             return;
         }
     };
@@ -1347,7 +1356,7 @@ fn yocto_near_metric(value: u128) -> f64 {
 async fn terminal_protocol_failure(
     state: &AppState,
     settlement_id: Uuid,
-    reason: &'static str,
+    reason: &str,
     payer: Option<String>,
     transaction: Option<String>,
 ) {

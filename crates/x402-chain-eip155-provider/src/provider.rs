@@ -80,6 +80,20 @@ impl fmt::Debug for EvmVerifiedPayment {
     }
 }
 
+/// A snapshot of the facilitator signer's account and the chain head, read in
+/// one shot to pin a submission and gate readiness.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EvmHead {
+    /// Latest block number (the EVM analog of NEAR's chain block height).
+    pub block_number: u64,
+    /// The signer's next account (transaction) nonce.
+    pub account_nonce: u64,
+    /// The signer's native-gas (ETH) balance in wei.
+    pub gas_balance_wei: u128,
+    /// The signer (`from`) address.
+    pub signer_address: Address,
+}
+
 /// A neutral verification rejection: a machine reason plus whether it reflects an
 /// unavailable/ambiguous RPC lookup (→ retry / 503) rather than a definitively
 /// invalid payment (→ reject). Mirrors the NEAR provider's rejection shape.
@@ -432,6 +446,36 @@ impl EvmChainProvider {
         Ok(u128::try_from(balance).unwrap_or(u128::MAX))
     }
 
+    /// A one-shot snapshot of the signer's account nonce and gas balance at the
+    /// current block — the EVM signer head the settlement engine journals and
+    /// gates on.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EvmRpcError`] if any of the block/nonce/balance lookups fail.
+    pub async fn head(&self) -> Result<EvmHead, EvmRpcError> {
+        let inner = self.upstream.inner();
+        let address = self.signer.address();
+        let block_number = inner
+            .get_block_number()
+            .await
+            .map_err(|error| EvmRpcError::Rpc(error.to_string()))?;
+        let account_nonce = inner
+            .get_transaction_count(address)
+            .await
+            .map_err(|error| EvmRpcError::Rpc(error.to_string()))?;
+        let balance = inner
+            .get_balance(address)
+            .await
+            .map_err(|error| EvmRpcError::Rpc(error.to_string()))?;
+        Ok(EvmHead {
+            block_number,
+            account_nonce,
+            gas_balance_wei: u128::try_from(balance).unwrap_or(u128::MAX),
+            signer_address: address,
+        })
+    }
+
     /// Broadcast a signed settlement transaction raw. The outcome is always
     /// treated as `Pending` by the engine (never terminal at submission), and the
     /// transaction hash is already known from the journaled `EvmPrepared`. A
@@ -456,9 +500,9 @@ impl EvmChainProvider {
 
     /// Prepare a durable, signed settlement transaction for a verified payment:
     /// encode the ERC-3009 call (choosing the overload from the payer signature),
-    /// pin the signer's next account nonce and the current fee market (RPC), and
-    /// sign offline. The returned [`EvmPrepared`] is journaled and broadcast; it is
-    /// never re-signed.
+    /// pin the given account nonce (from the journaled head) and the current fee
+    /// market (RPC), and sign offline. The returned [`EvmPrepared`] is journaled
+    /// and broadcast; it is never re-signed.
     ///
     /// The fee envelope is fixed into the signed transaction — see the
     /// fee-immutability note in `docs/evm-v2-design.md`.
@@ -470,13 +514,13 @@ impl EvmChainProvider {
     pub async fn prepare(
         &self,
         payment: &EvmVerifiedPayment,
+        account_nonce: u64,
     ) -> Result<EvmPrepared, EvmPrepareError> {
         let calldata = settlement_calldata(
             &payment.authorization,
             payment.signature(),
             &payment.payment_hash,
         )?;
-        let account_nonce = self.account_nonce().await?;
         let fees = self.fee_envelope().await?;
         let head = EvmSignerHead {
             chain_id: self.chain_id,
@@ -541,6 +585,20 @@ impl EvmChainProvider {
             head_block,
             self.required_confirmations,
         ))
+    }
+
+    /// Reconcile by a hex transaction-hash string — the neutral form the journal
+    /// stores — so callers need not handle EVM hash types. A malformed hash is a
+    /// journal corruption and surfaces as an [`EvmRpcError`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EvmRpcError`] if the hash is malformed or a lookup fails.
+    pub async fn reconcile_hash(&self, tx_hash: &str) -> Result<EvmReconcileStatus, EvmRpcError> {
+        let hash = tx_hash
+            .parse::<B256>()
+            .map_err(|_| EvmRpcError::Rpc(format!("malformed transaction hash: {tx_hash}")))?;
+        self.reconcile(hash).await
     }
 
     /// Probe that the connected RPC reports the expected chain id and a live head.

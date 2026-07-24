@@ -6449,6 +6449,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "x402-chain-eip155-provider",
  "x402-chain-near",
  "x402-facilitator-local",
  "x402-types",

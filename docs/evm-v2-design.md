@@ -208,6 +208,31 @@ heart of the durable path (no RPC, no clock, golden-tested):
   keeps the submission and rebroadcasts the same bytes; the ERC-3009 nonce makes
   that idempotent). `classify_confirmations` is unit-tested at the N boundary and
   for a confirmed revert; the RPC lookups are 5e-live.
+
+### As built — increment 5d-A (engine wiring)
+
+`chain.rs` now dispatches to `ChainProvider::Evm(Box<EvmChainProvider>)` (boxed —
+it wraps the alloy stack). Every neutral method has an EVM arm mapping the
+provider's types to the neutral vocabulary: `verify`→`VerifiedPayment`/
+`VerifiedDetail::Evm` (asset-guarded; `payment_hash` = EIP-712 digest; caip2
+network), `prepare` (now `async`, Option A) reuses the journaled head's nonce +
+fetches fees, `broadcast`/`rebroadcast`→`Pending`, `reconcile_status` maps
+confirmation-depth verdicts (`Terminal`/`Mined`→`Pending`/`Unknown`),
+`signer_head`/`backup_signer_head`→one `head()` snapshot (EVM has no backup RPC).
+Neutralized for multi-chain: `VerifyRejection.reason` and `PrepareError::Provider`
+are now owned `String`; `signer_head` returns a neutral `SignerHeadError`;
+`terminal_protocol_failure`/`record_settlement_result` take `&str`. EVM
+`signer_public_key` = the address, so the store's relayer-policy keys stay
+consistent. All error types are discarded at the engine's call sites
+(`map_err(|_| …)`), so neutralizing them is behavior-neutral for NEAR (55 lib
+tests unchanged). **Deferred to 5d-B** (needs the Postgres recovery gate): the
+`/verify` **reservation** path (`NewSettlement` writes NEAR delegate columns —
+EVM must populate the eip155 journal columns) and the **recovery** path
+(`reconcile_prepared`/`validate_stored_transaction` are NEAR-coupled: `CryptoHash`/
+`AccountId` parse, Borsh decode + sig verify, delegate-height expiry,
+nonce-quarantine — EVM needs RLP-decode + signer-recover, no quarantine/expiry).
+Until 5d-C wires config/construction, EVM is not constructable, so both deferred
+branches are unreachable and guarded (the `/verify` one returns a clear error).
 - **signing**: `sign_settlement_transaction` builds a `TxEip1559` around the
   calldata and signs it (`signature_hash` → `sign_hash_sync` → `into_signed` →
   `TxEnvelope::Eip1559`), returning `EvmPrepared { tx_hash, signer_address,

@@ -211,12 +211,15 @@ impl Metrics {
         self.relayer_quarantined.record(u64::from(quarantined), &[]);
     }
 
-    pub fn record_settlement_result(&self, result: &'static str, reason: &'static str) {
+    // NOTE (5e): NEAR reasons are a fixed low-cardinality set; EVM verify reasons
+    // can carry upstream detail. Bound EVM reasons to a fixed category set before
+    // Base mainnet so this metric label stays low-cardinality.
+    pub fn record_settlement_result(&self, result: &'static str, reason: &str) {
         self.settlement_results.add(
             1,
             &[
                 KeyValue::new("result", result),
-                KeyValue::new("reason", reason),
+                KeyValue::new("reason", reason.to_owned()),
             ],
         );
     }

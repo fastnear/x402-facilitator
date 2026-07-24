@@ -14,6 +14,11 @@ use std::fmt;
 use near_primitives::hash::CryptoHash;
 use near_primitives::types::AccountId;
 use near_primitives::views::FinalExecutionOutcomeView;
+use x402_chain_eip155_provider::prepare::EvmPrepared;
+use x402_chain_eip155_provider::provider::{
+    EvmChainProvider, EvmHead, EvmReconcileStatus, EvmTerminalOutcome, EvmVerifiedPayment,
+    EvmVerifyRejection,
+};
 use x402_chain_near::{
     NearChainProvider, NearRpcError, PreparedTransaction as NearPrepared, RelayerHead,
     TransactionLookup, VerificationFailure as NearVerificationFailure, VerificationPolicy,
@@ -29,6 +34,9 @@ use x402_types::proto;
 pub enum ChainProvider {
     /// A NEAR delegate-settlement provider.
     Near(NearChainProvider),
+    /// An EVM (eip155) ERC-3009 settlement provider. Boxed: it wraps the alloy
+    /// provider stack and is much larger than the NEAR variant.
+    Evm(Box<EvmChainProvider>),
 }
 
 impl ChainProvider {
@@ -37,8 +45,12 @@ impl ChainProvider {
     /// concrete `NearChainProvider` directly to stage journal fixtures.
     #[must_use]
     pub fn as_near(&self) -> &NearChainProvider {
-        let Self::Near(provider) = self;
-        provider
+        match self {
+            Self::Near(provider) => provider,
+            // Test-only accessor for staging NEAR journal fixtures; the EVM tests
+            // never reach it. Abort (not `panic!`) honors the crate's no-panic lint.
+            Self::Evm(_) => std::process::abort(),
+        }
     }
 
     /// The facilitator signer/relayer account identity (NEAR account id / EVM
@@ -47,6 +59,7 @@ impl ChainProvider {
     pub fn signer_account_id(&self) -> String {
         match self {
             Self::Near(provider) => provider.relayer_account_id().to_string(),
+            Self::Evm(provider) => provider.signer_address().to_string(),
         }
     }
 
@@ -56,6 +69,9 @@ impl ChainProvider {
     pub fn signer_public_key(&self) -> String {
         match self {
             Self::Near(provider) => provider.relayer_public_key().to_string(),
+            // EVM has no distinct public key; the address doubles as the signer
+            // identity so the store's relayer-policy keys stay consistent.
+            Self::Evm(provider) => provider.signer_address().to_string(),
         }
     }
 
@@ -73,13 +89,14 @@ impl ChainProvider {
                     && provider.rpc_final_block().await.is_ok()
                     && provider.backup_rpc_final_block().await.is_ok()
             }
+            Self::Evm(provider) => provider.readiness_probe().await,
         }
     }
 
     /// A fresh snapshot of the signer and chain head, used to gate readiness and
     /// prepare a submission. For NEAR this also enforces that the relayer key is
     /// full-access (the underlying `relayer_status` errors otherwise).
-    pub async fn signer_head(&self) -> Result<SignerHead, NearRpcError> {
+    pub async fn signer_head(&self) -> Result<SignerHead, SignerHeadError> {
         match self {
             Self::Near(provider) => {
                 let status = provider.relayer_status().await?;
@@ -91,6 +108,13 @@ impl ChainProvider {
                     signer_public_key: provider.relayer_public_key().to_string(),
                     signer_balance_atomic: status.account.amount.as_yoctonear(),
                 })
+            }
+            Self::Evm(provider) => {
+                let head = provider
+                    .head()
+                    .await
+                    .map_err(|error| SignerHeadError(error.to_string()))?;
+                Ok(evm_head_to_signer_head(&head))
             }
         }
     }
@@ -122,6 +146,27 @@ impl ChainProvider {
                     detail: VerifiedDetail::Near(near),
                 })
             }
+            Self::Evm(provider) => {
+                // The EVM scheme carries its own limits in the signed ERC-3009
+                // authorization; the NEAR gas policy does not apply.
+                let _ = policy;
+                let evm = provider
+                    .verify(request)
+                    .await
+                    .map_err(VerifyRejection::from_evm)?;
+                Ok(VerifiedPayment {
+                    payer: evm.payer.to_string(),
+                    payment_hash: evm.payment_hash.0,
+                    requirements: Requirements {
+                        network: provider.caip2().to_string(),
+                        asset: evm.asset.to_string(),
+                        pay_to: evm.pay_to.to_string(),
+                        amount: u128::try_from(evm.amount).unwrap_or(u128::MAX),
+                        amount_decimal: evm.amount.to_string(),
+                    },
+                    detail: VerifiedDetail::Evm(evm),
+                })
+            }
         }
     }
 
@@ -136,9 +181,8 @@ impl ChainProvider {
         payment: &VerifiedPayment,
         head: &SignerHead,
     ) -> Result<Prepared, PrepareError> {
-        match self {
-            Self::Near(provider) => {
-                let VerifiedDetail::Near(near_payment) = &payment.detail;
+        match (self, &payment.detail) {
+            (Self::Near(provider), VerifiedDetail::Near(near_payment)) => {
                 // The neutral head carries the block reference as a string; NEAR
                 // round-trips it back to a `CryptoHash` (base58, lossless). A
                 // parse failure is impossible for a well-formed head and is
@@ -156,7 +200,7 @@ impl ChainProvider {
                 };
                 let prepared = provider
                     .prepare_outer_transaction(near_payment, relayer_head)
-                    .map_err(PrepareError::Provider)?;
+                    .map_err(|error| PrepareError::Provider(error.to_string()))?;
                 Ok(Prepared {
                     submit_bytes: prepared.signed_transaction_bytes().to_vec(),
                     submit_hash: prepared.transaction_hash.to_string(),
@@ -166,6 +210,25 @@ impl ChainProvider {
                     detail: PreparedDetail::Near(prepared),
                 })
             }
+            (Self::Evm(provider), VerifiedDetail::Evm(evm_payment)) => {
+                let account_nonce = u64::try_from(head.signer_nonce)
+                    .map_err(|_| PrepareError::InvalidSignerHead)?;
+                let prepared = provider
+                    .prepare(evm_payment, account_nonce)
+                    .await
+                    .map_err(|error| PrepareError::Provider(error.to_string()))?;
+                Ok(Prepared {
+                    submit_bytes: prepared.signed_tx_rlp().to_vec(),
+                    submit_hash: prepared.tx_hash.to_string(),
+                    signer_id: prepared.signer_address.to_string(),
+                    signer_public_key: prepared.signer_address.to_string(),
+                    signer_nonce: u128::from(prepared.account_nonce),
+                    detail: PreparedDetail::Evm(prepared),
+                })
+            }
+            // A provider/detail chain mismatch is an impossible invariant
+            // violation (verify pairs them); refuse rather than cross chains.
+            _ => Err(PrepareError::InvalidSignerHead),
         }
     }
 
@@ -176,15 +239,17 @@ impl ChainProvider {
     /// must be resolved by reconciliation. (EVM will always return `Pending`
     /// until its confirmation-depth policy is met.)
     pub async fn broadcast(&self, prepared: &Prepared, payment: &VerifiedPayment) -> BroadcastOutcome {
-        match self {
-            Self::Near(provider) => {
-                let PreparedDetail::Near(near_prepared) = &prepared.detail;
+        match (self, &prepared.detail, &payment.detail) {
+            (
+                Self::Near(provider),
+                PreparedDetail::Near(near_prepared),
+                VerifiedDetail::Near(near_payment),
+            ) => {
                 match provider
                     .broadcast_exact(near_prepared.signed_transaction_bytes())
                     .await
                 {
                     Ok(TransactionLookup::Final(outcome)) => {
-                        let VerifiedDetail::Near(near_payment) = &payment.detail;
                         match interpret_near_final(
                             &outcome,
                             near_prepared.transaction_hash,
@@ -206,6 +271,16 @@ impl ChainProvider {
                     }
                 }
             }
+            (Self::Evm(provider), PreparedDetail::Evm(evm_prepared), _) => {
+                // An EVM outcome is never trusted at submission: submit the raw
+                // bytes and always report Pending. A send error is recoverable —
+                // reconciliation rebroadcasts the same journaled bytes.
+                let _ = provider.broadcast_raw(evm_prepared.signed_tx_rlp()).await;
+                BroadcastOutcome::Pending
+            }
+            // Provider/detail chain mismatch (impossible); stay pending so the
+            // durable bytes are never lost.
+            _ => BroadcastOutcome::Pending,
         }
     }
 
@@ -272,6 +347,23 @@ impl ChainProvider {
                 }
                 ReconcileStatus::verdict(ReconcileVerdict::Ambiguous)
             }
+            Self::Evm(provider) => {
+                // EVM reconciles on the transaction hash alone; the NEAR signer/
+                // payer/asset identity checks live inside the provider's verify.
+                let _ = (signer, payer, asset);
+                match provider.reconcile_hash(submit_hash).await {
+                    Ok(EvmReconcileStatus::Terminal(outcome)) => ReconcileStatus::verdict(
+                        ReconcileVerdict::Terminal(evm_terminal_to_neutral(&outcome)),
+                    ),
+                    Ok(EvmReconcileStatus::Mined { .. } | EvmReconcileStatus::Pending) => {
+                        ReconcileStatus::verdict(ReconcileVerdict::Pending)
+                    }
+                    Ok(EvmReconcileStatus::Unknown) => {
+                        ReconcileStatus::verdict(ReconcileVerdict::Unknown)
+                    }
+                    Err(_) => ReconcileStatus::verdict(ReconcileVerdict::Ambiguous),
+                }
+            }
         }
     }
 
@@ -279,7 +371,7 @@ impl ChainProvider {
     /// and expiry cross-checks during recovery. Carries height and nonce only;
     /// balance is not observed from the backup head (`signer_balance_atomic` is
     /// zero and unused by the recovery cross-checks).
-    pub async fn backup_signer_head(&self) -> Result<SignerHead, NearRpcError> {
+    pub async fn backup_signer_head(&self) -> Result<SignerHead, SignerHeadError> {
         match self {
             Self::Near(provider) => {
                 let head = provider.backup_relayer_head().await?;
@@ -291,6 +383,15 @@ impl ChainProvider {
                     signer_public_key: provider.relayer_public_key().to_string(),
                     signer_balance_atomic: 0,
                 })
+            }
+            // EVM has no independent backup RPC; the primary head is authoritative
+            // (integrity comes from confirmation depth, not dual-RPC agreement).
+            Self::Evm(provider) => {
+                let head = provider
+                    .head()
+                    .await
+                    .map_err(|error| SignerHeadError(error.to_string()))?;
+                Ok(evm_head_to_signer_head(&head))
             }
         }
     }
@@ -336,6 +437,14 @@ impl ChainProvider {
                     BroadcastOutcome::Pending
                 }
             },
+            Self::Evm(provider) => {
+                // Rebroadcast the exact journaled bytes; an EVM outcome is never
+                // terminal at submission, and the single-use ERC-3009 nonce makes
+                // a re-submit idempotent.
+                let _ = (submit_hash, payer, asset);
+                let _ = provider.broadcast_raw(submit_bytes).await;
+                BroadcastOutcome::Pending
+            }
         }
     }
 }
@@ -388,7 +497,8 @@ impl fmt::Debug for VerifiedPayment {
 pub enum VerifiedDetail {
     /// NEAR: the decoded, signature-checked delegate payment.
     Near(NearVerified),
-    // Evm(...) added in Phase 1.
+    /// EVM: the verified ERC-3009 authorization + payer signature.
+    Evm(EvmVerifiedPayment),
 }
 
 /// A snapshot of the facilitator's signer/relayer and chain head, used to
@@ -447,7 +557,8 @@ impl fmt::Debug for Prepared {
 pub enum PreparedDetail {
     /// NEAR: the prepared outer meta-transaction.
     Near(NearPrepared),
-    // Evm(...) added in Phase 1.
+    /// EVM: the durable signed ERC-3009 settlement transaction.
+    Evm(EvmPrepared),
 }
 
 /// The result of broadcasting a prepared submission.
@@ -513,10 +624,11 @@ pub struct TerminalOutcome {
 /// A neutral verification rejection: the machine reason plus the flag the engine
 /// needs to choose an HTTP disposition, without exposing the per-chain failure
 /// enum.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct VerifyRejection {
-    /// Stable machine reason (e.g. `insufficient_funds`).
-    pub reason: &'static str,
+    /// Machine reason (e.g. `insufficient_funds`). NEAR reasons are a fixed set;
+    /// EVM reasons carry the upstream detail, so this is owned.
+    pub reason: String,
     /// Whether the failure reflects an unavailable/ambiguous RPC lookup rather
     /// than a definitive invalid payment (engine returns 503, not a rejection).
     pub rpc_ambiguous: bool,
@@ -525,8 +637,15 @@ pub struct VerifyRejection {
 impl VerifyRejection {
     fn from_near(failure: NearVerificationFailure) -> Self {
         Self {
-            reason: failure.reason(),
+            reason: failure.reason().to_owned(),
             rpc_ambiguous: near_verification_is_rpc_ambiguous(failure),
+        }
+    }
+
+    fn from_evm(rejection: EvmVerifyRejection) -> Self {
+        Self {
+            reason: rejection.reason,
+            rpc_ambiguous: rejection.rpc_ambiguous,
         }
     }
 }
@@ -550,8 +669,58 @@ const fn near_verification_is_rpc_ambiguous(failure: NearVerificationFailure) ->
 pub enum PrepareError {
     /// The neutral signer head did not carry a valid chain reference or nonce.
     InvalidSignerHead,
-    /// The chain provider failed to build or sign the submission.
-    Provider(NearRpcError),
+    /// The chain provider failed to build or sign the submission (the string is
+    /// the per-chain failure, opaque to the engine).
+    Provider(String),
+}
+
+/// The signer/chain head could not be read (an RPC was unavailable, or the NEAR
+/// relayer key is not full-access). Opaque at the engine boundary — any head
+/// failure is treated as a readiness fault; the string is for logs.
+#[derive(Debug)]
+pub struct SignerHeadError(String);
+
+impl fmt::Display for SignerHeadError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for SignerHeadError {}
+
+impl From<NearRpcError> for SignerHeadError {
+    fn from(error: NearRpcError) -> Self {
+        Self(error.to_string())
+    }
+}
+
+/// Map an [`EvmHead`] snapshot into the neutral signer head. EVM has no
+/// block-hash signing anchor, so `chain_block_ref` is empty; the address doubles
+/// as both signer id and public key so the store's relayer-policy keys align.
+fn evm_head_to_signer_head(head: &EvmHead) -> SignerHead {
+    let address = head.signer_address.to_string();
+    SignerHead {
+        chain_block_height: head.block_number,
+        chain_block_ref: String::new(),
+        signer_nonce: u128::from(head.account_nonce),
+        signer_id: address.clone(),
+        signer_public_key: address,
+        signer_balance_atomic: head.gas_balance_wei,
+    }
+}
+
+/// Map an EVM terminal outcome into the neutral terminal outcome. The recipient
+/// balance delta is not observed here (`None`); the fee is the facilitator's
+/// actual wei gas cost.
+fn evm_terminal_to_neutral(outcome: &EvmTerminalOutcome) -> TerminalOutcome {
+    TerminalOutcome {
+        success: outcome.success,
+        tx_hash: outcome.tx_hash.to_string(),
+        recipient_delta_atomic: None,
+        fee_atomic: outcome.fee_wei,
+        gas_units: outcome.gas_used,
+        failure_detail: (!outcome.success).then(|| "evm_execution_reverted".to_owned()),
+    }
 }
 
 /// The neutral verdict from reconciling a submission against both RPCs.
@@ -665,18 +834,6 @@ fn final_outcomes_conflict<T: Eq>(primary: Option<&T>, backup: Option<&T>) -> bo
     matches!((primary, backup), (Some(primary), Some(backup)) if primary != backup)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::final_outcomes_conflict;
-
-    #[test]
-    fn conflicting_final_results_fail_closed() {
-        assert!(!final_outcomes_conflict(Some(&1_u8), Some(&1_u8)));
-        assert!(final_outcomes_conflict(Some(&1_u8), Some(&2_u8)));
-        assert!(!final_outcomes_conflict(Some(&1_u8), None));
-    }
-}
-
 /// Sum gas and tokens burnt across the transaction and its receipts. (Mirrors
 /// the reconcile path's `execution_cost` in `service`; that copy is removed when
 /// reconcile moves behind this provider.)
@@ -692,4 +849,16 @@ fn execution_cost_near(outcome: &FinalExecutionOutcomeView) -> (u64, u128) {
         tokens = tokens.saturating_add(receipt.outcome.tokens_burnt.as_yoctonear());
     }
     (gas, tokens)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::final_outcomes_conflict;
+
+    #[test]
+    fn conflicting_final_results_fail_closed() {
+        assert!(!final_outcomes_conflict(Some(&1_u8), Some(&1_u8)));
+        assert!(final_outcomes_conflict(Some(&1_u8), Some(&2_u8)));
+        assert!(!final_outcomes_conflict(Some(&1_u8), None));
+    }
 }
