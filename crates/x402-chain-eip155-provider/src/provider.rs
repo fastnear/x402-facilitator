@@ -330,6 +330,41 @@ impl EvmChainProvider {
         })
     }
 
+    /// Connect from configuration primitives: parse the secp256k1 signer key (a
+    /// mode-0600 credential) and the USDC asset `0x` address, then
+    /// [`Self::connect`]. Keeps alloy types out of the binary. On a signer-key
+    /// parse failure the key material — including its length or shape — is never
+    /// placed in the returned error.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EvmConnectError::Config`] if the signer key or asset address is
+    /// malformed, or an upstream error from [`Self::connect`].
+    pub async fn connect_from_config(
+        chain_id: u64,
+        rpc_urls: &[Url],
+        signer_key: &str,
+        asset: &str,
+        required_confirmations: u64,
+        gas_limit: u64,
+    ) -> Result<Self, EvmConnectError> {
+        let signer = signer_key.parse::<PrivateKeySigner>().map_err(|_| {
+            EvmConnectError::Config("signer key is not a valid secp256k1 hex key".to_owned())
+        })?;
+        let asset = asset.parse::<Address>().map_err(|error| {
+            EvmConnectError::Config(format!("asset is not a valid 0x address: {error}"))
+        })?;
+        Self::connect(
+            chain_id,
+            rpc_urls,
+            signer,
+            asset,
+            required_confirmations,
+            gas_limit,
+        )
+        .await
+    }
+
     /// The facilitator signer (`from`) address.
     #[must_use]
     pub fn signer_address(&self) -> Address {

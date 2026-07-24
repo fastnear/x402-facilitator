@@ -464,7 +464,7 @@ fn build_state(database: &TestDatabase, rpc: MockRpc, backup_rpc: MockRpc) -> Te
         config,
         database.store.clone(),
         auth,
-        facilitator,
+        Some(facilitator),
         ChainProvider::Near(provider),
         readiness,
         Metrics::for_tests(),

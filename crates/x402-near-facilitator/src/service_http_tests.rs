@@ -381,7 +381,7 @@ fn build_application(store: PgStore, metrics: Metrics) -> TestResult<TestApplica
         config,
         store,
         auth,
-        facilitator,
+        Some(facilitator),
         ChainProvider::Near(provider),
         readiness.clone(),
         metrics,

@@ -328,7 +328,7 @@ async fn reconcile_command(config_path: &Path) -> Result<()> {
         config.clone(),
         store,
         auth,
-        build_facilitator(provider.clone()),
+        Some(build_facilitator(provider.clone())),
         ChainProvider::Near(provider),
         readiness.clone(),
         telemetry.metrics(),

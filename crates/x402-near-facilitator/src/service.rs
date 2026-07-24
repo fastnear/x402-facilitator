@@ -38,7 +38,9 @@ use x402_chain_near::{
     signed_delegate_hash, signed_transaction_hash,
 };
 use x402_facilitator_local::FacilitatorLocal;
+use x402_types::chain::ChainId;
 use x402_types::facilitator::Facilitator;
+use x402_types::proto::{SupportedPaymentKind, SupportedResponse};
 use x402_types::scheme::SchemeRegistry;
 
 use crate::VERSION;
@@ -68,7 +70,11 @@ pub struct AppState {
     config: Arc<ServiceConfig>,
     store: PgStore,
     auth: ApiKeyAuthenticator,
-    facilitator: Arc<FacilitatorLocal<SchemeRegistry>>,
+    // The x402-rs contract surface for /verify and /supported. `Some` for NEAR
+    // (V2NearExact + NearChainProvider); `None` for EVM, whose read-only verify is
+    // served directly by the neutral provider (the upstream V2Eip155Exact blueprint
+    // is generic over `&P` and cannot be registered via this assembly).
+    facilitator: Option<Arc<FacilitatorLocal<SchemeRegistry>>>,
     provider: Arc<ChainProvider>,
     readiness: ReadinessState,
     rates: Arc<RateLimiter>,
@@ -83,7 +89,7 @@ impl AppState {
         config: ServiceConfig,
         store: PgStore,
         auth: ApiKeyAuthenticator,
-        facilitator: FacilitatorLocal<SchemeRegistry>,
+        facilitator: Option<FacilitatorLocal<SchemeRegistry>>,
         provider: ChainProvider,
         readiness: ReadinessState,
         metrics: Metrics,
@@ -93,7 +99,7 @@ impl AppState {
             config: Arc::new(config),
             store,
             auth,
-            facilitator: Arc::new(facilitator),
+            facilitator: facilitator.map(Arc::new),
             provider: Arc::new(provider),
             readiness,
             rates: Arc::new(RateLimiter::default()),
@@ -344,13 +350,41 @@ const fn readiness_word(value: bool) -> &'static str {
 }
 
 async fn supported(State(state): State<AppState>) -> Response {
-    match state.facilitator.supported().await {
-        Ok(response) => axum::Json(response).into_response(),
-        Err(_) => ApiError::unavailable(
-            "facilitator_unavailable",
-            "supported payment methods are temporarily unavailable",
-        )
-        .into_response(),
+    let response = match &state.facilitator {
+        Some(facilitator) => match facilitator.supported().await {
+            Ok(response) => response,
+            Err(_) => {
+                return ApiError::unavailable(
+                    "facilitator_unavailable",
+                    "supported payment methods are temporarily unavailable",
+                )
+                .into_response();
+            }
+        },
+        // EVM has no registered facilitator; advertise the single configured
+        // eip155 exact scheme, USDC network, and the facilitator signer address
+        // clients embed in the payment authorization.
+        None => evm_supported(&state),
+    };
+    axum::Json(response).into_response()
+}
+
+/// Synthesize the `/supported` response for an EVM instance from config. NEAR
+/// derives the equivalent from its registered facilitator handlers.
+fn evm_supported(state: &AppState) -> SupportedResponse {
+    let mut signers = std::collections::HashMap::new();
+    if let Ok(chain_id) = state.config.network.parse::<ChainId>() {
+        signers.insert(chain_id, vec![state.provider.signer_account_id()]);
+    }
+    SupportedResponse {
+        kinds: vec![SupportedPaymentKind {
+            x402_version: 2,
+            scheme: "exact".to_owned(),
+            network: state.config.network.clone(),
+            extra: None,
+        }],
+        extensions: vec![],
+        signers,
     }
 }
 
@@ -435,7 +469,19 @@ async fn verify_inner(state: &AppState, request: Request) -> Response {
         .into_response();
     };
     let deadline = Duration::from_secs(state.config.request_limits.verify_timeout_seconds);
-    let result = tokio::time::timeout(deadline, state.facilitator.verify(&parsed.raw)).await;
+    let Some(facilitator) = &state.facilitator else {
+        // EVM: the neutral provider verifies (no registered facilitator surface).
+        let response = match tokio::time::timeout(deadline, evm_verify(state, &parsed)).await {
+            Ok(response) => response,
+            Err(_) => {
+                ApiError::unavailable("verification_timeout", "EVM verification timed out")
+                    .into_response()
+            }
+        };
+        drop(permit);
+        return response;
+    };
+    let result = tokio::time::timeout(deadline, facilitator.verify(&parsed.raw)).await;
     drop(permit);
     match result {
         Ok(Ok(response)) => {
@@ -455,6 +501,93 @@ async fn verify_inner(state: &AppState, request: Request) -> Response {
         )
         .into_response(),
     }
+}
+
+/// Verify an EVM payment through the neutral provider (EVM has no registered
+/// facilitator surface). Mirrors the NEAR verify disposition: a valid payment
+/// returns `isValid: true`; an ambiguous on-chain lookup is a 503; a definitive
+/// rejection returns `isValid: false` with the machine reason.
+async fn evm_verify(state: &AppState, parsed: &ParsedRequest) -> Response {
+    let policy = VerificationPolicy {
+        max_sponsored_gas: state.config.max_inner_gas,
+    };
+    match state.provider.verify(&parsed.raw, &policy).await {
+        Ok(verified) => protocol_json(StatusCode::OK, &VerifyResponse::valid(verified.payer)),
+        Err(rejection) if rejection.rpc_ambiguous => {
+            ApiError::unavailable("rpc_unavailable", "EVM verification is temporarily unavailable")
+                .into_response()
+        }
+        Err(rejection) => protocol_json(
+            StatusCode::OK,
+            &VerifyResponse::invalid(&rejection.reason, None, None),
+        ),
+    }
+}
+
+/// The NEAR x402-rs scheme gate for settlement: route the raw payment through the
+/// registered facilitator and short-circuit if it is unavailable or reports the
+/// payment invalid (deferring to a prior settlement on a race). Returns
+/// `Some(response)` to short-circuit settlement, `None` to proceed to the durable
+/// journal. EVM has no registered facilitator and skips this gate. The body is
+/// unchanged from the former inline gate.
+async fn facilitator_verify_gate(
+    state: &AppState,
+    facilitator: &FacilitatorLocal<SchemeRegistry>,
+    parsed: &ParsedRequest,
+    payment_hash: &[u8; 32],
+    client_id: Uuid,
+    fingerprint: &[u8; 32],
+) -> Option<Response> {
+    let routed = facilitator.verify(&parsed.raw).await;
+    let Ok(routed) = routed else {
+        if let Some(response) = prior_settlement_race_response(
+            state,
+            client_id,
+            parsed.meta.payment_identifier.as_deref(),
+            payment_hash,
+            fingerprint,
+        )
+        .await
+        {
+            return Some(response);
+        }
+        return Some(
+            ApiError::unavailable(
+                "verification_unavailable",
+                "NEAR verification is temporarily unavailable",
+            )
+            .into_response(),
+        );
+    };
+    if !routed
+        .0
+        .get("isValid")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        if let Some(response) = prior_settlement_race_response(
+            state,
+            client_id,
+            parsed.meta.payment_identifier.as_deref(),
+            payment_hash,
+            fingerprint,
+        )
+        .await
+        {
+            return Some(response);
+        }
+        if response_is_rpc_ambiguous(&routed.0) {
+            return Some(
+                ApiError::unavailable(
+                    "rpc_unavailable",
+                    "NEAR verification is temporarily unavailable",
+                )
+                .into_response(),
+            );
+        }
+        return Some(settle_from_verify_failure(&routed.0, &state.config.network).into_response());
+    }
+    None
 }
 
 async fn settle(State(state): State<AppState>, request: Request) -> Response {
@@ -625,52 +758,22 @@ async fn settle_inner(state: &AppState, request: Request) -> Response {
         }
     }
 
-    // Route through the registered x402-rs scheme before exposing the
-    // chain-specific VerifiedPayment needed by the durable journal.
-    let routed = state.facilitator.verify(&parsed.raw).await;
-    let Ok(routed) = routed else {
-        if let Some(response) = prior_settlement_race_response(
+    // Route the raw payment through the registered x402-rs scheme before exposing
+    // the chain-specific VerifiedPayment needed by the durable journal. EVM has no
+    // registered facilitator; its neutral provider.verify below is the sole
+    // verification, so the gate is skipped for EVM.
+    if let Some(facilitator) = &state.facilitator
+        && let Some(response) = facilitator_verify_gate(
             state,
-            client.id,
-            parsed.meta.payment_identifier.as_deref(),
+            facilitator,
+            &parsed,
             &decoded.payment_hash,
+            client.id,
             &fingerprint,
         )
         .await
-        {
-            return response;
-        }
-        return ApiError::unavailable(
-            "verification_unavailable",
-            "NEAR verification is temporarily unavailable",
-        )
-        .into_response();
-    };
-    if !routed
-        .0
-        .get("isValid")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
     {
-        if let Some(response) = prior_settlement_race_response(
-            state,
-            client.id,
-            parsed.meta.payment_identifier.as_deref(),
-            &decoded.payment_hash,
-            &fingerprint,
-        )
-        .await
-        {
-            return response;
-        }
-        if response_is_rpc_ambiguous(&routed.0) {
-            return ApiError::unavailable(
-                "rpc_unavailable",
-                "NEAR verification is temporarily unavailable",
-            )
-            .into_response();
-        }
-        return settle_from_verify_failure(&routed.0, &state.config.network).into_response();
+        return response;
     }
     let policy = VerificationPolicy {
         max_sponsored_gas: state.config.max_inner_gas,
