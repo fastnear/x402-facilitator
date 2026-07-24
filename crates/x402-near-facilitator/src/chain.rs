@@ -128,7 +128,10 @@ impl ChainProvider {
     /// Build and sign a submission from a verified payment and a signer-head
     /// snapshot. The returned [`Prepared`] is durable: recovery rebroadcasts its
     /// exact bytes and must never re-sign.
-    pub fn prepare(
+    ///
+    /// `async` because a chain may need the network to price a submission (EVM
+    /// reads the fee market); the NEAR path signs offline and never awaits.
+    pub async fn prepare(
         &self,
         payment: &VerifiedPayment,
         head: &SignerHead,

@@ -1159,7 +1159,7 @@ async fn run_new_settlement(
         .await;
         return;
     };
-    let Ok(prepared) = state.provider.prepare(&payment, &signer_head) else {
+    let Ok(prepared) = state.provider.prepare(&payment, &signer_head).await else {
         terminal_service_failure(
             &state,
             settlement_id,
