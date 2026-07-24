@@ -250,9 +250,72 @@ rebroadcast (never terminal-fail on nonce-advance) — safe against transient RP
 false-negatives; the degenerate "nonce genuinely consumed by another tx" case
 retries benignly (a single serialized signer makes it unreachable in normal
 operation). `validate_signed_transaction` is golden-tested (accepts our bytes;
-rejects wrong hash / wrong signer / tampering). **Still deferred to 5d-C-era**:
-the `/verify` EVM reservation write (`NewSettlement` eip155 columns + store) — it
-pairs with construction, and EVM is unreachable until then.
+rejects wrong hash / wrong signer / tampering).
+
+### As built — increment 5d-C (durable EVM journal + config + construction)
+
+EVM is now fully constructable and runnable end to end (three commits).
+
+**Design fork (Mike's call): dedicated EVM columns.** The durable journal honors
+migration 0002's dedicated eip155 columns (`signer_address`, `submitted_tx_rlp`,
+`submitted_tx_hash`, `signer_account_nonce`, `evm_authorization`) as the source of
+truth, rather than overloading NEAR's `outer_transaction_*`/`relayer_*` columns.
+This keeps NEAR's columns pristine and needs no new migration (0002 was built for
+it); the 5d-A/5d-B code that had read the NEAR columns is corrected here. NEAR's
+`String` delegate fields stay populated via `COALESCE(delegate_*, '')` in the
+SELECTs, so every NEAR read is unchanged while EVM rows carry harmless empties
+(never read on the NEAR path — a single DB per instance means the provider kind,
+not a per-row flag, selects the reconcile path).
+
+- **store**: `SettlementRecord` gains `signer_address`/`submitted_tx_*`;
+  `NewSettlement` gains `chain_kind` + `evm_authorization` + `signer_address` and
+  makes `delegate_*` `Option`; `claim_settlement` writes the eip155 authorization
+  identity (satisfying 0002's `chain_authorization_check`); new `mark_prepared_evm`
+  writes the signed RLP + nonce + `required_confirmations` (satisfying the eip155
+  `nonterminal_submission_check`). A DB round-trip test
+  (`evm_reservation_and_prepare_populate_dedicated_columns`) is the regression gate
+  for the conditional CHECKs.
+- **engine**: the reservation write branches the authorization identity by chain
+  (NEAR delegate vs EVM ERC-3009 authorization + signer). `settle_prepared_evm` is
+  the EVM forward tail — journal → `mark_submitted` → broadcast, with leadership
+  re-checked before the durable transition and before the broadcast, but **no NEAR
+  nonce recheck/quarantine** (idempotent via the single-use ERC-3009 nonce).
+  `reconcile_prepared` takes its EVM branch *before* the NEAR relayer-identity guard
+  (which reads NEAR-only columns) and guards the journaled `signer_address` itself.
+- **config**: `validate_eip155` + `Eip155Config { chain_id, required_confirmations,
+  gas_limit }` (an optional, defaulted block, so NEAR configs parse unchanged). It
+  binds the deployment tier to a specific Base chain (mainnet 8453 / Sepolia 84532),
+  the canonical Circle USDC per chain, `network == eip155:<chain_id>`, a `0x` signer
+  address, `required_confirmations >= 1`, a sane `gas_limit` band, and
+  `max_inner_gas == 0` (a NEAR-only ceiling, sentinel for EVM).
+- **binary**: `main.rs` branches construction on `chain_kind`. EVM parses the
+  secp256k1 signer (a mode-0600 credential, **never logged** — a parse failure
+  never carries key material) and the `0x` asset via
+  `EvmChainProvider::connect_from_config`, then `ChainProvider::Evm(Box::new(..))`.
+  The relayer/signer-identity upsert is unified through the neutral
+  `signer_account_id`/`signer_public_key` accessors. The `ChainKind::Near` build
+  guard is removed.
+
+**HTTP surface — why EVM does not register a `FacilitatorLocal`.** The upstream
+`V2Eip155Exact` scheme builder is *generic* (`impl<P> X402SchemeFacilitatorBuilder<P>
+for V2Eip155Exact where P: Eip155MetaTransactionProvider + ChainProviderOps +
+'static`). The `SchemeBlueprints`/`and_register` assembly requires
+`for<'a> X402SchemeFacilitatorBuilder<&'a P>`, i.e. `&'a P: … + 'static` under a
+higher-ranked lifetime — which is unsatisfiable for any concrete provider (a
+`&'a P` is not `'static`). NEAR works only because our local `x402-chain-near`
+provides a *concrete* `impl X402SchemeFacilitatorBuilder<&NearChainProvider> for
+V2NearExact` with no `'static` bound. Rather than fight this (a newtype hits the
+same `'static` wall), EVM serves its read-only surface through the neutral
+provider: `AppState.facilitator` is `Option` (`None` for EVM); `/supported`
+synthesizes the single eip155 exact kind + signer address (`evm_supported`);
+`/verify` runs `provider.verify` (`evm_verify`); and the settle verify-gate (NEAR's
+scheme routing, extracted verbatim into `facilitator_verify_gate`) is skipped —
+the neutral `provider.verify` already performs the real ERC-3009 verification.
+
+Gate: NEAR byte-identical — 60 lib + 2 admin + 12 provider tests green, clippy
+pedantic + deny unwrap/expect/panic clean on both crates. **Deferred to 5e**
+(needs live RPC, so not unit-testable): `base-sepolia.json`, the funded secp256k1
+signer key file, and the live Base Sepolia integration drills.
 - **signing**: `sign_settlement_transaction` builds a `TxEip1559` around the
   calldata and signs it (`signature_hash` → `sign_hash_sync` → `into_signed` →
   `TxEnvelope::Eip1559`), returning `EvmPrepared { tx_hash, signer_address,
