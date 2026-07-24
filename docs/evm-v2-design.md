@@ -233,6 +233,26 @@ EVM must populate the eip155 journal columns) and the **recovery** path
 nonce-quarantine — EVM needs RLP-decode + signer-recover, no quarantine/expiry).
 Until 5d-C wires config/construction, EVM is not constructable, so both deferred
 branches are unreachable and guarded (the `/verify` one returns a clear error).
+
+### As built — increment 5d-B (recovery path)
+
+`reconcile_prepared` gains an early-return EVM branch right after the neutral
+identity check; the NEAR body below is byte-identical (recovery suite: 13 recovery
++ 4 store + leadership tests unchanged and green). `reconcile_prepared_evm`
+validates the journaled RLP via the provider crate's offline
+`validate_signed_transaction` (decode + hash-match + secp256k1 signer-recover — the
+EVM analog of NEAR's Borsh + signature validation), then resolves by the neutral
+verdict: `Terminal`→finalize; `Pending` (mined `< N`, or mempool)→wait;
+`Unknown`→re-submit the exact bytes (idempotent via the ERC-3009 nonce;
+confirmation depth guards reorg); `Ambiguous`→unready + retry. **No NEAR
+nonce-quarantine or delegate-expiry.** Boundary: on `Unknown` we always
+rebroadcast (never terminal-fail on nonce-advance) — safe against transient RPC
+false-negatives; the degenerate "nonce genuinely consumed by another tx" case
+retries benignly (a single serialized signer makes it unreachable in normal
+operation). `validate_signed_transaction` is golden-tested (accepts our bytes;
+rejects wrong hash / wrong signer / tampering). **Still deferred to 5d-C-era**:
+the `/verify` EVM reservation write (`NewSettlement` eip155 columns + store) — it
+pairs with construction, and EVM is unreachable until then.
 - **signing**: `sign_settlement_transaction` builds a `TxEip1559` around the
   calldata and signs it (`signature_hash` → `sign_hash_sync` → `into_signed` →
   `TxEnvelope::Eip1559`), returning `EvmPrepared { tx_hash, signer_address,

@@ -32,6 +32,7 @@ use tower_http::sensitive_headers::SetSensitiveRequestHeadersLayer;
 use tower_http::trace::{DefaultOnResponse, TraceLayer};
 use tracing::Instrument as _;
 use uuid::Uuid;
+use x402_chain_eip155_provider::prepare::validate_signed_transaction;
 use x402_chain_near::{
     VerificationFailure, VerificationPolicy, decode_signed_delegate, decode_signed_transaction,
     signed_delegate_hash, signed_transaction_hash,
@@ -1549,6 +1550,12 @@ async fn reconcile_prepared(state: &AppState, record: &SettlementRecord) -> Resu
             "journaled relayer identity does not match configured relayer".to_owned(),
         ));
     }
+    // EVM settlements reconcile on a different path — RLP-byte validation,
+    // confirmation depth, and rebroadcast-on-unknown, with no NEAR nonce-quarantine
+    // or delegate-expiry machinery. The NEAR path below is unchanged.
+    if matches!(&*state.provider, ChainProvider::Evm(_)) {
+        return reconcile_prepared_evm(state, record).await;
+    }
     let hash = record
         .outer_transaction_hash
         .as_deref()
@@ -1694,6 +1701,91 @@ async fn reconcile_prepared(state: &AppState, record: &SettlementRecord) -> Resu
         BroadcastOutcome::Pending => {}
     }
     Ok(())
+}
+
+// EVM reconciliation: validate the journaled RLP bytes, then resolve by
+// confirmation depth. No NEAR nonce-quarantine or delegate-expiry — an EVM
+// outcome is terminal only at the required confirmation depth, and an unknown
+// transaction is re-submitted (idempotent via the single-use ERC-3009 nonce).
+async fn reconcile_prepared_evm(
+    state: &AppState,
+    record: &SettlementRecord,
+) -> Result<(), StoreError> {
+    let hash = record
+        .outer_transaction_hash
+        .as_deref()
+        .ok_or_else(|| StoreError::Corrupt("prepared row has no transaction hash".to_owned()))?;
+    let bytes = record
+        .outer_transaction_bytes
+        .as_deref()
+        .ok_or_else(|| StoreError::Corrupt("prepared row has no transaction bytes".to_owned()))?;
+    let signer = record
+        .relayer_account_id
+        .as_deref()
+        .ok_or_else(|| StoreError::Corrupt("prepared row has no signer".to_owned()))?;
+    // Validate the exact persisted bytes before trusting any RPC result: they must
+    // decode to a signed transaction whose hash and recovered signer match.
+    validate_signed_transaction(bytes, hash, signer)
+        .map_err(StoreError::Corrupt)
+        .inspect_err(|_| state.readiness.set_relayer(false))?;
+    let status = state
+        .provider
+        .reconcile_status(hash, signer, &record.payer, &record.asset)
+        .await;
+    match status.verdict {
+        ReconcileVerdict::Terminal(outcome) => {
+            finalize_reconciled_terminal(state, record, outcome).await?;
+            Ok(())
+        }
+        // Mined below the confirmation depth, or still in the mempool: wait.
+        ReconcileVerdict::Pending => Ok(()),
+        ReconcileVerdict::Indeterminate(reason) => {
+            state.readiness.set_reconciliation(false);
+            tracing::warn!(event = "reconciliation_outcome_indeterminate", reason = %reason);
+            Ok(())
+        }
+        ReconcileVerdict::Unknown => {
+            // No receipt: mempool-dropped or reorged out. Re-submit the exact
+            // journaled bytes; the single-use ERC-3009 authorization nonce makes a
+            // re-submit idempotent, and the confirmation-depth policy guards reorg.
+            if record.state == SettlementState::Prepared {
+                state.store.mark_submitted(record.id).await?;
+            }
+            if !can_reconciliation_broadcast(state) {
+                return Err(StoreError::Corrupt(
+                    "leadership lost before reconciliation broadcast".to_owned(),
+                ));
+            }
+            match state
+                .provider
+                .rebroadcast(bytes, hash, &record.payer, &record.asset)
+                .await
+            {
+                BroadcastOutcome::Terminal(outcome) => {
+                    finalize_reconciled_terminal(state, record, outcome).await?;
+                }
+                BroadcastOutcome::Rejected(_) => {
+                    terminal_transaction_rejected(
+                        state,
+                        record.id,
+                        Some(record.payer.clone()),
+                        hash.to_owned(),
+                    )
+                    .await;
+                }
+                BroadcastOutcome::Pending => {}
+            }
+            Ok(())
+        }
+        // EVM reconcile never returns Conflict (no dual-RPC); Ambiguous is a
+        // malformed hash or an RPC error — stay unready and retry.
+        ReconcileVerdict::Conflict | ReconcileVerdict::Ambiguous => {
+            state.readiness.set_reconciliation(false);
+            Err(StoreError::Corrupt(
+                "evm reconciliation was ambiguous".to_owned(),
+            ))
+        }
+    }
 }
 
 fn validate_stored_transaction(

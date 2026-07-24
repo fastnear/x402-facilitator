@@ -23,8 +23,9 @@
 //! covered by deterministic golden tests. The signed transaction pins its gas
 //! fee envelope; see [`EvmFeeEnvelope`] for the operational consequence.
 
+use alloy_consensus::transaction::SignerRecoverable;
 use alloy_consensus::{SignableTransaction, TxEip1559, TxEnvelope};
-use alloy_eips::eip2718::Encodable2718;
+use alloy_eips::eip2718::{Decodable2718, Encodable2718};
 use alloy_eips::eip2930::AccessList;
 use alloy_primitives::{Address, B256, Bytes, TxKind, U256};
 use alloy_signer::SignerSync;
@@ -246,11 +247,42 @@ pub fn sign_settlement_transaction(
     })
 }
 
+/// Validate journaled EVM transaction bytes during recovery: they must decode to
+/// a signed transaction whose hash and recovered signer match the journal, before
+/// any RPC result for this settlement is trusted. Offline and deterministic — the
+/// EVM analog of NEAR's stored-transaction Borsh + signature validation.
+///
+/// # Errors
+///
+/// Returns a describing message if the bytes are malformed, the transaction hash
+/// does not match `expected_tx_hash`, or the recovered signer does not match
+/// `expected_signer` (both compared case-insensitively as `0x` hex).
+pub fn validate_signed_transaction(
+    signed_tx_rlp: &[u8],
+    expected_tx_hash: &str,
+    expected_signer: &str,
+) -> Result<(), String> {
+    let envelope = TxEnvelope::decode_2718(&mut &signed_tx_rlp[..])
+        .map_err(|error| format!("evm transaction bytes are invalid: {error}"))?;
+    if !envelope
+        .tx_hash()
+        .to_string()
+        .eq_ignore_ascii_case(expected_tx_hash)
+    {
+        return Err("evm transaction bytes do not match journaled hash".to_owned());
+    }
+    let signer = envelope
+        .recover_signer()
+        .map_err(|error| format!("evm signer recovery failed: {error}"))?;
+    if !signer.to_string().eq_ignore_ascii_case(expected_signer) {
+        return Err("evm transaction signer does not match journaled signer".to_owned());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_consensus::transaction::SignerRecoverable;
-    use alloy_eips::eip2718::Decodable2718;
     use alloy_primitives::{address, b256, keccak256};
 
     // A throwaway, well-known test private key (secp256k1 scalar = 1). NOT a real
@@ -363,6 +395,51 @@ mod tests {
         let a = sign_settlement_transaction(&signer, head_a, fees, ASSET, calldata.clone())?;
         let b = sign_settlement_transaction(&signer, head_b, fees, ASSET, calldata)?;
         assert_ne!(a.tx_hash, b.tx_hash);
+        Ok(())
+    }
+
+    #[test]
+    fn validate_accepts_our_signed_tx_and_rejects_tampering(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let signer = test_signer()?;
+        let head = EvmSignerHead {
+            chain_id: 84_532,
+            account_nonce: 3,
+        };
+        let fees = EvmFeeEnvelope {
+            gas_limit: 120_000,
+            max_fee_per_gas: 2_000_000_000,
+            max_priority_fee_per_gas: 1_000_000_000,
+        };
+        let calldata = transfer_with_authorization_bytes_calldata(
+            &sample_authorization(),
+            Bytes::from(vec![0xef_u8; 65]),
+        );
+        let prepared = sign_settlement_transaction(&signer, head, fees, ASSET, calldata)?;
+        let hash = prepared.tx_hash.to_string();
+        let address = signer.address().to_string();
+
+        // Accepts the exact journaled bytes.
+        assert!(validate_signed_transaction(prepared.signed_tx_rlp(), &hash, &address).is_ok());
+        // Rejects a mismatched hash and a mismatched signer.
+        assert!(
+            validate_signed_transaction(prepared.signed_tx_rlp(), &B256::ZERO.to_string(), &address)
+                .is_err()
+        );
+        assert!(
+            validate_signed_transaction(
+                prepared.signed_tx_rlp(),
+                &hash,
+                "0x1111111111111111111111111111111111111111",
+            )
+            .is_err()
+        );
+        // Rejects tampered bytes.
+        let mut tampered = prepared.signed_tx_rlp().to_vec();
+        if let Some(byte) = tampered.get_mut(12) {
+            *byte ^= 0xff;
+        }
+        assert!(validate_signed_transaction(&tampered, &hash, &address).is_err());
         Ok(())
     }
 }
