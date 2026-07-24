@@ -269,7 +269,8 @@ async fn admin_cli_migrates_and_enforces_the_full_client_lifecycle() -> TestResu
         sqlx::query_scalar("SELECT count(*) FROM _sqlx_migrations WHERE success = true")
             .fetch_one(&database.scoped)
             .await?;
-    assert_eq!(migration_count, 1);
+    // 0001_initial + 0002_multichain.
+    assert_eq!(migration_count, 2);
 
     let short_pepper = database.directory.write_secret("short-pepper", "short")?;
     let mut short_pepper_args = database.args(&["client", "create"]);
