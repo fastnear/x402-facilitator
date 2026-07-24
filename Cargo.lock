@@ -6367,11 +6367,16 @@ dependencies = [
  "alloy-consensus",
  "alloy-eips",
  "alloy-primitives",
+ "alloy-provider",
  "alloy-signer",
  "alloy-signer-local",
  "alloy-sol-types",
+ "hex",
+ "serde_json",
  "thiserror",
+ "url",
  "x402-chain-eip155",
+ "x402-types",
 ]
 
 [[package]]

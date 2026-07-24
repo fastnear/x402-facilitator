@@ -17,10 +17,15 @@ x402-chain-eip155.workspace = true
 alloy-consensus = { version = "2.1", features = ["k256"] }
 alloy-eips = "2.1"
 alloy-primitives = "1.6"
+alloy-provider = "2.1"
 alloy-signer = "2.1"
 alloy-signer-local = "2.1"
 alloy-sol-types = "1.6"
+hex.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
+url.workspace = true
+x402-types.workspace = true
 
 [lints]
 workspace = true

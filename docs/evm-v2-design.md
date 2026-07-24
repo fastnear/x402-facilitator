@@ -181,6 +181,20 @@ heart of the durable path (no RPC, no clock, golden-tested):
   canonical identity / idempotency anchor and the classifier prehash. Golden
   tests: EOA→vrs, opaque→bytes, 6492-shaped→refused, digest determinism +
   domain separation.
+- **live provider** (`provider.rs`, 5b-ii-B): `EvmChainProvider` wraps upstream's
+  `Eip155ChainProvider` (built via `connect`, which validates the required x402
+  contracts on-chain) plus the facilitator `PrivateKeySigner`. `verify` reuses
+  upstream's authoritative `verify_eip3009_payment` (domain, balance, simulation),
+  guards `asset == configured`, and returns a durable `EvmVerifiedPayment`
+  (payer, `payment_hash`, authorization, signature) for the submit path.
+  `account_nonce` / `gas_balance_wei` snapshot the signer via RPC; `broadcast_raw`
+  performs `eth_sendRawTransaction` and drops the pending-tx watcher (confirmation
+  is the reconcile loop's job, never awaited inline → always `Pending`);
+  `readiness_probe` checks chain-id + live head. These RPC paths are proven in the
+  5e Base Sepolia drills; the offline `classify_verify_error` mapping
+  (on-chain failure → ambiguous/503 vs. verification error → definitive reject) is
+  unit-tested. **Boundary:** EIP-6492 counterfactual signatures are refused at
+  settle; the demo/typical EOA + deployed-wallet paths are covered.
 - **signing**: `sign_settlement_transaction` builds a `TxEip1559` around the
   calldata and signs it (`signature_hash` → `sign_hash_sync` → `into_signed` →
   `TxEnvelope::Eip1559`), returning `EvmPrepared { tx_hash, signer_address,
