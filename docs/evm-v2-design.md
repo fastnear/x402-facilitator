@@ -195,6 +195,19 @@ heart of the durable path (no RPC, no clock, golden-tested):
   (on-chain failure → ambiguous/503 vs. verification error → definitive reject) is
   unit-tested. **Boundary:** EIP-6492 counterfactual signatures are refused at
   settle; the demo/typical EOA + deployed-wallet paths are covered.
+- **prepare + reconcile** (`provider.rs`, completes the settlement logic):
+  `prepare` ties the halves together — `settlement_calldata` (offline) + a fresh
+  account-nonce snapshot + an EIP-1559 fee estimate (`estimate_eip1559_fees`) +
+  the configured `gas_limit` → `sign_settlement_transaction` (offline core) →
+  durable `EvmPrepared`. Gas cap is configured (over-provisioning is free; only
+  the `gas_limit * max_fee` balance reservation matters); the fee cap is the
+  immutable one (caveat above). `reconcile(tx_hash)` looks up the receipt and
+  applies the confirmation-depth policy via the pure `classify_confirmations`:
+  ≥ `required_confirmations` → `Terminal` (reorg-safe, success or definitive
+  revert); `< N` → `Mined`; no receipt → `Unknown` (reorged-out / dropped → engine
+  keeps the submission and rebroadcasts the same bytes; the ERC-3009 nonce makes
+  that idempotent). `classify_confirmations` is unit-tested at the N boundary and
+  for a confirmed revert; the RPC lookups are 5e-live.
 - **signing**: `sign_settlement_transaction` builds a `TxEip1559` around the
   calldata and signs it (`signature_hash` → `sign_hash_sync` → `into_signed` →
   `TxEnvelope::Eip1559`), returning `EvmPrepared { tx_hash, signer_address,

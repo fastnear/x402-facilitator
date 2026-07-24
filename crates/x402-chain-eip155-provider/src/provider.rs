@@ -28,8 +28,13 @@ use x402_chain_eip155::chain::{Eip155ChainReference, Eip155MetaTransactionProvid
 use x402_chain_eip155::v2_eip155_exact::FacilitatorVerifyRequest;
 use x402_chain_eip155::v2_eip155_exact::eip3009::verify_eip3009_payment;
 
-use crate::prepare::Erc3009Authorization;
-use crate::settle::{build_transfer_domain, eip712_transfer_hash};
+use crate::prepare::{
+    Erc3009Authorization, EvmFeeEnvelope, EvmPrepared, EvmSignError, EvmSignerHead,
+    sign_settlement_transaction,
+};
+use crate::settle::{
+    UnsupportedSignature, build_transfer_domain, eip712_transfer_hash, settlement_calldata,
+};
 
 /// A verified EVM payment: the neutral facts the engine keys on, plus the
 /// authorization and signature the durable submit path needs to build calldata.
@@ -131,6 +136,101 @@ pub enum EvmRpcError {
     Rpc(String),
 }
 
+/// Why a settlement could not be prepared.
+#[derive(Debug, thiserror::Error)]
+pub enum EvmPrepareError {
+    /// The payer signature could not be turned into calldata.
+    #[error(transparent)]
+    Signature(#[from] UnsupportedSignature),
+    /// An RPC needed to pin the submission (nonce, fee market) failed.
+    #[error(transparent)]
+    Rpc(#[from] EvmRpcError),
+    /// Signing the settlement transaction failed.
+    #[error(transparent)]
+    Sign(#[from] EvmSignError),
+}
+
+/// The current lifecycle position of a submitted settlement transaction.
+#[derive(Clone, Debug)]
+pub enum EvmReconcileStatus {
+    /// No receipt: not mined yet, dropped from the mempool, or reorged out. The
+    /// engine keeps the submission and rebroadcasts the same journaled bytes — a
+    /// re-submit is idempotent because the ERC-3009 authorization nonce is
+    /// single-use on-chain.
+    Unknown,
+    /// A receipt exists but is not yet anchored to a block (transient).
+    Pending,
+    /// Mined but below the required confirmation depth; wait and re-check.
+    Mined {
+        /// Confirmations observed so far (inclusive of the mining block).
+        confirmations: u64,
+        /// Block the transaction was mined in.
+        block_number: u64,
+    },
+    /// At or beyond the required confirmation depth — reorg-safe and terminal.
+    Terminal(EvmTerminalOutcome),
+}
+
+/// A terminal EVM settlement outcome (mined to the required confirmation depth).
+#[derive(Clone, Debug)]
+pub struct EvmTerminalOutcome {
+    /// Whether the on-chain execution succeeded (receipt status).
+    pub success: bool,
+    /// The settled transaction hash.
+    pub tx_hash: B256,
+    /// Block the transaction was mined in.
+    pub block_number: u64,
+    /// Hash of the mining block, when reported.
+    pub block_hash: Option<B256>,
+    /// Confirmations at the moment terminality was decided.
+    pub confirmations: u64,
+    /// Gas units consumed.
+    pub gas_used: u64,
+    /// Facilitator gas fee actually paid, in wei.
+    pub fee_wei: u128,
+}
+
+/// The receipt facts the confirmation-depth policy needs, extracted from a mined
+/// transaction receipt.
+struct ReceiptFacts {
+    block_number: u64,
+    block_hash: Option<B256>,
+    success: bool,
+    tx_hash: B256,
+    gas_used: u64,
+    fee_wei: u128,
+}
+
+/// Apply the confirmation-depth policy: an outcome is terminal (and reorg-safe)
+/// only at or beyond `required_confirmations`; otherwise it is still `Mined`.
+/// Pure — the "receipt vanished" (reorg) case is handled by the caller as
+/// `Unknown`, keeping the submission live for rebroadcast.
+fn classify_confirmations(
+    receipt: &ReceiptFacts,
+    head_block: u64,
+    required_confirmations: u64,
+) -> EvmReconcileStatus {
+    let confirmations = head_block
+        .saturating_sub(receipt.block_number)
+        .saturating_add(1);
+    if confirmations >= required_confirmations {
+        EvmReconcileStatus::Terminal(EvmTerminalOutcome {
+            success: receipt.success,
+            tx_hash: receipt.tx_hash,
+            block_number: receipt.block_number,
+            block_hash: receipt.block_hash,
+            confirmations,
+            gas_used: receipt.gas_used,
+            fee_wei: receipt.fee_wei,
+        })
+    } else {
+        EvmReconcileStatus::Mined {
+            confirmations,
+            block_number: receipt.block_number,
+        }
+    }
+}
+
 /// The live EVM settlement provider.
 #[derive(Debug)]
 pub struct EvmChainProvider {
@@ -139,6 +239,7 @@ pub struct EvmChainProvider {
     chain_id: u64,
     asset: Address,
     required_confirmations: u64,
+    gas_limit: u64,
 }
 
 impl EvmChainProvider {
@@ -157,6 +258,7 @@ impl EvmChainProvider {
         signer: PrivateKeySigner,
         asset: Address,
         required_confirmations: u64,
+        gas_limit: u64,
     ) -> Result<Self, EvmConnectError> {
         // Upstream builds its signing wallet from a config document; hand it the
         // same key we sign with. The hex key is transient and never logged.
@@ -187,6 +289,7 @@ impl EvmChainProvider {
             chain_id,
             asset,
             required_confirmations,
+            gas_limit,
         })
     }
 
@@ -218,6 +321,16 @@ impl EvmChainProvider {
     #[must_use]
     pub fn required_confirmations(&self) -> u64 {
         self.required_confirmations
+    }
+
+    /// The gas cap fixed into every settlement transaction. Must exceed the
+    /// settle path's actual gas (EOA `transferWithAuthorization` ~70k; a deployed
+    /// EIP-1271 wallet up to ~200k). Over-provisioning is free — gas is billed by
+    /// usage, not by the cap — provided `gas_limit * max_fee_per_gas` stays within
+    /// the signer's balance.
+    #[must_use]
+    pub fn gas_limit(&self) -> u64 {
+        self.gas_limit
     }
 
     /// Verify a raw payment. Reuses upstream's authoritative EIP-3009 checks and,
@@ -341,6 +454,95 @@ impl EvmChainProvider {
         Ok(())
     }
 
+    /// Prepare a durable, signed settlement transaction for a verified payment:
+    /// encode the ERC-3009 call (choosing the overload from the payer signature),
+    /// pin the signer's next account nonce and the current fee market (RPC), and
+    /// sign offline. The returned [`EvmPrepared`] is journaled and broadcast; it is
+    /// never re-signed.
+    ///
+    /// The fee envelope is fixed into the signed transaction — see the
+    /// fee-immutability note in `docs/evm-v2-design.md`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EvmPrepareError`] if the signature is unsupported, an RPC fails,
+    /// or signing fails.
+    pub async fn prepare(
+        &self,
+        payment: &EvmVerifiedPayment,
+    ) -> Result<EvmPrepared, EvmPrepareError> {
+        let calldata = settlement_calldata(
+            &payment.authorization,
+            payment.signature(),
+            &payment.payment_hash,
+        )?;
+        let account_nonce = self.account_nonce().await?;
+        let fees = self.fee_envelope().await?;
+        let head = EvmSignerHead {
+            chain_id: self.chain_id,
+            account_nonce,
+        };
+        sign_settlement_transaction(&self.signer, head, fees, self.asset, calldata)
+            .map_err(EvmPrepareError::Sign)
+    }
+
+    /// Snapshot the current EIP-1559 fee market and pair it with the configured
+    /// gas cap. Priced with alloy's estimator (which carries base-fee headroom);
+    /// the cap is immutable once signed.
+    async fn fee_envelope(&self) -> Result<EvmFeeEnvelope, EvmRpcError> {
+        let estimate = self
+            .upstream
+            .inner()
+            .estimate_eip1559_fees()
+            .await
+            .map_err(|error| EvmRpcError::Rpc(error.to_string()))?;
+        Ok(EvmFeeEnvelope {
+            gas_limit: self.gas_limit,
+            max_fee_per_gas: estimate.max_fee_per_gas,
+            max_priority_fee_per_gas: estimate.max_priority_fee_per_gas,
+        })
+    }
+
+    /// Reconcile a submitted transaction against the chain: look up its receipt
+    /// and apply the confirmation-depth policy. A missing receipt is `Unknown`
+    /// (the engine rebroadcasts the same journaled bytes — safe, since the
+    /// ERC-3009 nonce makes a re-submit idempotent). A terminal outcome is only
+    /// reported at or beyond the required confirmation depth, so it is reorg-safe.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EvmRpcError`] if the receipt or head lookups fail.
+    pub async fn reconcile(&self, tx_hash: B256) -> Result<EvmReconcileStatus, EvmRpcError> {
+        let inner = self.upstream.inner();
+        let Some(receipt) = inner
+            .get_transaction_receipt(tx_hash)
+            .await
+            .map_err(|error| EvmRpcError::Rpc(error.to_string()))?
+        else {
+            return Ok(EvmReconcileStatus::Unknown);
+        };
+        let Some(block_number) = receipt.block_number else {
+            return Ok(EvmReconcileStatus::Pending);
+        };
+        let head_block = inner
+            .get_block_number()
+            .await
+            .map_err(|error| EvmRpcError::Rpc(error.to_string()))?;
+        let facts = ReceiptFacts {
+            block_number,
+            block_hash: receipt.block_hash,
+            success: receipt.status(),
+            tx_hash,
+            gas_used: receipt.gas_used,
+            fee_wei: u128::from(receipt.gas_used).saturating_mul(receipt.effective_gas_price),
+        };
+        Ok(classify_confirmations(
+            &facts,
+            head_block,
+            self.required_confirmations,
+        ))
+    }
+
     /// Probe that the connected RPC reports the expected chain id and a live head.
     /// The chain-liveness half of readiness.
     pub async fn readiness_probe(&self) -> bool {
@@ -372,5 +574,44 @@ mod tests {
         let verification =
             X402SchemeFacilitatorError::PaymentVerification(PaymentVerificationError::Expired);
         assert!(!classify_verify_error(&verification).rpc_ambiguous);
+    }
+
+    fn facts(success: bool) -> ReceiptFacts {
+        ReceiptFacts {
+            block_number: 100,
+            block_hash: Some(B256::repeat_byte(0x01)),
+            success,
+            tx_hash: B256::repeat_byte(0x02),
+            gas_used: 70_000,
+            fee_wei: 140_000_000_000,
+        }
+    }
+
+    #[test]
+    fn terminal_only_at_or_beyond_required_confirmations() {
+        // head 104, mined at 100 -> exactly 5 confirmations, required 5 -> terminal.
+        assert!(matches!(
+            classify_confirmations(&facts(true), 104, 5),
+            EvmReconcileStatus::Terminal(ref outcome)
+                if outcome.confirmations == 5 && outcome.success && outcome.block_number == 100
+        ));
+        // head 103 -> 4 confirmations < 5 -> still mined, not terminal.
+        assert!(matches!(
+            classify_confirmations(&facts(true), 103, 5),
+            EvmReconcileStatus::Mined {
+                confirmations: 4,
+                block_number: 100
+            }
+        ));
+    }
+
+    #[test]
+    fn a_confirmed_revert_is_terminal_failure_not_retried() {
+        // A reverted transaction, once deep enough, is a definitive terminal
+        // failure — never retried into a fresh submission.
+        assert!(matches!(
+            classify_confirmations(&facts(false), 200, 5),
+            EvmReconcileStatus::Terminal(ref outcome) if !outcome.success
+        ));
     }
 }
