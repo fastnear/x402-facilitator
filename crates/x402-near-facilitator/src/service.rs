@@ -44,18 +44,18 @@ use x402_types::scheme::SchemeRegistry;
 use crate::VERSION;
 use crate::auth::{ApiKeyAuthenticator, AuthError, AuthenticatedClient};
 use crate::chain::{
-    BroadcastOutcome, ChainProvider, ReconcileVerdict, SignerHead, TerminalOutcome, VerifiedDetail,
-    VerifiedPayment,
+    BroadcastOutcome, ChainProvider, Prepared, PreparedDetail, ReconcileVerdict, SignerHead,
+    TerminalOutcome, VerifiedDetail, VerifiedPayment,
 };
-use crate::config::ServiceConfig;
+use crate::config::{ChainKind, ServiceConfig};
 use crate::leadership::ReadinessState;
 use crate::protocol::{
     ParsedRequest, SettleResponse, VerifyResponse, decimal_is_at_least, parse_request,
     request_fingerprint,
 };
 use crate::store::{
-    ClaimOutcome, NewSettlement, PgStore, PreparedJournalEntry, SettlementRecord, SettlementState,
-    StoreError, TerminalJournalEntry,
+    ClaimOutcome, EvmPreparedJournalEntry, NewSettlement, PgStore, PreparedJournalEntry,
+    SettlementRecord, SettlementState, StoreError, TerminalJournalEntry,
 };
 use crate::telemetry::Metrics;
 
@@ -719,18 +719,6 @@ async fn settle_inner(state: &AppState, request: Request) -> Response {
             );
         }
     };
-    // The neutral verified payment drives the journal; the NEAR reservation row
-    // still records delegate identity fields (generalized at migration 0002).
-    // The EVM reservation path (populating the eip155 journal columns) lands in
-    // 5d-B; until then this endpoint is NEAR-only. EVM is not yet configurable,
-    // so this branch is unreachable at runtime.
-    let VerifiedDetail::Near(near_verified) = &verified.detail else {
-        return ApiError::unavailable(
-            "evm_reservation_unsupported",
-            "EVM settlement reservation is not yet wired in this build",
-        )
-        .into_response();
-    };
     if verified.payment_hash != decoded.payment_hash {
         return ApiError::unavailable(
             "verification_inconsistent",
@@ -738,6 +726,36 @@ async fn settle_inner(state: &AppState, request: Request) -> Response {
         )
         .into_response();
     }
+    // The neutral verified payment drives the journal; the reservation row records
+    // the chain-specific authorization identity (generalized at migration 0002).
+    // NEAR persists the delegate identity; EVM persists the ERC-3009 authorization
+    // plus the facilitator signer address. The signed submission bytes are
+    // journaled later, at prepare (`mark_prepared` / `mark_prepared_evm`).
+    let (
+        chain_kind,
+        delegate_public_key,
+        delegate_nonce,
+        delegate_max_block_height,
+        evm_authorization,
+        signer_address,
+    ) = match &verified.detail {
+        VerifiedDetail::Near(near_verified) => (
+            ChainKind::Near,
+            Some(near_verified.payer_public_key.to_string()),
+            Some(near_verified.delegate_nonce.to_string()),
+            Some(near_verified.max_block_height.to_string()),
+            None,
+            None,
+        ),
+        VerifiedDetail::Evm(evm_verified) => (
+            ChainKind::Eip155,
+            None,
+            None,
+            None,
+            Some(evm_verified.authorization_json()),
+            Some(state.provider.signer_account_id()),
+        ),
+    };
     let new = NewSettlement {
         id: Uuid::new_v4(),
         api_client_id: client.id,
@@ -751,9 +769,12 @@ async fn settle_inner(state: &AppState, request: Request) -> Response {
         pay_to: parsed.meta.pay_to.clone(),
         amount: parsed.meta.amount.clone(),
         payer: verified.payer.clone(),
-        delegate_public_key: near_verified.payer_public_key.to_string(),
-        delegate_nonce: near_verified.delegate_nonce.to_string(),
-        delegate_max_block_height: near_verified.max_block_height.to_string(),
+        chain_kind,
+        delegate_public_key,
+        delegate_nonce,
+        delegate_max_block_height,
+        evm_authorization,
+        signer_address,
         policy_snapshot: state.config.policy_snapshot(),
         reservation_yocto_near: state.config.sponsorship.reservation_yocto_near.clone(),
         global_daily_budget_yocto_near: state.config.sponsorship.global_daily_yocto_near.clone(),
@@ -1179,6 +1200,15 @@ async fn run_new_settlement(
         .await;
         return;
     };
+    // EVM settles on its own durable path: journal the signed ERC-3009 transaction
+    // into the dedicated eip155 columns, then submit. NEAR's access-key nonce
+    // recheck and quarantine do not apply — an EVM re-submit is idempotent via the
+    // single-use authorization nonce, and reorg safety comes from confirmation
+    // depth at reconcile. The NEAR body below is unchanged.
+    if let PreparedDetail::Evm(_) = &prepared.detail {
+        settle_prepared_evm(&state, settlement_id, &prepared, &payment).await;
+        return;
+    }
     let journal = PreparedJournalEntry {
         settlement_id,
         relayer_account_id: prepared.signer_id.clone(),
@@ -1250,6 +1280,82 @@ async fn run_new_settlement(
         }
         BroadcastOutcome::Pending => {
             // Indeterminate: exact bytes/hash stay submitted for reconciliation.
+            state.readiness.set_reconciliation(false);
+            tracing::warn!(event = "settlement_broadcast_indeterminate");
+        }
+    }
+}
+
+// The EVM forward settlement tail: journal the signed transaction into the
+// dedicated eip155 columns, mark it submitted, and broadcast. An EVM broadcast is
+// never terminal in one shot — confirmation depth resolves it at reconcile — so
+// this leaves the row `submitted` for reconciliation. Leadership is re-checked
+// immediately before the durable transition and again immediately before the
+// external broadcast, mirroring the NEAR path's fencing; NEAR's nonce recheck and
+// quarantine are intentionally absent (idempotent via the single-use ERC-3009
+// authorization nonce).
+async fn settle_prepared_evm(
+    state: &AppState,
+    settlement_id: Uuid,
+    prepared: &Prepared,
+    payment: &VerifiedPayment,
+) {
+    let Some(required_confirmations) = state.provider.required_confirmations() else {
+        // Only an EVM provider reaches this path; a missing depth is a wiring
+        // fault. Stay unready rather than journal an unconfirmable submission.
+        state.readiness.set_reconciliation(false);
+        tracing::error!(event = "evm_required_confirmations_missing");
+        return;
+    };
+    let journal = EvmPreparedJournalEntry {
+        settlement_id,
+        signer_account_nonce: prepared.signer_nonce.to_string(),
+        submitted_tx_rlp: prepared.submit_bytes.clone(),
+        submitted_tx_hash: prepared.submit_hash.clone(),
+        required_confirmations: i32::try_from(required_confirmations).unwrap_or(i32::MAX),
+    };
+    if state.store.mark_prepared_evm(&journal).await.is_err() {
+        state.readiness.set_reconciliation(false);
+        tracing::error!(event = "settlement_prepare_journal_failed");
+        return;
+    }
+    // A prepared transaction is durable from this point; any leadership loss leaves
+    // it for reconciliation and it must never be re-signed.
+    if !state.readiness.can_settle() {
+        state.readiness.set_reconciliation(false);
+        tracing::warn!(event = "settlement_paused_after_prepare");
+        return;
+    }
+    if state.store.mark_submitted(settlement_id).await.is_err() {
+        state.readiness.set_reconciliation(false);
+        tracing::error!(event = "settlement_submit_journal_failed");
+        return;
+    }
+    // Recheck immediately before the external side effect, after the durable state
+    // transition — deliberately adjacent to broadcast.
+    if !state.readiness.can_settle() {
+        state.readiness.set_reconciliation(false);
+        tracing::warn!(event = "settlement_paused_before_broadcast");
+        return;
+    }
+    match state.provider.broadcast(prepared, payment).await {
+        // Not expected for EVM (broadcast always reports Pending), but honor a
+        // terminal outcome if a provider ever produces one.
+        BroadcastOutcome::Terminal(outcome) => {
+            finalize_terminal(state, settlement_id, payment, outcome).await;
+        }
+        BroadcastOutcome::Rejected(_) => {
+            terminal_transaction_rejected(
+                state,
+                settlement_id,
+                Some(payment.payer.clone()),
+                prepared.submit_hash.clone(),
+            )
+            .await;
+        }
+        BroadcastOutcome::Pending => {
+            // Indeterminate by design: the exact bytes/hash stay submitted for
+            // confirmation-depth reconciliation.
             state.readiness.set_reconciliation(false);
             tracing::warn!(event = "settlement_broadcast_indeterminate");
         }
@@ -1540,6 +1646,14 @@ pub async fn reconcile(state: &AppState) -> Result<(), StoreError> {
 // Recovery keeps every exact-byte/hash and dual-RPC decision adjacent.
 #[allow(clippy::too_many_lines)]
 async fn reconcile_prepared(state: &AppState, record: &SettlementRecord) -> Result<(), StoreError> {
+    // EVM settlements reconcile on a different path — signer/RLP validation on the
+    // dedicated eip155 columns, confirmation depth, and rebroadcast-on-unknown,
+    // with no NEAR nonce-quarantine or delegate-expiry machinery. Take it before
+    // the NEAR relayer-identity guard below, which reads NEAR-only columns that are
+    // NULL on an EVM row. The NEAR path below is unchanged.
+    if matches!(&*state.provider, ChainProvider::Evm(_)) {
+        return reconcile_prepared_evm(state, record).await;
+    }
     let expected_account = state.provider.signer_account_id();
     let expected_public_key = state.provider.signer_public_key();
     if record.relayer_account_id.as_deref() != Some(expected_account.as_str())
@@ -1549,12 +1663,6 @@ async fn reconcile_prepared(state: &AppState, record: &SettlementRecord) -> Resu
         return Err(StoreError::Corrupt(
             "journaled relayer identity does not match configured relayer".to_owned(),
         ));
-    }
-    // EVM settlements reconcile on a different path — RLP-byte validation,
-    // confirmation depth, and rebroadcast-on-unknown, with no NEAR nonce-quarantine
-    // or delegate-expiry machinery. The NEAR path below is unchanged.
-    if matches!(&*state.provider, ChainProvider::Evm(_)) {
-        return reconcile_prepared_evm(state, record).await;
     }
     let hash = record
         .outer_transaction_hash
@@ -1711,18 +1819,28 @@ async fn reconcile_prepared_evm(
     state: &AppState,
     record: &SettlementRecord,
 ) -> Result<(), StoreError> {
+    // The EVM submission identity lives in the dedicated eip155 columns
+    // (signer_address / submitted_tx_*), not the NEAR relayer / outer-transaction
+    // columns. Guard the journaled signer against the configured signer first.
+    let expected_signer = state.provider.signer_account_id();
+    let signer = record
+        .signer_address
+        .as_deref()
+        .ok_or_else(|| StoreError::Corrupt("prepared row has no signer".to_owned()))?;
+    if signer != expected_signer {
+        state.readiness.set_relayer(false);
+        return Err(StoreError::Corrupt(
+            "journaled signer does not match configured signer".to_owned(),
+        ));
+    }
     let hash = record
-        .outer_transaction_hash
+        .submitted_tx_hash
         .as_deref()
         .ok_or_else(|| StoreError::Corrupt("prepared row has no transaction hash".to_owned()))?;
     let bytes = record
-        .outer_transaction_bytes
+        .submitted_tx_rlp
         .as_deref()
         .ok_or_else(|| StoreError::Corrupt("prepared row has no transaction bytes".to_owned()))?;
-    let signer = record
-        .relayer_account_id
-        .as_deref()
-        .ok_or_else(|| StoreError::Corrupt("prepared row has no signer".to_owned()))?;
     // Validate the exact persisted bytes before trusting any RPC result: they must
     // decode to a signed transaction whose hash and recovered signer match.
     validate_signed_transaction(bytes, hash, signer)

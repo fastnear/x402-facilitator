@@ -31,6 +31,17 @@ pub enum ChainKind {
     Eip155,
 }
 
+impl ChainKind {
+    /// The `settlements.chain_kind` text discriminator this chain writes.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Near => "near",
+            Self::Eip155 => "eip155",
+        }
+    }
+}
+
 impl Environment {
     pub const fn network(self) -> &'static str {
         match self {

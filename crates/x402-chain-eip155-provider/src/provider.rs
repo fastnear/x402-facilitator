@@ -63,6 +63,29 @@ impl EvmVerifiedPayment {
     pub fn signature(&self) -> &Bytes {
         &self.signature
     }
+
+    /// The ERC-3009 authorization + payer signature as a JSON value for the
+    /// durable journal's `evm_authorization` column. This is the audit record of
+    /// what the payer authorized; the signed transaction bytes (journaled
+    /// separately as the RLP) remain the source of truth for rebroadcast. All
+    /// numbers are decimal strings and all addresses/hashes `0x` hex so the row
+    /// is chain-portable and never lossy.
+    #[must_use]
+    pub fn authorization_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "from": self.authorization.from.to_string(),
+            "to": self.authorization.to.to_string(),
+            "value": self.authorization.value.to_string(),
+            "validAfter": self.authorization.valid_after.to_string(),
+            "validBefore": self.authorization.valid_before.to_string(),
+            "nonce": self.authorization.nonce.to_string(),
+            "signature": self.signature.to_string(),
+            "payer": self.payer.to_string(),
+            "asset": self.asset.to_string(),
+            "payTo": self.pay_to.to_string(),
+            "amount": self.amount.to_string(),
+        })
+    }
 }
 
 impl fmt::Debug for EvmVerifiedPayment {

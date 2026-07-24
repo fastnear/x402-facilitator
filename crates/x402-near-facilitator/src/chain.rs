@@ -75,6 +75,17 @@ impl ChainProvider {
         }
     }
 
+    /// The confirmation depth an EVM settlement must reach before it is trusted
+    /// as terminal. `None` for NEAR, whose finality is single-step (fast-final
+    /// receipt), not confirmation-depth based. Journaled for EVM rows at prepare.
+    #[must_use]
+    pub fn required_confirmations(&self) -> Option<u64> {
+        match self {
+            Self::Near(_) => None,
+            Self::Evm(provider) => Some(provider.required_confirmations()),
+        }
+    }
+
     /// Probe that both configured RPC endpoints report the expected chain and a
     /// final block. This is the chain-liveness half of readiness.
     pub async fn readiness_probe(&self) -> bool {
