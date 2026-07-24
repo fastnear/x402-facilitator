@@ -33,6 +33,7 @@
 #![forbid(unsafe_code)]
 
 pub mod prepare;
+pub mod settle;
 
 // Upstream building blocks the durable provider is assembled from in 5b+. They
 // are re-exported so the settlement provider references stable local paths.

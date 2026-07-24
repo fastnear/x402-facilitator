@@ -170,9 +170,17 @@ heart of the durable path (no RPC, no clock, golden-tested):
   matching upstream's variant numbering. A local binding (vs. reaching into
   upstream's generated items) keeps the surface stable; the encoding is
   byte-identical because the ABI signature is the ERC-3009 standard, and two
-  selector golden tests lock that to `keccak256(sig)[..4]`. **Choosing** the
-  overload from the payer signature shape stays in the provider (5b-ii), next to
-  verification.
+  selector golden tests lock that to `keccak256(sig)[..4]`.
+- **overload selection** (`settle.rs`, 5b-ii): `settlement_calldata` classifies
+  the payer signature with upstream's `StructuredSignature` — so settle uses the
+  *same* interpretation verify did — and maps it: EOA → `(v,r,s)` `_1`; deployed
+  smart wallet (EIP-1271) → `bytes` `_0`; counterfactual EIP-6492 → **rejected**
+  (`UnsupportedSignature::CounterfactualWallet`), a documented v1 boundary
+  (settling it needs an in-tx wallet deploy the durable path does not yet build).
+  `eip712_transfer_hash` (the digest the payer signed) doubles as the payment's
+  canonical identity / idempotency anchor and the classifier prehash. Golden
+  tests: EOA→vrs, opaque→bytes, 6492-shaped→refused, digest determinism +
+  domain separation.
 - **signing**: `sign_settlement_transaction` builds a `TxEip1559` around the
   calldata and signs it (`signature_hash` → `sign_hash_sync` → `into_signed` →
   `TxEnvelope::Eip1559`), returning `EvmPrepared { tx_hash, signer_address,
