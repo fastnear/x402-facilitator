@@ -159,6 +159,36 @@ nonterminal set, so the final readiness state is unchanged.
 - **exactly-once**: the EIP-3009 authorization nonce is single-use on-chain, so
   a re-submit of the same bytes is idempotent at the token contract.
 
+### As built — increment 5b (durable submit core)
+
+`crates/x402-chain-eip155-provider/src/prepare.rs` is the offline, deterministic
+heart of the durable path (no RPC, no clock, golden-tested):
+
+- **calldata**: `transfer_with_authorization_{bytes,vrs}_calldata` encode the two
+  ERC-3009 overloads via a local `sol!` binding — `_0` (opaque `bytes` signature,
+  for EIP-1271 / EIP-6492 wallets) and `_1` (split `v,r,s`, for EOA payers),
+  matching upstream's variant numbering. A local binding (vs. reaching into
+  upstream's generated items) keeps the surface stable; the encoding is
+  byte-identical because the ABI signature is the ERC-3009 standard, and two
+  selector golden tests lock that to `keccak256(sig)[..4]`. **Choosing** the
+  overload from the payer signature shape stays in the provider (5b-ii), next to
+  verification.
+- **signing**: `sign_settlement_transaction` builds a `TxEip1559` around the
+  calldata and signs it (`signature_hash` → `sign_hash_sync` → `into_signed` →
+  `TxEnvelope::Eip1559`), returning `EvmPrepared { tx_hash, signer_address,
+  account_nonce, signed_tx_rlp }`. RFC-6979 determinism makes the RLP + hash a
+  stable function of the inputs, so the journaled submission and its recovery
+  replay are byte-identical; the tx is **never re-signed**. A golden test decodes
+  the RLP back and recovers the signer, end-to-end.
+- **fee immutability caveat (new)**: an EIP-1559 tx pins `max_fee_per_gas`, so a
+  base-fee spike *past the cap* after preparation **strands** the tx (it waits
+  for the market to recede) rather than failing it. The cap must be provisioned
+  with generous headroom. Fee-bump replacement (re-sign the *same account nonce*
+  at a higher cap, superseding the stranded tx) is a deliberate later refinement;
+  until then the operational lever is a generous cap plus the existing
+  reconcile/rebroadcast loop. This is the one EVM failure mode with no NEAR
+  analog (NEAR meta-tx finality does not price gas at submission).
+
 ## Journal / migration 0002
 
 One superset schema (one binary → one migration checksum across all instances;

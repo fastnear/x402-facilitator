@@ -19,16 +19,20 @@
 //!
 //! ## Increment 5 build order (see `docs/evm-v2-design.md`)
 //!
-//! - **5a (this commit):** crate + dependency wiring; the `alloy` tree compiles
-//!   on the pinned toolchain. The upstream building blocks are re-exported below.
-//! - **5b:** `EvmChainProvider` + `verify` (reuse [`V2Eip155Exact`]) and
-//!   `prepare` / `broadcast` (alloy).
+//! - **5a:** crate + dependency wiring; the `alloy` tree compiles on the pinned
+//!   toolchain. The upstream building blocks are re-exported below.
+//! - **5b (in progress):** the durable submit core in [`prepare`] — ERC-3009
+//!   calldata encoding and deterministic EIP-1559 transaction signing that
+//!   yields journalable RLP + hash — plus (next) the `EvmChainProvider` that
+//!   reuses [`V2Eip155Exact`] for `verify` and drives `prepare` / `broadcast`.
 //! - **5c:** `reconcile_status` with the confirmation-depth / reorg re-check.
 //! - **5d:** wire the `ChainProvider::Evm` variant, `validate_eip155`, the
 //!   secp256k1 signer credential, and the EVM readiness branch into the service.
 //! - **5e/5f:** `base-sepolia.json`, integration tests, Base Sepolia drills.
 
 #![forbid(unsafe_code)]
+
+pub mod prepare;
 
 // Upstream building blocks the durable provider is assembled from in 5b+. They
 // are re-exported so the settlement provider references stable local paths.

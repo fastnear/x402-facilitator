@@ -153,6 +153,7 @@ dependencies = [
  "alloy-primitives",
  "alloy-rlp",
  "borsh",
+ "k256",
  "serde",
  "thiserror",
 ]
@@ -6363,6 +6364,13 @@ dependencies = [
 name = "x402-chain-eip155-provider"
 version = "0.2.0"
 dependencies = [
+ "alloy-consensus",
+ "alloy-eips",
+ "alloy-primitives",
+ "alloy-signer",
+ "alloy-signer-local",
+ "alloy-sol-types",
+ "thiserror",
  "x402-chain-eip155",
 ]
 
