@@ -333,8 +333,8 @@ mod tests {
     }
 
     #[test]
-    fn signed_transaction_is_deterministic_and_recovers_to_signer(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn signed_transaction_is_deterministic_and_recovers_to_signer()
+    -> Result<(), Box<dyn std::error::Error>> {
         let signer = test_signer()?;
         let head = EvmSignerHead {
             chain_id: 84_532,
@@ -371,8 +371,7 @@ mod tests {
     }
 
     #[test]
-    fn changing_the_nonce_changes_the_durable_hash(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn changing_the_nonce_changes_the_durable_hash() -> Result<(), Box<dyn std::error::Error>> {
         let signer = test_signer()?;
         let fees = EvmFeeEnvelope {
             gas_limit: 120_000,
@@ -399,8 +398,8 @@ mod tests {
     }
 
     #[test]
-    fn validate_accepts_our_signed_tx_and_rejects_tampering(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn validate_accepts_our_signed_tx_and_rejects_tampering()
+    -> Result<(), Box<dyn std::error::Error>> {
         let signer = test_signer()?;
         let head = EvmSignerHead {
             chain_id: 84_532,
@@ -423,8 +422,12 @@ mod tests {
         assert!(validate_signed_transaction(prepared.signed_tx_rlp(), &hash, &address).is_ok());
         // Rejects a mismatched hash and a mismatched signer.
         assert!(
-            validate_signed_transaction(prepared.signed_tx_rlp(), &B256::ZERO.to_string(), &address)
-                .is_err()
+            validate_signed_transaction(
+                prepared.signed_tx_rlp(),
+                &B256::ZERO.to_string(),
+                &address
+            )
+            .is_err()
         );
         assert!(
             validate_signed_transaction(

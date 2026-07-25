@@ -735,7 +735,10 @@ mod tests {
     fn network_environment_maps_known_networks_to_tiers() {
         assert_eq!(network_environment(MAINNET), Some(Environment::Mainnet));
         assert_eq!(network_environment(TESTNET), Some(Environment::Testnet));
-        assert_eq!(network_environment("eip155:8453"), Some(Environment::Mainnet));
+        assert_eq!(
+            network_environment("eip155:8453"),
+            Some(Environment::Mainnet)
+        );
         assert_eq!(
             network_environment("eip155:84532"),
             Some(Environment::Testnet)

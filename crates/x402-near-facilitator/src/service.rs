@@ -473,10 +473,8 @@ async fn verify_inner(state: &AppState, request: Request) -> Response {
         // EVM: the neutral provider verifies (no registered facilitator surface).
         let response = match tokio::time::timeout(deadline, evm_verify(state, &parsed)).await {
             Ok(response) => response,
-            Err(_) => {
-                ApiError::unavailable("verification_timeout", "EVM verification timed out")
-                    .into_response()
-            }
+            Err(_) => ApiError::unavailable("verification_timeout", "EVM verification timed out")
+                .into_response(),
         };
         drop(permit);
         return response;
@@ -513,10 +511,11 @@ async fn evm_verify(state: &AppState, parsed: &ParsedRequest) -> Response {
     };
     match state.provider.verify(&parsed.raw, &policy).await {
         Ok(verified) => protocol_json(StatusCode::OK, &VerifyResponse::valid(verified.payer)),
-        Err(rejection) if rejection.rpc_ambiguous => {
-            ApiError::unavailable("rpc_unavailable", "EVM verification is temporarily unavailable")
-                .into_response()
-        }
+        Err(rejection) if rejection.rpc_ambiguous => ApiError::unavailable(
+            "rpc_unavailable",
+            "EVM verification is temporarily unavailable",
+        )
+        .into_response(),
         Err(rejection) => protocol_json(
             StatusCode::OK,
             &VerifyResponse::invalid(&rejection.reason, None, None),
@@ -1792,7 +1791,12 @@ async fn reconcile_prepared(state: &AppState, record: &SettlementRecord) -> Resu
     // receipt interpretation, returning a neutral verdict.
     let status = state
         .provider
-        .reconcile_status(&hash.to_string(), signer.as_str(), &record.payer, &record.asset)
+        .reconcile_status(
+            &hash.to_string(),
+            signer.as_str(),
+            &record.payer,
+            &record.asset,
+        )
         .await;
     if status.rpc_failover {
         state.metrics.record_rpc_failover("reconcile_transaction");
@@ -1904,8 +1908,13 @@ async fn reconcile_prepared(state: &AppState, record: &SettlementRecord) -> Resu
             finalize_reconciled_terminal(state, record, outcome).await?;
         }
         BroadcastOutcome::Rejected(_) => {
-            terminal_transaction_rejected(state, record.id, Some(record.payer.clone()), hash.to_string())
-                .await;
+            terminal_transaction_rejected(
+                state,
+                record.id,
+                Some(record.payer.clone()),
+                hash.to_string(),
+            )
+            .await;
         }
         // Still in flight (or an indeterminate final): stay submitted; the outer
         // reconcile loop recomputes readiness from the remaining nonterminal set.

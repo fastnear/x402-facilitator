@@ -249,7 +249,11 @@ impl ChainProvider {
     /// or [`BroadcastOutcome::Pending`] when the outcome is indeterminate and
     /// must be resolved by reconciliation. (EVM will always return `Pending`
     /// until its confirmation-depth policy is met.)
-    pub async fn broadcast(&self, prepared: &Prepared, payment: &VerifiedPayment) -> BroadcastOutcome {
+    pub async fn broadcast(
+        &self,
+        prepared: &Prepared,
+        payment: &VerifiedPayment,
+    ) -> BroadcastOutcome {
         match (self, &prepared.detail, &payment.detail) {
             (
                 Self::Near(provider),

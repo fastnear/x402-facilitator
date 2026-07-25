@@ -346,10 +346,11 @@ impl EvmChainProvider {
             chain_reference: Eip155ChainReference::new(chain_id),
             inner,
         };
-        let upstream =
-            <x402_chain_eip155::chain::Eip155ChainProvider as FromConfig<Eip155ChainConfig>>::from_config(&config)
-                .await
-                .map_err(|error| EvmConnectError::Connect(error.to_string()))?;
+        let upstream = <x402_chain_eip155::chain::Eip155ChainProvider as FromConfig<
+            Eip155ChainConfig,
+        >>::from_config(&config)
+        .await
+        .map_err(|error| EvmConnectError::Connect(error.to_string()))?;
         Ok(Self {
             upstream,
             signer,
@@ -762,7 +763,8 @@ mod tests {
     }
 
     #[test]
-    fn generated_signer_file_is_private_and_round_trips() -> Result<(), Box<dyn std::error::Error>> {
+    fn generated_signer_file_is_private_and_round_trips() -> Result<(), Box<dyn std::error::Error>>
+    {
         let path = std::env::temp_dir().join(format!("x402-evm-keygen-{}.key", std::process::id()));
         let _remove_stale = std::fs::remove_file(&path);
         let address = generate_signer_key_file(&path)?;

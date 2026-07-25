@@ -624,7 +624,8 @@ async fn reserve_payment(
     let payment = context
         .state
         .provider
-        .as_near().verify(
+        .as_near()
+        .verify(
             &request.raw,
             &VerificationPolicy {
                 max_sponsored_gas: 30_000_000_000_000,
@@ -931,7 +932,11 @@ async fn both_unknown_with_advanced_backup_nonce_quarantines_relayer() -> TestRe
                 .relayer_is_active(
                     "near:testnet",
                     TEST_RELAYER,
-                    &restarted.provider.as_near().relayer_public_key().to_string(),
+                    &restarted
+                        .provider
+                        .as_near()
+                        .relayer_public_key()
+                        .to_string(),
                 )
                 .await?
         );
@@ -1010,7 +1015,8 @@ async fn crash_restart_matrix_recovers_each_durable_transition_exactly_once() ->
         let lookup = context
             .state
             .provider
-            .as_near().broadcast_exact(&broadcast.transaction_bytes)
+            .as_near()
+            .broadcast_exact(&broadcast.transaction_bytes)
             .await?;
         let TransactionLookup::Final(outcome) = lookup else {
             return Err(std::io::Error::other(
@@ -1219,7 +1225,12 @@ async fn quarantined_relayer_policy_prevents_preparation_and_broadcast() -> Test
             .quarantine_relayer(
                 "near:testnet",
                 TEST_RELAYER,
-                &context.state.provider.as_near().relayer_public_key().to_string(),
+                &context
+                    .state
+                    .provider
+                    .as_near()
+                    .relayer_public_key()
+                    .to_string(),
                 "test policy stop",
                 "0",
             )
@@ -1382,7 +1393,8 @@ async fn accepted_response_drop_recovers_without_second_transaction() -> TestRes
             context
                 .state
                 .provider
-                .as_near().broadcast_exact(&submitted.transaction_bytes)
+                .as_near()
+                .broadcast_exact(&submitted.transaction_bytes)
                 .await?,
             TransactionLookup::Unknown
         ));

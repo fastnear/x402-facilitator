@@ -52,10 +52,7 @@ pub fn build_transfer_domain(
 /// resistant identity of this payment (idempotency anchor) and the prehash used
 /// to classify the signature in [`settlement_calldata`].
 #[must_use]
-pub fn eip712_transfer_hash(
-    authorization: &Erc3009Authorization,
-    domain: &Eip712Domain,
-) -> B256 {
+pub fn eip712_transfer_hash(authorization: &Erc3009Authorization, domain: &Eip712Domain) -> B256 {
     let transfer = TransferWithAuthorization {
         from: authorization.from,
         to: authorization.to,
@@ -106,9 +103,10 @@ pub fn settlement_calldata(
             eoa.r_bytes(),
             eoa.s_bytes(),
         )),
-        StructuredSignature::EIP1271(bytes) => {
-            Ok(transfer_with_authorization_bytes_calldata(authorization, bytes))
-        }
+        StructuredSignature::EIP1271(bytes) => Ok(transfer_with_authorization_bytes_calldata(
+            authorization,
+            bytes,
+        )),
         StructuredSignature::EIP6492 { .. } => Err(UnsupportedSignature::CounterfactualWallet),
     }
 }
@@ -172,8 +170,8 @@ mod tests {
     }
 
     #[test]
-    fn opaque_contract_signature_dispatches_to_the_bytes_overload(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn opaque_contract_signature_dispatches_to_the_bytes_overload()
+    -> Result<(), Box<dyn std::error::Error>> {
         let auth = authorization(address!("0x1111111111111111111111111111111111111111"));
         let domain = build_transfer_domain("USD Coin", "2", 84_532, ASSET);
         let prehash = eip712_transfer_hash(&auth, &domain);
