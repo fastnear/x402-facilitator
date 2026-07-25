@@ -1,32 +1,24 @@
-use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::Write as _;
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow, bail, ensure};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand};
-use near_crypto::{InMemorySigner, KeyType, SecretKey};
+use near_crypto::{KeyType, SecretKey};
 use near_primitives::types::AccountId;
 use uuid::Uuid;
-use x402_chain_eip155_provider::provider::EvmChainProvider;
-use x402_chain_near::{JsonRpcNearRpc, NearChainProvider, NearNetwork, NearRpc, V2NearExact};
-use x402_facilitator_local::FacilitatorLocal;
 use x402_near_facilitator::auth::{ApiKeyAuthenticator, GeneratedApiKey};
-use x402_near_facilitator::chain::ChainProvider;
+use x402_near_facilitator::bootstrap::build_chain_provider;
 use x402_near_facilitator::config::{
-    ChainKind, Environment, SecretFiles, ServiceConfig, is_evm_address, network_environment,
-    read_secret,
+    Environment, SecretFiles, ServiceConfig, is_evm_address, network_environment, read_secret,
 };
 use x402_near_facilitator::leadership::{LeadershipHandle, ReadinessState};
 use x402_near_facilitator::service::{AppState, reconcile};
 use x402_near_facilitator::store::{ApiClient, PgStore};
 use x402_near_facilitator::telemetry::TelemetryGuard;
-use x402_types::chain::{ChainIdPattern, ChainProviderOps, ChainRegistry};
-use x402_types::scheme::{SchemeBlueprints, SchemeConfig, SchemeRegistry};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -301,18 +293,16 @@ fn key(command: KeyCommand) -> Result<()> {
         KeyCommand::GenerateEvmRelayer { output } => {
             // The secp256k1 key is generated, written mode-0600, and dropped
             // inside the provider crate; only the 0x address is returned here.
-            let address =
-                x402_chain_eip155_provider::provider::generate_signer_key_file(&output)
-                    .with_context(|| format!("create {}", output.display()))?;
+            let address = x402_chain_eip155_provider::provider::generate_signer_key_file(&output)
+                .with_context(|| format!("create {}", output.display()))?;
             println!("{address}");
             Ok(())
         }
     }
 }
 
-// One ordered construction sequence (chain-branched, then leadership + reconcile),
-// mirroring the service binary's startup.
-#[allow(clippy::too_many_lines)]
+// One ordered construction sequence (shared `build_chain_provider`, then
+// leadership + reconcile), mirroring the service binary's startup.
 async fn reconcile_command(config_path: &Path) -> Result<()> {
     let config = ServiceConfig::load(config_path).context("load service config")?;
     let secrets = SecretFiles::from_environment()
@@ -333,61 +323,11 @@ async fn reconcile_command(config_path: &Path) -> Result<()> {
         secrets.api_key_pepper.as_bytes(),
     )
     .context("initialize authentication")?;
-    // Build the settlement provider by chain, mirroring the service binary: NEAR
-    // uses an ed25519 signer + registered facilitator; EVM uses a secp256k1 signer
-    // served through the neutral provider (no registered facilitator).
-    let (facilitator, provider): (Option<FacilitatorLocal<SchemeRegistry>>, ChainProvider) =
-        match config.chain_kind {
-            ChainKind::Near => {
-                let account = AccountId::from_str(&config.relayer_account_id)
-                    .context("parse relayer account")?;
-                let secret = SecretKey::from_str(secrets.relayer_key.as_str())
-                    .context("parse relayer service key")?;
-                let signer = InMemorySigner::from_secret_key(account, secret);
-                let primary: Arc<JsonRpcNearRpc> =
-                    Arc::new(JsonRpcNearRpc::connect(config.primary_rpc_url.as_str()));
-                let backup: Arc<JsonRpcNearRpc> =
-                    Arc::new(JsonRpcNearRpc::connect(config.backup_rpc_url.as_str()));
-                let network = match config.environment {
-                    Environment::Mainnet => NearNetwork::Mainnet,
-                    Environment::Testnet => NearNetwork::Testnet,
-                };
-                let provider = NearChainProvider::new(
-                    network,
-                    Arc::clone(&primary) as Arc<dyn NearRpc>,
-                    Arc::new(signer),
-                )
-                .with_backup_rpc(Arc::clone(&backup) as Arc<dyn NearRpc>);
-                let facilitator = build_facilitator(provider.clone());
-                (Some(facilitator), ChainProvider::Near(provider))
-            }
-            ChainKind::Eip155 => {
-                let eip155 = config
-                    .eip155
-                    .as_ref()
-                    .context("eip155 configuration block missing after validation")?;
-                let rpc_urls = [config.primary_rpc_url.clone(), config.backup_rpc_url.clone()];
-                let provider = EvmChainProvider::connect_from_config(
-                    eip155.chain_id,
-                    &rpc_urls,
-                    secrets.relayer_key.as_str(),
-                    &config.asset,
-                    eip155.required_confirmations,
-                    eip155.gas_limit,
-                )
-                .await
-                .context("connect EVM settlement provider")?;
-                let signer_address = provider.signer_address().to_string();
-                ensure!(
-                    config.relayer_account_id.eq_ignore_ascii_case(&signer_address),
-                    "config relayer_account_id {} does not match the EVM signer address {} \
-                     derived from the key file",
-                    config.relayer_account_id,
-                    signer_address
-                );
-                (None, ChainProvider::Evm(Box::new(provider)))
-            }
-        };
+    // Build the settlement provider exactly as the service binary does, so
+    // recovery runs against the same chain wiring the running service uses.
+    let (facilitator, provider) = build_chain_provider(&config, secrets.relayer_key.as_str())
+        .await
+        .context("construct settlement provider")?;
     let readiness = ReadinessState::default();
     let state = AppState::new(
         config.clone(),
@@ -426,21 +366,6 @@ async fn connect(database_url_file: &Path) -> Result<PgStore> {
     PgStore::connect(database_url.as_str(), 2)
         .await
         .context("connect database")
-}
-
-fn build_facilitator(provider: NearChainProvider) -> FacilitatorLocal<SchemeRegistry> {
-    let chain_id = provider.chain_id();
-    let mut providers = HashMap::new();
-    providers.insert(chain_id.clone(), provider);
-    let chains = ChainRegistry::new(providers);
-    let blueprints = SchemeBlueprints::new().and_register(V2NearExact);
-    let schemes = vec![SchemeConfig {
-        enabled: true,
-        id: "v2-near-exact".to_owned(),
-        chains: ChainIdPattern::exact(chain_id.namespace, chain_id.reference),
-        config: None,
-    }];
-    FacilitatorLocal::new(SchemeRegistry::build(chains, blueprints, &schemes))
 }
 
 fn validate_decimal(value: &str) -> Result<()> {
