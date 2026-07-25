@@ -16,7 +16,9 @@ use x402_chain_near::{JsonRpcNearRpc, NearChainProvider, NearNetwork, NearRpc, V
 use x402_facilitator_local::FacilitatorLocal;
 use x402_near_facilitator::auth::{ApiKeyAuthenticator, GeneratedApiKey};
 use x402_near_facilitator::chain::ChainProvider;
-use x402_near_facilitator::config::{Environment, SecretFiles, ServiceConfig, read_secret};
+use x402_near_facilitator::config::{
+    Environment, SecretFiles, ServiceConfig, is_evm_address, network_environment, read_secret,
+};
 use x402_near_facilitator::leadership::{LeadershipHandle, ReadinessState};
 use x402_near_facilitator::service::{AppState, reconcile};
 use x402_near_facilitator::store::{ApiClient, PgStore};
@@ -240,8 +242,15 @@ async fn client(command: ClientCommand) -> Result<()> {
                     .await
                     .context("load client environment")?,
             )?;
-            if environment.network() != network {
-                bail!("payee network does not match the client environment");
+            // The payee's network must belong to the client's deployment tier
+            // (chain-agnostic): a testnet client accepts near:testnet or
+            // eip155:84532, a mainnet client the mainnet networks — never across
+            // tiers.
+            if network_environment(&network) != Some(environment) {
+                bail!(
+                    "payee network {network} does not match the client environment tier {}",
+                    environment_name(environment)
+                );
             }
             validate_exact_policy(&network, &asset, &pay_to)?;
             store
@@ -401,11 +410,21 @@ fn validate_decimal(value: &str) -> Result<()> {
 }
 
 fn validate_exact_policy(network: &str, asset: &str, pay_to: &str) -> Result<()> {
-    if !matches!(network, "near:mainnet" | "near:testnet") {
-        bail!("network must be near:mainnet or near:testnet");
+    match network {
+        "near:mainnet" | "near:testnet" => {
+            AccountId::from_str(asset).context("parse asset account")?;
+            AccountId::from_str(pay_to).context("parse payee account")?;
+        }
+        "eip155:8453" | "eip155:84532" => {
+            if !is_evm_address(asset) {
+                bail!("asset must be a 0x EVM address for {network}");
+            }
+            if !is_evm_address(pay_to) {
+                bail!("pay_to must be a 0x EVM address for {network}");
+            }
+        }
+        _ => bail!("network must be a supported near or eip155 network"),
     }
-    AccountId::from_str(asset).context("parse asset account")?;
-    AccountId::from_str(pay_to).context("parse payee account")?;
     Ok(())
 }
 

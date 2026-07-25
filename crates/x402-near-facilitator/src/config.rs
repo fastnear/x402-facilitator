@@ -608,10 +608,24 @@ fn ensure_private_mode(_path: &Path) -> Result<(), ConfigError> {
     Ok(())
 }
 
+/// The deployment tier a CAIP-2 network belongs to, or `None` if the network is
+/// not one this facilitator family serves. Used by admin tooling to gate a
+/// payee's network against a client's environment without assuming NEAR (the
+/// tier is chain-agnostic; both `near:testnet` and `eip155:84532` are testnet).
+#[must_use]
+pub fn network_environment(network: &str) -> Option<Environment> {
+    match network {
+        MAINNET | "eip155:8453" => Some(Environment::Mainnet),
+        TESTNET | "eip155:84532" => Some(Environment::Testnet),
+        _ => None,
+    }
+}
+
 /// Whether `value` is a syntactically valid EVM address: `0x` followed by
 /// exactly 40 hex digits. Case is not checked (EIP-55 checksums are accepted in
 /// either case); on-chain identity is case-insensitive.
-fn is_evm_address(value: &str) -> bool {
+#[must_use]
+pub fn is_evm_address(value: &str) -> bool {
     value
         .strip_prefix("0x")
         .is_some_and(|hex| hex.len() == 40 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
@@ -715,6 +729,20 @@ mod tests {
     #[test]
     fn accepts_base_sepolia_eip155_policy() {
         assert!(valid_base_sepolia_config().validate().is_ok());
+    }
+
+    #[test]
+    fn network_environment_maps_known_networks_to_tiers() {
+        assert_eq!(network_environment(MAINNET), Some(Environment::Mainnet));
+        assert_eq!(network_environment(TESTNET), Some(Environment::Testnet));
+        assert_eq!(network_environment("eip155:8453"), Some(Environment::Mainnet));
+        assert_eq!(
+            network_environment("eip155:84532"),
+            Some(Environment::Testnet)
+        );
+        // Unknown chains (wrong eip155 id, other namespaces) are not served.
+        assert_eq!(network_environment("eip155:1"), None);
+        assert_eq!(network_environment("solana:mainnet"), None);
     }
 
     #[test]
