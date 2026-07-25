@@ -2,7 +2,7 @@
 set -eu
 
 usage() {
-  echo "usage: $0 <mainnet|testnet> <vX.Y.Z>" >&2
+  echo "usage: $0 <mainnet|testnet|base-sepolia|base> <vX.Y.Z>" >&2
   exit 2
 }
 
@@ -14,8 +14,12 @@ usage() {
 
 environment=$1
 version=$2
+# The argument is the systemd instance name (%i) and the current-<name>
+# pointer, not a NEAR environment: mainnet/testnet are the NEAR instances,
+# base-sepolia/base the eip155 ones. Enumerated rather than pattern-matched so
+# an unexpected token can never reach the pointer paths below.
 case "$environment" in
-  mainnet | testnet) ;;
+  mainnet | testnet | base-sepolia | base) ;;
   *) usage ;;
 esac
 case "$version" in

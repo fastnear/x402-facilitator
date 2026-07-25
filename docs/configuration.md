@@ -7,6 +7,7 @@ Production files are installed as:
 ```text
 /etc/x402-near-facilitator/mainnet.json
 /etc/x402-near-facilitator/testnet.json
+/etc/x402-near-facilitator/base-sepolia.json
 ```
 
 The service must reject startup when a required key is unknown, a number is
@@ -56,6 +57,54 @@ All NEAR-denominated configuration is expressed as decimal yoctoNEAR strings,
 not floating point. Circle USDC quantities are decimal atomic-unit strings.
 The launch minimum is 1,000 atomic USDC.
 
+## EVM (eip155) instances
+
+An instance selects its chain family with `chain_kind`; it defaults to `near`
+when absent, so the NEAR examples above need no new key. An `eip155` instance
+(Base) adds a required `eip155` block and reuses the same top-level keys with
+chain-appropriate values:
+
+| Key | NEAR (`near`) | Base (`eip155`) |
+| --- | --- | --- |
+| `chain_kind` | `near` (default) | `eip155` |
+| `network` | `near:<network>` | `eip155:<chain-id>` (`eip155:84532`, `eip155:8453`) |
+| `relayer_account_id` | NEAR account ID | the signer's `0x` secp256k1 address |
+| `asset` | NEAR USDC account ID | the chain's canonical Circle USDC `0x` address |
+| `max_inner_gas` | NEAR gas ceiling | `0`; unused, EVM gas comes from the `eip155` block |
+| `RELAYER_KEY_FILE` | ED25519 key | secp256k1 key (`0x`-hex, 32 bytes), same file contract |
+
+The `eip155` block carries the chain-specific settlement parameters:
+
+| Field | Meaning |
+| --- | --- |
+| `chain_id` | must equal the numeric suffix of `network` |
+| `required_confirmations` | confirmation depth (≥ 1) a mined transaction must reach before the journal marks it terminal — the reorg-safety margin |
+| `gas_limit` | per-settlement gas cap for the `transferWithAuthorization` call |
+
+The service binds `network` to its canonical Circle USDC and refuses a
+mismatch, exactly as the NEAR branch binds a network to its USDC account:
+
+- Base mainnet `eip155:8453` → `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`
+- Base Sepolia `eip155:84532` → `0x036CbD53842c5426634e7929541eC2318f3dCF7e`
+
+The sponsorship budgets keep their `*_yocto_near` names but hold the chain's
+native atomic gas unit — **wei** for eip155. In the Base Sepolia example the
+`10000000000000000` hard stop is 0.01 ETH and the `50000000000000000` warning
+is 0.05 ETH.
+
+Base Sepolia isolation, parallel to the NEAR table above:
+
+| Setting | Base Sepolia |
+| --- | --- |
+| Network | `eip155:84532` |
+| Bind address | `127.0.0.1:8404` |
+| Signer | secp256k1 `0x…` address in `relayer_account_id` |
+| Primary RPC | `https://sepolia.base.org` |
+| Backup RPC | `https://base-sepolia-rpc.publicnode.com` |
+| Asset | USDC `0x036CbD53842c5426634e7929541eC2318f3dCF7e` |
+| Balance warning | 0.05 ETH |
+| Hard stop | 0.01 ETH |
+
 ## Database roles
 
 Create independent mainnet and testnet databases in the launch host's
@@ -91,3 +140,10 @@ The effective configuration check must confirm:
 - nonterminal settlement reconciliation has completed.
 
 Only then may `/readyz` return 200.
+
+For an `eip155` instance the network-specific checks read in chain-native
+terms: both RPCs report the configured `chain_id` and a live head; the
+configured asset and minimum match the network; the signer address matches
+`relayer_account_id` and its native-gas balance is above the hard stop. An
+eip155 instance has no FullAccess-key or nonce-quarantine analog, so those two
+NEAR checks are simply not part of its readiness.

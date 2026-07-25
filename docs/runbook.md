@@ -29,6 +29,19 @@ relayer (or "none" for a direct transaction):
 expected maximum sponsored NEAR:
 ```
 
+For an eip155 (Base) funded settlement the same gate applies with chain-native
+fields; the sponsored resource is ETH gas, not NEAR:
+
+```text
+network:
+asset contract (ERC-20 USDC) or native ETH:
+atomic amount:
+payer:
+recipient:
+relayer signer address (or "none" for a direct transaction):
+expected maximum sponsored gas (ETH):
+```
+
 Keep only the confirmation and public transaction evidence. Never record a
 private key, API key, or raw signed delegate in the change ticket.
 
@@ -443,6 +456,175 @@ Then test replay without another broadcast. Only after evidence review:
 ```sh
 sudo systemctl enable x402-near-facilitator@mainnet
 ```
+
+## EVM (Base Sepolia) instance
+
+The first eip155 instance is Base Sepolia (`eip155:84532`): a separate service
+user, port, key, config, and database on the same host, exactly like the NEAR
+instances. It rides the same durable journal; only the chain provider differs.
+Testnet-first — prove it here before Base mainnet.
+
+### Signer key
+
+The EVM signer is a secp256k1 key generated into a create-new mode-0600 file
+with the same no-print contract as the NEAR relayer key. Apply the mandatory
+mutation gate immediately before generating it:
+
+```sh
+x402-near-admin key generate-evm-relayer \
+  --output /secure/path/base-sepolia-relayer-key
+```
+
+The command prints only the `0x` address. Put that address in the config's
+`relayer_account_id`; the service refuses to start unless the loaded key
+derives it. Never reuse the NEAR ED25519 key, and never place a key in a
+command-line argument.
+
+### Fund the signer
+
+Base Sepolia gas is free test ETH from a faucet — not a purchased or bridged
+asset — so this is not a funded mainnet broadcast and does not use the
+funded-broadcast preview. Fund the signer `0x` address to at least the 0.01 ETH
+hard stop (0.06 ETH clears the low-balance alarm with headroom) from a Base
+Sepolia faucet. Base **mainnet** later needs real ETH and is gated by the
+funded-broadcast preview; testnet is not.
+
+### Database
+
+Create a dedicated `x402_base_sepolia` database and roles in the loopback
+cluster, exactly as for a NEAR environment, and apply migrations before the
+binary first uses the schema:
+
+```sh
+x402-near-admin migrate \
+  --database-url-file /secure/path/base-sepolia-migration-url
+```
+
+Migration `0002` is the multi-chain schema the eip155 instance requires.
+
+### Client policy
+
+`/readyz` requires every active client to have an exact payee for the
+instance's network and asset, so provision at least one before expecting a
+green database gate. The client environment is tier-based: a Base Sepolia
+(testnet-tier) client is created with `--environment testnet`, and its payee is
+added on the eip155 network:
+
+```sh
+x402-near-admin client create \
+  --database-url-file /secure/path/base-sepolia-app-url \
+  --pepper-file /secure/path/base-sepolia-pepper \
+  --environment testnet --name <merchant-name>
+x402-near-admin client allow-payee \
+  --database-url-file /secure/path/base-sepolia-app-url \
+  --client-id <uuid> \
+  --network eip155:84532 \
+  --asset 0x036CbD53842c5426634e7929541eC2318f3dCF7e \
+  --pay-to 0x<merchant-address>
+```
+
+`client create` prints the API key once; capture it into the client's secret
+store, never into a ticket or transcript.
+
+### Host wiring
+
+Create the system user and credentials directory alongside the NEAR ones:
+
+```sh
+sudo useradd --system --user-group \
+  --home-dir /nonexistent --shell /usr/sbin/nologin \
+  x402-near-base-sepolia
+test "$(id -gn x402-near-base-sepolia)" = x402-near-base-sepolia
+sudo install -d -m 0700 /etc/x402-near-facilitator/credentials/base-sepolia
+```
+
+Install `base-sepolia.json` (root:service-group 0640) and the pooled URL,
+direct URL, secp256k1 relayer key, and HMAC pepper credentials (root:root 0600)
+under that directory. The packaged `x402-near-facilitator@.service` template
+already covers the instance: `@base-sepolia` reads
+`/etc/x402-near-facilitator/base-sepolia.json` and its own credentials.
+
+Add `base-test.x402.mikedotexe.com` to the existing certificate lineage rather
+than issuing a new one:
+
+```sh
+# UPSERT A/AAAA base-test.x402.mikedotexe.com -> launch host (Route 53).
+sudo certbot certonly --webroot -w /var/www/x402-near-acme \
+  -d x402.mikedotexe.com -d test.x402.mikedotexe.com \
+  -d base-test.x402.mikedotexe.com \
+  --deploy-hook 'systemctl reload nginx'
+```
+
+Install the EVM virtual host next to the NEAR site; it adds only the
+`base-test` name and its `:8404` upstream and relies on the NEAR site's
+deny-by-default catch-all, so both must stay enabled together:
+
+```sh
+release=/opt/x402-near-facilitator/releases/vX.Y.Z
+sudo install -m 0644 "$release/deploy/nginx/x402-base-sepolia.conf" \
+  /etc/nginx/sites-available/x402-base-sepolia
+sudo ln -s /etc/nginx/sites-available/x402-base-sepolia \
+  /etc/nginx/sites-enabled/x402-base-sepolia
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+### Promote and start
+
+Promotion runs the binary's on-host `--version` ABI smoke check before flipping
+`current-base-sepolia`, and touches no other instance:
+
+```sh
+sudo /opt/x402-near-facilitator/releases/vX.Y.Z/deploy/promote-release.sh \
+  base-sepolia vX.Y.Z
+sudo systemctl start x402-near-facilitator@base-sepolia
+sudo systemctl status x402-near-facilitator@base-sepolia --no-pager
+curl --fail --silent http://127.0.0.1:8404/healthz
+curl --fail --silent http://127.0.0.1:8404/readyz
+curl --fail --silent http://127.0.0.1:8404/supported
+```
+
+`/readyz` requires the signer balance above the hard stop, so it stays 503
+until the faucet funds land; `/supported` advertises `eip155:84532` and the
+signer address immediately. Enable at boot only after the acceptance gates:
+
+```sh
+sudo systemctl enable x402-near-facilitator@base-sepolia
+```
+
+### Signer-balance alarm
+
+The metrics timer publishes `SignerBalanceEth{Network=base-sepolia}` every five
+minutes (see `deploy/monitoring/README.md`). Create its CloudWatch alarm;
+`TreatMissingData: breaching` makes it a dead-man switch:
+
+```sh
+aws cloudwatch put-metric-alarm \
+  --region us-east-1 \
+  --alarm-name x402-base-sepolia-signer-balance-low \
+  --namespace x402near \
+  --metric-name SignerBalanceEth \
+  --dimensions Name=Network,Value=base-sepolia \
+  --statistic Minimum \
+  --period 300 --evaluation-periods 3 --threshold 0.06 \
+  --comparison-operator LessThanThreshold \
+  --treat-missing-data breaching \
+  --alarm-actions arn:aws:sns:us-east-1:341982967115:x402-facilitator-alerts \
+  --ok-actions arn:aws:sns:us-east-1:341982967115:x402-facilitator-alerts
+```
+
+### Funded acceptance
+
+Run `scripts/verify-deployment.sh` against the public URL, then the funded
+settlement drill: a paid `/verify`, then a funded `/settle` carrying an
+ERC-3009 `transferWithAuthorization`. Immediately before the facilitator
+broadcasts, show the eip155 funded-broadcast preview from the mutation gate and
+obtain a fresh confirmation. Require the on-chain receipt, the exact recipient
+USDC delta, the terminal journal result at `required_confirmations`, budget
+reconciliation, and sanitized log evidence; then replay the identical request
+and prove no second transfer was created. Finally kill the service after
+broadcast and confirm `reconcile` terminalizes by stored hash and confirmations
+without re-signing.
 
 ## Routine checks
 
