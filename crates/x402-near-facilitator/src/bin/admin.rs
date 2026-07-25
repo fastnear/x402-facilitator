@@ -7,17 +7,19 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use clap::{Args, Parser, Subcommand};
 use near_crypto::{InMemorySigner, KeyType, SecretKey};
 use near_primitives::types::AccountId;
 use uuid::Uuid;
+use x402_chain_eip155_provider::provider::EvmChainProvider;
 use x402_chain_near::{JsonRpcNearRpc, NearChainProvider, NearNetwork, NearRpc, V2NearExact};
 use x402_facilitator_local::FacilitatorLocal;
 use x402_near_facilitator::auth::{ApiKeyAuthenticator, GeneratedApiKey};
 use x402_near_facilitator::chain::ChainProvider;
 use x402_near_facilitator::config::{
-    Environment, SecretFiles, ServiceConfig, is_evm_address, network_environment, read_secret,
+    ChainKind, Environment, SecretFiles, ServiceConfig, is_evm_address, network_environment,
+    read_secret,
 };
 use x402_near_facilitator::leadership::{LeadershipHandle, ReadinessState};
 use x402_near_facilitator::service::{AppState, reconcile};
@@ -308,6 +310,9 @@ fn key(command: KeyCommand) -> Result<()> {
     }
 }
 
+// One ordered construction sequence (chain-branched, then leadership + reconcile),
+// mirroring the service binary's startup.
+#[allow(clippy::too_many_lines)]
 async fn reconcile_command(config_path: &Path) -> Result<()> {
     let config = ServiceConfig::load(config_path).context("load service config")?;
     let secrets = SecretFiles::from_environment()
@@ -328,32 +333,68 @@ async fn reconcile_command(config_path: &Path) -> Result<()> {
         secrets.api_key_pepper.as_bytes(),
     )
     .context("initialize authentication")?;
-    let account =
-        AccountId::from_str(&config.relayer_account_id).context("parse relayer account")?;
-    let secret =
-        SecretKey::from_str(secrets.relayer_key.as_str()).context("parse relayer service key")?;
-    let signer = InMemorySigner::from_secret_key(account, secret);
-    let primary: Arc<JsonRpcNearRpc> =
-        Arc::new(JsonRpcNearRpc::connect(config.primary_rpc_url.as_str()));
-    let backup: Arc<JsonRpcNearRpc> =
-        Arc::new(JsonRpcNearRpc::connect(config.backup_rpc_url.as_str()));
-    let network = match config.environment {
-        Environment::Mainnet => NearNetwork::Mainnet,
-        Environment::Testnet => NearNetwork::Testnet,
-    };
-    let provider = NearChainProvider::new(
-        network,
-        Arc::clone(&primary) as Arc<dyn NearRpc>,
-        Arc::new(signer),
-    )
-    .with_backup_rpc(Arc::clone(&backup) as Arc<dyn NearRpc>);
+    // Build the settlement provider by chain, mirroring the service binary: NEAR
+    // uses an ed25519 signer + registered facilitator; EVM uses a secp256k1 signer
+    // served through the neutral provider (no registered facilitator).
+    let (facilitator, provider): (Option<FacilitatorLocal<SchemeRegistry>>, ChainProvider) =
+        match config.chain_kind {
+            ChainKind::Near => {
+                let account = AccountId::from_str(&config.relayer_account_id)
+                    .context("parse relayer account")?;
+                let secret = SecretKey::from_str(secrets.relayer_key.as_str())
+                    .context("parse relayer service key")?;
+                let signer = InMemorySigner::from_secret_key(account, secret);
+                let primary: Arc<JsonRpcNearRpc> =
+                    Arc::new(JsonRpcNearRpc::connect(config.primary_rpc_url.as_str()));
+                let backup: Arc<JsonRpcNearRpc> =
+                    Arc::new(JsonRpcNearRpc::connect(config.backup_rpc_url.as_str()));
+                let network = match config.environment {
+                    Environment::Mainnet => NearNetwork::Mainnet,
+                    Environment::Testnet => NearNetwork::Testnet,
+                };
+                let provider = NearChainProvider::new(
+                    network,
+                    Arc::clone(&primary) as Arc<dyn NearRpc>,
+                    Arc::new(signer),
+                )
+                .with_backup_rpc(Arc::clone(&backup) as Arc<dyn NearRpc>);
+                let facilitator = build_facilitator(provider.clone());
+                (Some(facilitator), ChainProvider::Near(provider))
+            }
+            ChainKind::Eip155 => {
+                let eip155 = config
+                    .eip155
+                    .as_ref()
+                    .context("eip155 configuration block missing after validation")?;
+                let rpc_urls = [config.primary_rpc_url.clone(), config.backup_rpc_url.clone()];
+                let provider = EvmChainProvider::connect_from_config(
+                    eip155.chain_id,
+                    &rpc_urls,
+                    secrets.relayer_key.as_str(),
+                    &config.asset,
+                    eip155.required_confirmations,
+                    eip155.gas_limit,
+                )
+                .await
+                .context("connect EVM settlement provider")?;
+                let signer_address = provider.signer_address().to_string();
+                ensure!(
+                    config.relayer_account_id.eq_ignore_ascii_case(&signer_address),
+                    "config relayer_account_id {} does not match the EVM signer address {} \
+                     derived from the key file",
+                    config.relayer_account_id,
+                    signer_address
+                );
+                (None, ChainProvider::Evm(Box::new(provider)))
+            }
+        };
     let readiness = ReadinessState::default();
     let state = AppState::new(
         config.clone(),
         store,
         auth,
-        Some(build_facilitator(provider.clone())),
-        ChainProvider::Near(provider),
+        facilitator,
+        provider,
         readiness.clone(),
         telemetry.metrics(),
     );
