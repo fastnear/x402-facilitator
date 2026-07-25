@@ -7,16 +7,25 @@ use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgRow};
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
+use crate::config::ChainKind;
+
 fn embedded_migrator() -> sqlx::migrate::Migrator {
-    let migration = sqlx::migrate::Migration::new(
+    let initial = sqlx::migrate::Migration::new(
         1,
         Cow::Borrowed("initial"),
         sqlx::migrate::MigrationType::Simple,
         Cow::Borrowed(include_str!("../../../migrations/0001_initial.sql")),
         false,
     );
+    let multichain = sqlx::migrate::Migration::new(
+        2,
+        Cow::Borrowed("multichain settlement columns"),
+        sqlx::migrate::MigrationType::Simple,
+        Cow::Borrowed(include_str!("../../../migrations/0002_multichain.sql")),
+        false,
+    );
     sqlx::migrate::Migrator {
-        migrations: Cow::Owned(vec![migration]),
+        migrations: Cow::Owned(vec![initial, multichain]),
         ..sqlx::migrate::Migrator::DEFAULT
     }
 }
@@ -108,6 +117,13 @@ pub struct SettlementRecord {
     pub relayer_nonce: Option<String>,
     pub outer_transaction_bytes: Option<Vec<u8>>,
     pub outer_transaction_hash: Option<String>,
+    // EVM (eip155) submission identity. NULL on NEAR rows; the EVM reconcile path
+    // reads these instead of the NEAR relayer / outer-transaction columns. One DB
+    // per instance means every row shares the instance's chain, so the provider
+    // kind — not this per-row set — selects the reconcile path.
+    pub signer_address: Option<String>,
+    pub submitted_tx_rlp: Option<Vec<u8>>,
+    pub submitted_tx_hash: Option<String>,
     pub terminal_http_status: Option<u16>,
     pub terminal_response_bytes: Option<Vec<u8>>,
     pub created_at: DateTime<Utc>,
@@ -141,9 +157,18 @@ pub struct NewSettlement {
     pub pay_to: String,
     pub amount: String,
     pub payer: String,
-    pub delegate_public_key: String,
-    pub delegate_nonce: String,
-    pub delegate_max_block_height: String,
+    /// The settlement chain; selects which authorization columns are populated.
+    pub chain_kind: ChainKind,
+    // NEAR delegate identity: `Some` for NEAR, `None` for EVM (nullable since
+    // migration 0002; the conditional CHECK re-requires it for NEAR rows).
+    pub delegate_public_key: Option<String>,
+    pub delegate_nonce: Option<String>,
+    pub delegate_max_block_height: Option<String>,
+    // EVM authorization identity: `Some` for EVM, `None` for NEAR. The CHECK
+    // requires both for an eip155 row; the signed RLP is journaled later at
+    // prepare (`mark_prepared_evm`).
+    pub evm_authorization: Option<Value>,
+    pub signer_address: Option<String>,
     pub policy_snapshot: Value,
     pub reservation_yocto_near: String,
     pub global_daily_budget_yocto_near: String,
@@ -160,6 +185,19 @@ pub struct PreparedJournalEntry {
     pub transaction_hash: String,
 }
 
+/// The durable EVM submission journal written at prepare: the signed ERC-3009
+/// transaction (RLP + hash), the account nonce it burns, and the confirmation
+/// depth it must reach to be terminal. `signer_address` and `evm_authorization`
+/// were written at reservation; this completes the eip155 non-terminal CHECK.
+#[derive(Clone, Debug)]
+pub struct EvmPreparedJournalEntry {
+    pub settlement_id: Uuid,
+    pub signer_account_nonce: String,
+    pub submitted_tx_rlp: Vec<u8>,
+    pub submitted_tx_hash: String,
+    pub required_confirmations: i32,
+}
+
 #[derive(Clone, Debug)]
 pub struct TerminalJournalEntry {
     pub settlement_id: Uuid,
@@ -171,6 +209,12 @@ pub struct TerminalJournalEntry {
     pub gas_burnt: Option<String>,
     pub tokens_burnt: Option<String>,
     pub actual_yocto_near: String,
+    /// eip155 reorg-safety audit trail behind the confirmation-depth decision;
+    /// all `None` for NEAR. `mined_block_number` is a decimal string for the
+    /// `NUMERIC(20,0)` column.
+    pub mined_block_number: Option<String>,
+    pub mined_block_hash: Option<String>,
+    pub confirmations: Option<i32>,
 }
 
 #[derive(Clone, Debug)]
@@ -402,11 +446,13 @@ impl PgStore {
             "INSERT INTO settlements ( \
                 id, api_client_id, payment_identifier, payment_hash, request_fingerprint, \
                 state, x402_version, scheme, network, asset, pay_to, amount, payer, \
-                delegate_public_key, delegate_nonce, delegate_max_block_height, \
+                chain_kind, delegate_public_key, delegate_nonce, delegate_max_block_height, \
+                evm_authorization, signer_address, \
                 policy_snapshot, reservation_date, reserved_yocto_near \
              ) VALUES ( \
-                $1, $2, $3, $4, $5, 'reserved', $6, $7, $8, $9, $10, $11::numeric, \
-                $12, $13, $14::numeric, $15::numeric, $16, $17, $18::numeric \
+                $1, $2, $3, $4, $5, 'reserved', $6, $7, $8, $9, $10, $11::numeric, $12, \
+                $13, $14, $15::numeric, $16::numeric, $17, $18, \
+                $19, $20, $21::numeric \
              ) \
              ON CONFLICT DO NOTHING",
         )
@@ -422,9 +468,12 @@ impl PgStore {
         .bind(&new.pay_to)
         .bind(&new.amount)
         .bind(&new.payer)
+        .bind(new.chain_kind.as_str())
         .bind(&new.delegate_public_key)
         .bind(&new.delegate_nonce)
         .bind(&new.delegate_max_block_height)
+        .bind(&new.evm_authorization)
+        .bind(&new.signer_address)
         .bind(&new.policy_snapshot)
         .bind(usage_date)
         .bind(&new.reservation_yocto_near)
@@ -562,6 +611,52 @@ impl PgStore {
         Ok(())
     }
 
+    /// Journal the durable EVM submission at prepare: the signed ERC-3009
+    /// transaction (RLP + hash), the account nonce it burns, and the confirmation
+    /// depth it must reach to be terminal. `signer_address` and
+    /// `evm_authorization` were written at reservation; together these satisfy the
+    /// eip155 non-terminal CHECK. This never touches the NEAR relayer /
+    /// outer-transaction columns, and shares `mark_prepared`'s reserved→prepared
+    /// transition guard and lifecycle event.
+    pub async fn mark_prepared_evm(
+        &self,
+        entry: &EvmPreparedJournalEntry,
+    ) -> Result<(), StoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let result = sqlx::query(
+            "UPDATE settlements SET \
+                state = 'prepared', signer_account_nonce = $2::numeric, \
+                submitted_tx_rlp = $3, submitted_tx_hash = $4, \
+                required_confirmations = $5, prepared_at = now(), updated_at = now() \
+             WHERE id = $1 AND state = 'reserved'",
+        )
+        .bind(entry.settlement_id)
+        .bind(&entry.signer_account_nonce)
+        .bind(&entry.submitted_tx_rlp)
+        .bind(&entry.submitted_tx_hash)
+        .bind(entry.required_confirmations)
+        .execute(&mut *transaction)
+        .await?;
+        if result.rows_affected() != 1 {
+            let from = state_for_update(&mut transaction, entry.settlement_id).await?;
+            return Err(StoreError::Transition {
+                from,
+                to: SettlementState::Prepared.as_str().to_owned(),
+            });
+        }
+        insert_event(
+            &mut transaction,
+            entry.settlement_id,
+            Some(SettlementState::Reserved),
+            SettlementState::Prepared,
+            Some("evm_transaction_persisted"),
+            &serde_json::json!({ "transaction": entry.submitted_tx_hash }),
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
     pub async fn mark_submitted(&self, id: Uuid) -> Result<(), StoreError> {
         let mut transaction = self.pool.begin().await?;
         let result = sqlx::query(
@@ -591,6 +686,10 @@ impl PgStore {
         Ok(())
     }
 
+    // One cohesive terminalization transaction: lock the row, enforce the
+    // idempotent/allowed transition, release the budget, and write the terminal
+    // result plus the eip155 confirmation-depth audit columns.
+    #[allow(clippy::too_many_lines)]
     pub async fn mark_terminal(&self, entry: &TerminalJournalEntry) -> Result<(), StoreError> {
         if !entry.state.is_terminal() {
             return Err(StoreError::Transition {
@@ -667,7 +766,9 @@ impl PgStore {
             "UPDATE settlements SET \
                 state = $2, terminal_http_status = $3, terminal_response_bytes = $4, \
                 error_code = $5, error_detail = $6, gas_burnt = $7::numeric, \
-                tokens_burnt = $8::numeric, finalized_at = now(), updated_at = now() \
+                tokens_burnt = $8::numeric, mined_block_number = $9::numeric, \
+                mined_block_hash = $10, confirmations = $11, \
+                finalized_at = now(), updated_at = now() \
              WHERE id = $1",
         )
         .bind(entry.settlement_id)
@@ -678,6 +779,9 @@ impl PgStore {
         .bind(&entry.error_detail)
         .bind(entry.gas_burnt.as_deref().unwrap_or("0"))
         .bind(entry.tokens_burnt.as_deref().unwrap_or("0"))
+        .bind(entry.mined_block_number.as_deref())
+        .bind(entry.mined_block_hash.as_deref())
+        .bind(entry.confirmations)
         .execute(&mut *transaction)
         .await?;
         insert_event(
@@ -948,24 +1052,33 @@ impl PgStore {
     }
 }
 
+// The delegate identity is NULL on EVM rows (migration 0002); COALESCE to '' so
+// the NEAR-typed record fields stay `String` and every NEAR read is unchanged,
+// while EVM rows (never read on the NEAR path) carry harmless empties. The
+// dedicated EVM submission columns (signer_address / submitted_tx_*) follow the
+// NEAR outer-transaction columns and are NULL on NEAR rows.
 const SETTLEMENT_SELECT_BASE: &str = "SELECT \
     id, api_client_id, payment_identifier, payment_hash, request_fingerprint, state, \
-    network, asset, pay_to, amount::text AS amount, payer, delegate_public_key, \
-    delegate_nonce::text AS delegate_nonce, \
-    delegate_max_block_height::text AS delegate_max_block_height, reservation_date, \
-    reserved_yocto_near::text AS reserved_yocto_near, relayer_account_id, \
+    network, asset, pay_to, amount::text AS amount, payer, \
+    COALESCE(delegate_public_key, '') AS delegate_public_key, \
+    COALESCE(delegate_nonce::text, '') AS delegate_nonce, \
+    COALESCE(delegate_max_block_height::text, '') AS delegate_max_block_height, \
+    reservation_date, reserved_yocto_near::text AS reserved_yocto_near, relayer_account_id, \
     relayer_public_key, relayer_nonce::text AS relayer_nonce, outer_transaction_bytes, \
-    outer_transaction_hash, terminal_http_status, terminal_response_bytes, created_at \
+    outer_transaction_hash, signer_address, submitted_tx_rlp, submitted_tx_hash, \
+    terminal_http_status, terminal_response_bytes, created_at \
     FROM settlements";
 
 const SETTLEMENT_SELECT: &str = "SELECT \
     id, api_client_id, payment_identifier, payment_hash, request_fingerprint, state, \
-    network, asset, pay_to, amount::text AS amount, payer, delegate_public_key, \
-    delegate_nonce::text AS delegate_nonce, \
-    delegate_max_block_height::text AS delegate_max_block_height, reservation_date, \
-    reserved_yocto_near::text AS reserved_yocto_near, relayer_account_id, \
+    network, asset, pay_to, amount::text AS amount, payer, \
+    COALESCE(delegate_public_key, '') AS delegate_public_key, \
+    COALESCE(delegate_nonce::text, '') AS delegate_nonce, \
+    COALESCE(delegate_max_block_height::text, '') AS delegate_max_block_height, \
+    reservation_date, reserved_yocto_near::text AS reserved_yocto_near, relayer_account_id, \
     relayer_public_key, relayer_nonce::text AS relayer_nonce, outer_transaction_bytes, \
-    outer_transaction_hash, terminal_http_status, terminal_response_bytes, created_at \
+    outer_transaction_hash, signer_address, submitted_tx_rlp, submitted_tx_hash, \
+    terminal_http_status, terminal_response_bytes, created_at \
     FROM settlements WHERE id = $1";
 
 fn api_key_from_row(row: &PgRow) -> Result<ApiKeyCandidate, StoreError> {
@@ -1013,6 +1126,9 @@ fn settlement_from_row(row: &PgRow) -> Result<SettlementRecord, StoreError> {
         relayer_nonce: row.try_get("relayer_nonce")?,
         outer_transaction_bytes: row.try_get("outer_transaction_bytes")?,
         outer_transaction_hash: row.try_get("outer_transaction_hash")?,
+        signer_address: row.try_get("signer_address")?,
+        submitted_tx_rlp: row.try_get("submitted_tx_rlp")?,
+        submitted_tx_hash: row.try_get("submitted_tx_hash")?,
         terminal_http_status: terminal_http_status
             .map(u16::try_from)
             .transpose()

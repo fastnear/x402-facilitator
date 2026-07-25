@@ -1,0 +1,31 @@
+[package]
+name = "x402-chain-eip155-provider"
+description = "Durable EVM (eip155) exact-payment provider for the x402 NEAR facilitator"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+x402-chain-eip155.workspace = true
+
+# Durable submit path. The alloy tree is already resolved (=2.1.1 / =1.6.1) via
+# x402-chain-eip155; these direct deps only surface the types we build and sign
+# transactions with. `k256` on alloy-consensus enables on-envelope signer
+# recovery (used to self-check the durable RLP in tests).
+alloy-consensus = { version = "2.1", features = ["k256"] }
+alloy-eips = "2.1"
+alloy-primitives = "1.6"
+alloy-provider = "2.1"
+alloy-signer = "2.1"
+alloy-signer-local = "2.1"
+alloy-sol-types = "1.6"
+hex.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+url.workspace = true
+x402-types.workspace = true
+
+[lints]
+workspace = true

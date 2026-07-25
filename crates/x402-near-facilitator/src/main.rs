@@ -1,23 +1,16 @@
-use std::collections::HashMap;
 use std::path::PathBuf;
-use std::str::FromStr;
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
 use clap::Parser;
-use near_crypto::{InMemorySigner, SecretKey};
-use near_primitives::types::AccountId;
-use x402_chain_near::{JsonRpcNearRpc, NearChainProvider, NearNetwork, NearRpc, V2NearExact};
-use x402_facilitator_local::{FacilitatorLocal, util::SigDown};
+use x402_facilitator_local::util::SigDown;
 use x402_near_facilitator::auth::ApiKeyAuthenticator;
-use x402_near_facilitator::config::{Environment, OtelConfig, SecretFiles, ServiceConfig};
+use x402_near_facilitator::bootstrap::build_chain_provider;
+use x402_near_facilitator::config::{OtelConfig, SecretFiles, ServiceConfig};
 use x402_near_facilitator::leadership::{LeadershipHandle, ReadinessState};
 use x402_near_facilitator::service::{AppState, reconcile, router};
 use x402_near_facilitator::store::PgStore;
 use x402_near_facilitator::telemetry::TelemetryGuard;
-use x402_types::chain::{ChainIdPattern, ChainProviderOps, ChainRegistry};
-use x402_types::scheme::{SchemeBlueprints, SchemeConfig, SchemeRegistry};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -65,33 +58,24 @@ async fn main() -> Result<()> {
     )
     .context("initialize API authentication")?;
 
-    let relayer_account =
-        AccountId::from_str(&config.relayer_account_id).context("parse relayer account")?;
-    let secret_key =
-        SecretKey::from_str(secrets.relayer_key.as_str()).context("parse relayer service key")?;
-    let signer = InMemorySigner::from_secret_key(relayer_account, secret_key);
-    let relayer_public_key = signer.public_key().to_string();
-    let primary: Arc<JsonRpcNearRpc> =
-        Arc::new(JsonRpcNearRpc::connect(config.primary_rpc_url.as_str()));
-    let backup: Arc<JsonRpcNearRpc> =
-        Arc::new(JsonRpcNearRpc::connect(config.backup_rpc_url.as_str()));
-    let network = match config.environment {
-        Environment::Mainnet => NearNetwork::Mainnet,
-        Environment::Testnet => NearNetwork::Testnet,
-    };
-    let provider = NearChainProvider::new(
-        network,
-        Arc::clone(&primary) as Arc<dyn NearRpc>,
-        Arc::new(signer),
-    )
-    .with_backup_rpc(Arc::clone(&backup) as Arc<dyn NearRpc>);
-    let facilitator = build_facilitator(provider.clone());
+    // The settlement provider and relayer-key algorithm are chain-specific; the
+    // one ordered construction sequence lives in `bootstrap` so this binary and
+    // the admin `reconcile` command cannot drift. NEAR yields a registered
+    // facilitator; EVM yields `None` and serves /verify through the neutral
+    // provider.
+    let (facilitator, provider) = build_chain_provider(&config, secrets.relayer_key.as_str())
+        .await
+        .context("construct settlement provider")?;
 
+    // Register the relayer/signer identity for policy checks. The neutral
+    // accessors yield the NEAR account id + ed25519 key, or the EVM signer address
+    // (doubling as id and key), so the store's relayer-policy keys stay
+    // chain-consistent.
     store
         .upsert_relayer(
             &config.network,
-            &config.relayer_account_id,
-            &relayer_public_key,
+            &provider.signer_account_id(),
+            &provider.signer_public_key(),
         )
         .await
         .context("register relayer identity")?;
@@ -101,7 +85,7 @@ async fn main() -> Result<()> {
         store.clone(),
         auth,
         facilitator,
-        provider.clone(),
+        provider,
         readiness.clone(),
         telemetry.metrics(),
     );
@@ -158,19 +142,4 @@ async fn main() -> Result<()> {
     readiness_task.abort();
     leadership.shutdown().await;
     Ok(())
-}
-
-fn build_facilitator(provider: NearChainProvider) -> FacilitatorLocal<SchemeRegistry> {
-    let chain_id = provider.chain_id();
-    let mut providers = HashMap::new();
-    providers.insert(chain_id.clone(), provider);
-    let chains = ChainRegistry::new(providers);
-    let blueprints = SchemeBlueprints::new().and_register(V2NearExact);
-    let schemes = vec![SchemeConfig {
-        enabled: true,
-        id: "v2-near-exact".to_owned(),
-        chains: ChainIdPattern::exact(chain_id.namespace, chain_id.reference),
-        config: None,
-    }];
-    FacilitatorLocal::new(SchemeRegistry::build(chains, blueprints, &schemes))
 }

@@ -46,8 +46,10 @@ use x402_types::scheme::{SchemeBlueprints, SchemeConfig, SchemeRegistry};
 use super::{AppState, router};
 use crate::VERSION;
 use crate::auth::{ApiKeyAuthenticator, digest_api_key};
+use crate::chain::ChainProvider;
 use crate::config::{
-    Environment, PaymentIdentifierConfig, RequestLimits, ServiceConfig, SponsorshipConfig,
+    ChainKind, Environment, PaymentIdentifierConfig, RequestLimits, ServiceConfig,
+    SponsorshipConfig,
 };
 use crate::leadership::ReadinessState;
 use crate::store::{ApiClient, PgStore};
@@ -317,6 +319,7 @@ fn test_signer(account_id: &str) -> TestResult<Signer> {
 fn service_config() -> TestResult<ServiceConfig> {
     Ok(ServiceConfig {
         environment: Environment::Testnet,
+        chain_kind: ChainKind::Near,
         network: "near:testnet".to_owned(),
         bind_address: "127.0.0.1:0".parse()?,
         primary_rpc_url: Url::parse("https://primary.test.invalid")?,
@@ -343,6 +346,7 @@ fn service_config() -> TestResult<ServiceConfig> {
             balance_hard_stop_yocto_near: "100".to_owned(),
         },
         payment_identifier: PaymentIdentifierConfig::default(),
+        eip155: None,
     })
 }
 
@@ -377,8 +381,8 @@ fn build_application(store: PgStore, metrics: Metrics) -> TestResult<TestApplica
         config,
         store,
         auth,
-        facilitator,
-        provider,
+        Some(facilitator),
+        ChainProvider::Near(provider),
         readiness.clone(),
         metrics,
     );

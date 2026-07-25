@@ -17,6 +17,31 @@ pub enum Environment {
     Testnet,
 }
 
+/// The settlement chain family an instance serves. It selects the provider and
+/// the chain-specific validation/parsing. NEAR is the default so existing
+/// configs parse unchanged; `eip155` (EVM) is recognized here and gains its
+/// provider + validation in a later release.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum ChainKind {
+    /// NEAR (NEP-366 signed-delegate settlement).
+    #[default]
+    Near,
+    /// EVM / eip155 (EIP-3009 `transferWithAuthorization`); implemented later.
+    Eip155,
+}
+
+impl ChainKind {
+    /// The `settlements.chain_kind` text discriminator this chain writes.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Near => "near",
+            Self::Eip155 => "eip155",
+        }
+    }
+}
+
 impl Environment {
     pub const fn network(self) -> &'static str {
         match self {
@@ -46,6 +71,8 @@ impl Environment {
 #[allow(missing_debug_implementations)]
 pub struct ServiceConfig {
     pub environment: Environment,
+    #[serde(default)]
+    pub chain_kind: ChainKind,
     pub network: String,
     pub bind_address: SocketAddr,
     pub primary_rpc_url: Url,
@@ -62,6 +89,27 @@ pub struct ServiceConfig {
     pub sponsorship: SponsorshipConfig,
     #[serde(default)]
     pub payment_identifier: PaymentIdentifierConfig,
+    /// EVM (eip155) settlement parameters. Present iff `chain_kind` is `eip155`;
+    /// omitted (and `None`) for NEAR configs so they parse unchanged.
+    #[serde(default)]
+    pub eip155: Option<Eip155Config>,
+}
+
+/// EVM-specific settlement parameters, selected when `chain_kind` is `eip155`.
+/// The shared [`ServiceConfig`] fields carry the rest (RPC URLs, USDC asset,
+/// signer identity, sponsorship/gas budgets); this block holds only what has no
+/// NEAR analog.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Eip155Config {
+    /// EVM chain id (Base mainnet `8453`, Base Sepolia `84532`). Must agree with
+    /// `network` (`eip155:<chain_id>`) and the deployment `environment`.
+    pub chain_id: u64,
+    /// Confirmation depth a settlement must reach before it is trusted terminal.
+    /// This is the reorg-safety policy; `1` accepts a single confirmation.
+    pub required_confirmations: u64,
+    /// Gas limit for the ERC-3009 `transferWithAuthorization` submission.
+    pub gas_limit: u64,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -169,18 +217,6 @@ impl ServiceConfig {
     // Keep launch-policy validation in one ordered, auditable sequence.
     #[allow(clippy::too_many_lines)]
     pub fn validate(&self) -> Result<(), ConfigError> {
-        const MAX_INNER_GAS: u64 = 30_000_000_000_000;
-        const MAINNET_USDC: &str =
-            "17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1";
-        const TESTNET_USDC: &str =
-            "3e2210e1184b45b64c8a434c0a7e7b23cc04ea7eb7a6c3c32520d03d4afcb8af";
-
-        if self.network != self.environment.network() {
-            return Err(ConfigError::Invalid(format!(
-                "network {} does not match environment {:?}",
-                self.network, self.environment
-            )));
-        }
         if self.primary_rpc_url == self.backup_rpc_url {
             return Err(ConfigError::Invalid(
                 "primary_rpc_url and backup_rpc_url must be independent".to_owned(),
@@ -227,32 +263,9 @@ impl ServiceConfig {
         ] {
             validate_unsigned_decimal(name, value)?;
         }
-        let expected_asset = match self.environment {
-            Environment::Mainnet => MAINNET_USDC,
-            Environment::Testnet => TESTNET_USDC,
-        };
-        if self.asset != expected_asset {
-            return Err(ConfigError::Invalid(format!(
-                "asset must be the canonical Circle USDC contract for {}",
-                self.network
-            )));
-        }
         if self.asset_symbol != "USDC" {
             return Err(ConfigError::Invalid(
                 "asset_symbol must be USDC for the launch policy".to_owned(),
-            ));
-        }
-        self.asset
-            .parse::<near_primitives::types::AccountId>()
-            .map_err(|error| ConfigError::Invalid(format!("invalid asset account ID: {error}")))?;
-        self.relayer_account_id
-            .parse::<near_primitives::types::AccountId>()
-            .map_err(|error| {
-                ConfigError::Invalid(format!("invalid relayer_account_id: {error}"))
-            })?;
-        if self.max_inner_gas != MAX_INNER_GAS {
-            return Err(ConfigError::Invalid(
-                "max_inner_gas must be exactly 30000000000000 for the launch policy".to_owned(),
             ));
         }
         if compare_decimal(&self.minimum_amount, "1000").is_lt() {
@@ -305,6 +318,118 @@ impl ServiceConfig {
         if self.payment_identifier.min_length != 16 || self.payment_identifier.max_length != 128 {
             return Err(ConfigError::Invalid(
                 "payment_identifier bounds must match the x402 extension (16..=128)".to_owned(),
+            ));
+        }
+        match self.chain_kind {
+            ChainKind::Near => self.validate_near(),
+            ChainKind::Eip155 => self.validate_eip155(),
+        }
+    }
+
+    /// EVM-specific configuration policy: the eip155 block presence, network /
+    /// chain-id / environment agreement, the canonical Base USDC contract, and
+    /// the EVM signer + gas parameters. The chain-agnostic launch policy (RPC
+    /// independence, HTTPS, loopback bind, USDC symbol, sponsorship thresholds)
+    /// is enforced in [`Self::validate`] before this runs.
+    fn validate_eip155(&self) -> Result<(), ConfigError> {
+        // Base only (per the launch decision): mainnet 8453, Sepolia 84532, with
+        // Circle's canonical USDC on each. Bind the tier to a specific chain so a
+        // testnet deploy can never point at mainnet USDC (or vice versa).
+        const BASE_MAINNET_USDC: &str = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913";
+        const BASE_SEPOLIA_USDC: &str = "0x036cbd53842c5426634e7929541ec2318f3dcf7e";
+        let (expected_chain_id, expected_usdc) = match self.environment {
+            Environment::Mainnet => (8453_u64, BASE_MAINNET_USDC),
+            Environment::Testnet => (84532_u64, BASE_SEPOLIA_USDC),
+        };
+
+        let Some(eip155) = &self.eip155 else {
+            return Err(ConfigError::Invalid(
+                "eip155 chain_kind requires an eip155 configuration block".to_owned(),
+            ));
+        };
+        if eip155.chain_id != expected_chain_id {
+            return Err(ConfigError::Invalid(format!(
+                "eip155.chain_id must be {expected_chain_id} for environment {:?}",
+                self.environment
+            )));
+        }
+        if self.network != format!("eip155:{expected_chain_id}") {
+            return Err(ConfigError::Invalid(format!(
+                "network must be eip155:{expected_chain_id} for environment {:?}",
+                self.environment
+            )));
+        }
+        if !self.asset.eq_ignore_ascii_case(expected_usdc) {
+            return Err(ConfigError::Invalid(format!(
+                "asset must be the canonical Circle USDC contract {expected_usdc} for {}",
+                self.network
+            )));
+        }
+        if !is_evm_address(&self.relayer_account_id) {
+            return Err(ConfigError::Invalid(
+                "relayer_account_id must be the EVM signer's 0x address".to_owned(),
+            ));
+        }
+        // max_inner_gas is a NEAR gas ceiling with no EVM meaning; require the
+        // sentinel 0 so an EVM config never silently carries a stale NEAR value.
+        if self.max_inner_gas != 0 {
+            return Err(ConfigError::Invalid(
+                "max_inner_gas must be 0 for eip155 (EVM has no inner-gas ceiling)".to_owned(),
+            ));
+        }
+        if eip155.required_confirmations == 0 {
+            return Err(ConfigError::Invalid(
+                "eip155.required_confirmations must be at least 1".to_owned(),
+            ));
+        }
+        // A transferWithAuthorization settlement is ~60k–100k gas; bound the limit
+        // to a sane band so a typo cannot under-fund or wildly over-reserve.
+        if !(21_000..=1_000_000).contains(&eip155.gas_limit) {
+            return Err(ConfigError::Invalid(
+                "eip155.gas_limit must be between 21000 and 1000000".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// NEAR-specific configuration policy: network identity, the canonical USDC
+    /// contract, NEAR account-id shapes, and the sponsored-gas ceiling. The EVM
+    /// counterpart (`validate_eip155`) slots in alongside this in a later
+    /// release, selected by [`ChainKind`] in [`Self::validate`].
+    fn validate_near(&self) -> Result<(), ConfigError> {
+        const MAX_INNER_GAS: u64 = 30_000_000_000_000;
+        const MAINNET_USDC: &str =
+            "17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1";
+        const TESTNET_USDC: &str =
+            "3e2210e1184b45b64c8a434c0a7e7b23cc04ea7eb7a6c3c32520d03d4afcb8af";
+
+        if self.network != self.environment.network() {
+            return Err(ConfigError::Invalid(format!(
+                "network {} does not match environment {:?}",
+                self.network, self.environment
+            )));
+        }
+        let expected_asset = match self.environment {
+            Environment::Mainnet => MAINNET_USDC,
+            Environment::Testnet => TESTNET_USDC,
+        };
+        if self.asset != expected_asset {
+            return Err(ConfigError::Invalid(format!(
+                "asset must be the canonical Circle USDC contract for {}",
+                self.network
+            )));
+        }
+        self.asset
+            .parse::<near_primitives::types::AccountId>()
+            .map_err(|error| ConfigError::Invalid(format!("invalid asset account ID: {error}")))?;
+        self.relayer_account_id
+            .parse::<near_primitives::types::AccountId>()
+            .map_err(|error| {
+                ConfigError::Invalid(format!("invalid relayer_account_id: {error}"))
+            })?;
+        if self.max_inner_gas != MAX_INNER_GAS {
+            return Err(ConfigError::Invalid(
+                "max_inner_gas must be exactly 30000000000000 for the launch policy".to_owned(),
             ));
         }
         Ok(())
@@ -483,6 +608,29 @@ fn ensure_private_mode(_path: &Path) -> Result<(), ConfigError> {
     Ok(())
 }
 
+/// The deployment tier a CAIP-2 network belongs to, or `None` if the network is
+/// not one this facilitator family serves. Used by admin tooling to gate a
+/// payee's network against a client's environment without assuming NEAR (the
+/// tier is chain-agnostic; both `near:testnet` and `eip155:84532` are testnet).
+#[must_use]
+pub fn network_environment(network: &str) -> Option<Environment> {
+    match network {
+        MAINNET | "eip155:8453" => Some(Environment::Mainnet),
+        TESTNET | "eip155:84532" => Some(Environment::Testnet),
+        _ => None,
+    }
+}
+
+/// Whether `value` is a syntactically valid EVM address: `0x` followed by
+/// exactly 40 hex digits. Case is not checked (EIP-55 checksums are accepted in
+/// either case); on-chain identity is case-insensitive.
+#[must_use]
+pub fn is_evm_address(value: &str) -> bool {
+    value
+        .strip_prefix("0x")
+        .is_some_and(|hex| hex.len() == 40 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
 fn validate_unsigned_decimal(name: &str, value: &str) -> Result<(), ConfigError> {
     if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(ConfigError::Invalid(format!(
@@ -513,6 +661,7 @@ mod tests {
     fn valid_mainnet_config() -> ServiceConfig {
         ServiceConfig {
             environment: Environment::Mainnet,
+            chain_kind: ChainKind::Near,
             network: MAINNET.to_owned(),
             bind_address: SocketAddr::from(([127, 0, 0, 1], 8402)),
             primary_rpc_url: Url::parse("https://rpc.mainnet.fastnear.com")
@@ -534,12 +683,168 @@ mod tests {
                 balance_hard_stop_yocto_near: "250000000000000000000000".to_owned(),
             },
             payment_identifier: PaymentIdentifierConfig::default(),
+            eip155: None,
+        }
+    }
+
+    fn valid_base_sepolia_config() -> ServiceConfig {
+        ServiceConfig {
+            environment: Environment::Testnet,
+            chain_kind: ChainKind::Eip155,
+            network: "eip155:84532".to_owned(),
+            bind_address: SocketAddr::from(([127, 0, 0, 1], 8404)),
+            primary_rpc_url: Url::parse("https://sepolia.base.org")
+                .unwrap_or_else(|_| std::process::abort()),
+            backup_rpc_url: Url::parse("https://base-sepolia-rpc.publicnode.com")
+                .unwrap_or_else(|_| std::process::abort()),
+            asset: "0x036CbD53842c5426634e7929541eC2318f3dCF7e".to_owned(),
+            asset_symbol: "USDC".to_owned(),
+            minimum_amount: "1000".to_owned(),
+            relayer_account_id: "0x51f2dbe5c2e1f3f0d9a5b6c7e8f9a0b1c2d3e4f5".to_owned(),
+            max_inner_gas: 0,
+            database_max_connections: 10,
+            request_limits: RequestLimits::default(),
+            sponsorship: SponsorshipConfig {
+                // Wei gas budgets (the *_yocto_near names are v2 naming debt).
+                global_daily_yocto_near: "500000000000000000".to_owned(),
+                default_client_daily_yocto_near: "100000000000000000".to_owned(),
+                reservation_yocto_near: "10000000000000000".to_owned(),
+                balance_warning_yocto_near: "1000000000000000000".to_owned(),
+                balance_hard_stop_yocto_near: "250000000000000000".to_owned(),
+            },
+            payment_identifier: PaymentIdentifierConfig::default(),
+            eip155: Some(Eip155Config {
+                chain_id: 84532,
+                required_confirmations: 2,
+                gas_limit: 120_000,
+            }),
         }
     }
 
     #[test]
     fn accepts_launch_mainnet_policy() {
         assert!(valid_mainnet_config().validate().is_ok());
+    }
+
+    #[test]
+    fn accepts_base_sepolia_eip155_policy() {
+        assert!(valid_base_sepolia_config().validate().is_ok());
+    }
+
+    #[test]
+    fn network_environment_maps_known_networks_to_tiers() {
+        assert_eq!(network_environment(MAINNET), Some(Environment::Mainnet));
+        assert_eq!(network_environment(TESTNET), Some(Environment::Testnet));
+        assert_eq!(
+            network_environment("eip155:8453"),
+            Some(Environment::Mainnet)
+        );
+        assert_eq!(
+            network_environment("eip155:84532"),
+            Some(Environment::Testnet)
+        );
+        // Unknown chains (wrong eip155 id, other namespaces) are not served.
+        assert_eq!(network_environment("eip155:1"), None);
+        assert_eq!(network_environment("solana:mainnet"), None);
+    }
+
+    #[test]
+    fn eip155_usdc_asset_is_case_insensitive() {
+        let mut lower = valid_base_sepolia_config();
+        lower.asset = "0x036cbd53842c5426634e7929541ec2318f3dcf7e".to_owned();
+        assert!(lower.validate().is_ok());
+    }
+
+    #[test]
+    fn rejects_eip155_missing_block_or_mismatched_identity() {
+        let mut missing = valid_base_sepolia_config();
+        missing.eip155 = None;
+        assert!(missing.validate().is_err());
+
+        // Mainnet chain id under a testnet deployment.
+        let mut wrong_chain = valid_base_sepolia_config();
+        wrong_chain.eip155 = Some(Eip155Config {
+            chain_id: 8453,
+            required_confirmations: 2,
+            gas_limit: 120_000,
+        });
+        assert!(wrong_chain.validate().is_err());
+
+        let mut wrong_network = valid_base_sepolia_config();
+        wrong_network.network = "eip155:8453".to_owned();
+        assert!(wrong_network.validate().is_err());
+
+        // Base *mainnet* USDC under a testnet deployment.
+        let mut wrong_asset = valid_base_sepolia_config();
+        wrong_asset.asset = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913".to_owned();
+        assert!(wrong_asset.validate().is_err());
+
+        let mut near_signer = valid_base_sepolia_config();
+        near_signer.relayer_account_id = "relayer.mike.testnet".to_owned();
+        assert!(near_signer.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_eip155_out_of_policy_gas_and_confirmations() {
+        let mut stale_inner_gas = valid_base_sepolia_config();
+        stale_inner_gas.max_inner_gas = 30_000_000_000_000;
+        assert!(stale_inner_gas.validate().is_err());
+
+        let mut zero_confirmations = valid_base_sepolia_config();
+        zero_confirmations.eip155 = Some(Eip155Config {
+            chain_id: 84532,
+            required_confirmations: 0,
+            gas_limit: 120_000,
+        });
+        assert!(zero_confirmations.validate().is_err());
+
+        let mut tiny_gas = valid_base_sepolia_config();
+        tiny_gas.eip155 = Some(Eip155Config {
+            chain_id: 84532,
+            required_confirmations: 2,
+            gas_limit: 5,
+        });
+        assert!(tiny_gas.validate().is_err());
+    }
+
+    #[test]
+    fn config_document_without_chain_kind_defaults_to_near() {
+        // Host configs predate the chain_kind field; a deploy of this build must
+        // still parse them (defaulting to NEAR) or the service fails to start.
+        let document = serde_json::json!({
+            "environment": "testnet",
+            "network": "near:testnet",
+            "bind_address": "127.0.0.1:8403",
+            "primary_rpc_url": "https://rpc.testnet.fastnear.com",
+            "backup_rpc_url": "https://archival-rpc.testnet.fastnear.com",
+            "asset": "3e2210e1184b45b64c8a434c0a7e7b23cc04ea7eb7a6c3c32520d03d4afcb8af",
+            "asset_symbol": "USDC",
+            "minimum_amount": "1000",
+            "relayer_account_id": "x402-relayer.mike.testnet",
+            "max_inner_gas": 30_000_000_000_000_u64,
+            "database_max_connections": 10,
+            "request_limits": {
+                "body_bytes": 65536,
+                "verify_per_minute": 60,
+                "settle_per_minute": 10,
+                "verify_timeout_seconds": 15,
+                "settle_timeout_seconds": 60,
+                "max_concurrent_verify": 64
+            },
+            "sponsorship": {
+                "global_daily_yocto_near": "2000000000000000000000000",
+                "default_client_daily_yocto_near": "1000000000000000000000000",
+                "reservation_yocto_near": "10000000000000000000000",
+                "balance_warning_yocto_near": "2000000000000000000000000",
+                "balance_hard_stop_yocto_near": "500000000000000000000000"
+            },
+            "payment_identifier": { "required": false, "min_length": 16, "max_length": 128 }
+        });
+        let Ok(config) = serde_json::from_value::<ServiceConfig>(document) else {
+            std::process::abort();
+        };
+        assert_eq!(config.chain_kind, ChainKind::Near);
+        assert!(config.validate().is_ok());
     }
 
     #[test]

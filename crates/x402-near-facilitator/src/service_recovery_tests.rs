@@ -35,8 +35,10 @@ use x402_types::scheme::{SchemeBlueprints, SchemeConfig, SchemeRegistry};
 
 use super::{AppState, reconcile, run_new_settlement};
 use crate::auth::ApiKeyAuthenticator;
+use crate::chain::ChainProvider;
 use crate::config::{
-    Environment, PaymentIdentifierConfig, RequestLimits, ServiceConfig, SponsorshipConfig,
+    ChainKind, Environment, PaymentIdentifierConfig, RequestLimits, ServiceConfig,
+    SponsorshipConfig,
 };
 use crate::leadership::ReadinessState;
 use crate::protocol::{ParsedRequest, parse_request, request_fingerprint};
@@ -431,7 +433,7 @@ async fn build_context(database: &TestDatabase) -> TestResult<TestContext> {
         .upsert_relayer(
             "near:testnet",
             TEST_RELAYER,
-            &state.provider.relayer_public_key().to_string(),
+            &state.provider.as_near().relayer_public_key().to_string(),
         )
         .await?;
     let client_id = seed_client(&database.store).await?;
@@ -462,8 +464,8 @@ fn build_state(database: &TestDatabase, rpc: MockRpc, backup_rpc: MockRpc) -> Te
         config,
         database.store.clone(),
         auth,
-        facilitator,
-        provider,
+        Some(facilitator),
+        ChainProvider::Near(provider),
         readiness,
         Metrics::for_tests(),
     );
@@ -477,6 +479,7 @@ fn restarted_state(database: &TestDatabase, context: &TestContext) -> TestResult
 fn service_config() -> TestResult<ServiceConfig> {
     Ok(ServiceConfig {
         environment: Environment::Testnet,
+        chain_kind: ChainKind::Near,
         network: "near:testnet".to_owned(),
         bind_address: "127.0.0.1:0".parse()?,
         primary_rpc_url: Url::parse("https://primary.recovery.invalid")?,
@@ -503,6 +506,7 @@ fn service_config() -> TestResult<ServiceConfig> {
             balance_hard_stop_yocto_near: HARD_STOP.to_owned(),
         },
         payment_identifier: PaymentIdentifierConfig::default(),
+        eip155: None,
     })
 }
 
@@ -620,6 +624,7 @@ async fn reserve_payment(
     let payment = context
         .state
         .provider
+        .as_near()
         .verify(
             &request.raw,
             &VerificationPolicy {
@@ -645,9 +650,12 @@ async fn reserve_payment(
             pay_to: TEST_PAYEE.to_owned(),
             amount: "1000".to_owned(),
             payer: TEST_PAYER.to_owned(),
-            delegate_public_key: payment.payer_public_key.to_string(),
-            delegate_nonce: payment.delegate_nonce.to_string(),
-            delegate_max_block_height: payment.max_block_height.to_string(),
+            chain_kind: ChainKind::Near,
+            delegate_public_key: Some(payment.payer_public_key.to_string()),
+            delegate_nonce: Some(payment.delegate_nonce.to_string()),
+            delegate_max_block_height: Some(payment.max_block_height.to_string()),
+            evm_authorization: None,
+            signer_address: None,
             policy_snapshot: json!({"test": "recovery-regression"}),
             reservation_yocto_near: "100".to_owned(),
             global_daily_budget_yocto_near: "1000000".to_owned(),
@@ -674,7 +682,7 @@ async fn prepare_payment(
     previous_relayer_nonce: u64,
     submitted: bool,
 ) -> TestResult<PreparedPayment> {
-    let prepared = context.state.provider.prepare_outer_transaction(
+    let prepared = context.state.provider.as_near().prepare_outer_transaction(
         &reserved.payment,
         RelayerHead {
             block_height: context.rpc.block().height,
@@ -924,7 +932,11 @@ async fn both_unknown_with_advanced_backup_nonce_quarantines_relayer() -> TestRe
                 .relayer_is_active(
                     "near:testnet",
                     TEST_RELAYER,
-                    &restarted.provider.relayer_public_key().to_string(),
+                    &restarted
+                        .provider
+                        .as_near()
+                        .relayer_public_key()
+                        .to_string(),
                 )
                 .await?
         );
@@ -1003,6 +1015,7 @@ async fn crash_restart_matrix_recovers_each_durable_transition_exactly_once() ->
         let lookup = context
             .state
             .provider
+            .as_near()
             .broadcast_exact(&broadcast.transaction_bytes)
             .await?;
         let TransactionLookup::Final(outcome) = lookup else {
@@ -1212,7 +1225,12 @@ async fn quarantined_relayer_policy_prevents_preparation_and_broadcast() -> Test
             .quarantine_relayer(
                 "near:testnet",
                 TEST_RELAYER,
-                &context.state.provider.relayer_public_key().to_string(),
+                &context
+                    .state
+                    .provider
+                    .as_near()
+                    .relayer_public_key()
+                    .to_string(),
                 "test policy stop",
                 "0",
             )
@@ -1375,6 +1393,7 @@ async fn accepted_response_drop_recovers_without_second_transaction() -> TestRes
             context
                 .state
                 .provider
+                .as_near()
                 .broadcast_exact(&submitted.transaction_bytes)
                 .await?,
             TransactionLookup::Unknown

@@ -13,6 +13,8 @@ use super::{
     ApiClient, ClaimOutcome, NewSettlement, PgStore, PreparedJournalEntry, SettlementState,
     StoreError, TerminalJournalEntry,
 };
+use crate::config::ChainKind;
+use crate::store::EvmPreparedJournalEntry;
 
 type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -120,10 +122,50 @@ fn settlement_for(client: &ApiClient, seed: u8) -> NewSettlement {
         pay_to: "merchant.mike.testnet".to_owned(),
         amount: "1000".to_owned(),
         payer: "payer.testnet".to_owned(),
-        delegate_public_key: "ed25519:11111111111111111111111111111111".to_owned(),
-        delegate_nonce: u64::from(seed).to_string(),
-        delegate_max_block_height: "1000".to_owned(),
+        chain_kind: ChainKind::Near,
+        delegate_public_key: Some("ed25519:11111111111111111111111111111111".to_owned()),
+        delegate_nonce: Some(u64::from(seed).to_string()),
+        delegate_max_block_height: Some("1000".to_owned()),
+        evm_authorization: None,
+        signer_address: None,
         policy_snapshot: json!({"test": true, "seed": seed}),
+        reservation_yocto_near: RESERVATION.to_owned(),
+        global_daily_budget_yocto_near: GLOBAL_LIMIT.to_owned(),
+        client_daily_budget_yocto_near: CLIENT_LIMIT.to_owned(),
+    }
+}
+
+const EVM_SIGNER: &str = "0x51f2dbe5c2e1f3f0d9a5b6c7e8f9a0b1c2d3e4f5";
+
+fn evm_settlement_for(client: &ApiClient, seed: u8) -> NewSettlement {
+    NewSettlement {
+        id: Uuid::new_v4(),
+        api_client_id: client.id,
+        payment_identifier: Some(format!("payment-id-{}", Uuid::new_v4().simple())),
+        payment_hash: [seed; 32],
+        request_fingerprint: [seed.wrapping_add(1); 32],
+        x402_version: 2,
+        scheme: "exact".to_owned(),
+        network: "eip155:84532".to_owned(),
+        asset: "0x036CbD53842c5426634e7929541eC2318f3dCF7e".to_owned(),
+        pay_to: "0x1111111111111111111111111111111111111111".to_owned(),
+        amount: "1000".to_owned(),
+        payer: "0x2222222222222222222222222222222222222222".to_owned(),
+        chain_kind: ChainKind::Eip155,
+        delegate_public_key: None,
+        delegate_nonce: None,
+        delegate_max_block_height: None,
+        evm_authorization: Some(json!({
+            "from": "0x2222222222222222222222222222222222222222",
+            "to": "0x1111111111111111111111111111111111111111",
+            "value": "1000",
+            "validAfter": "0",
+            "validBefore": "9999999999",
+            "nonce": "0x00000000000000000000000000000000000000000000000000000000000000ff",
+            "signature": "0xdeadbeef",
+        })),
+        signer_address: Some(EVM_SIGNER.to_owned()),
+        policy_snapshot: json!({"test": true, "seed": seed, "chain": "eip155"}),
         reservation_yocto_near: RESERVATION.to_owned(),
         global_daily_budget_yocto_near: GLOBAL_LIMIT.to_owned(),
         client_daily_budget_yocto_near: CLIENT_LIMIT.to_owned(),
@@ -373,6 +415,9 @@ async fn lifecycle_terminalization_and_replay_are_durable_and_idempotent() -> Te
         gas_burnt: Some("3".to_owned()),
         tokens_burnt: Some("7".to_owned()),
         actual_yocto_near: "7".to_owned(),
+        mined_block_number: None,
+        mined_block_hash: None,
+        confirmations: None,
     };
     assert!(matches!(
         database.store.mark_terminal(&invalid_success).await,
@@ -400,6 +445,9 @@ async fn lifecycle_terminalization_and_replay_are_durable_and_idempotent() -> Te
         gas_burnt: Some("3".to_owned()),
         tokens_burnt: Some("7".to_owned()),
         actual_yocto_near: "7".to_owned(),
+        mined_block_number: None,
+        mined_block_hash: None,
+        confirmations: None,
     };
     database.store.mark_terminal(&terminal).await?;
     database.store.mark_terminal(&terminal).await?;
@@ -447,6 +495,79 @@ async fn lifecycle_terminalization_and_replay_are_durable_and_idempotent() -> Te
         states,
         vec!["reserved", "prepared", "submitted", "succeeded"]
     );
+
+    database.cleanup().await
+}
+
+// An EVM settlement rides the dedicated eip155 columns end to end: the
+// reservation satisfies the chain-authorization CHECK with the ERC-3009
+// authorization + signer address (delegate identity NULL), and the prepare
+// transition satisfies the non-terminal-submission CHECK with the signed RLP,
+// hash, and account nonce. Any CHECK violation would surface here as a failed
+// insert/update — the regression gate for migration 0002's conditional schema.
+#[tokio::test]
+async fn evm_reservation_and_prepare_populate_dedicated_columns() -> TestResult {
+    let Some(database) = TestDatabase::new().await? else {
+        return Ok(());
+    };
+    let client = ApiClient {
+        id: Uuid::new_v4(),
+        name: "evm-test-client".to_owned(),
+        environment: "testnet".to_owned(),
+        daily_budget_yocto_near: CLIENT_LIMIT.to_owned(),
+        verify_rate_per_minute: 60,
+        settle_rate_per_minute: 10,
+    };
+    database
+        .store
+        .create_client(&client, Uuid::new_v4(), "evm-test", &[9; 32])
+        .await?;
+    let settlement = evm_settlement_for(&client, 9);
+
+    // Reservation: writes chain_kind='eip155', evm_authorization, signer_address;
+    // the delegate identity stays NULL. Satisfies the chain-authorization CHECK.
+    let ClaimOutcome::New(reserved) = database.store.claim_settlement(&settlement).await? else {
+        return Err(std::io::Error::other("evm reservation was not new").into());
+    };
+    assert_eq!(reserved.state, SettlementState::Reserved);
+    assert_eq!(reserved.signer_address.as_deref(), Some(EVM_SIGNER));
+    assert_eq!(reserved.submitted_tx_rlp, None);
+
+    // Prepare: the durable signed transaction into the dedicated columns.
+    let prepared = EvmPreparedJournalEntry {
+        settlement_id: settlement.id,
+        signer_account_nonce: "7".to_owned(),
+        submitted_tx_rlp: vec![0x02, 0xf8, 0x6b, 0x01, 0x02],
+        submitted_tx_hash: "0xabc0000000000000000000000000000000000000000000000000000000000def"
+            .to_owned(),
+        required_confirmations: 2,
+    };
+    database.store.mark_prepared_evm(&prepared).await?;
+
+    let record = database
+        .store
+        .settlement(settlement.id)
+        .await?
+        .ok_or_else(|| std::io::Error::other("prepared evm settlement disappeared"))?;
+    assert_eq!(record.state, SettlementState::Prepared);
+    assert_eq!(
+        record.submitted_tx_rlp.as_deref(),
+        Some(prepared.submitted_tx_rlp.as_slice())
+    );
+    assert_eq!(
+        record.submitted_tx_hash.as_deref(),
+        Some(prepared.submitted_tx_hash.as_str())
+    );
+    assert_eq!(record.signer_address.as_deref(), Some(EVM_SIGNER));
+    // The NEAR journal columns stay untouched on an EVM row.
+    assert_eq!(record.outer_transaction_bytes, None);
+    assert_eq!(record.relayer_account_id, None);
+
+    // Re-preparing a non-reserved row is a rejected transition (idempotence guard).
+    assert!(matches!(
+        database.store.mark_prepared_evm(&prepared).await,
+        Err(StoreError::Transition { .. })
+    ));
 
     database.cleanup().await
 }

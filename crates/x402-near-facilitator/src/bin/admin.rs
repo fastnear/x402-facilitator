@@ -1,27 +1,24 @@
-use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::Write as _;
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand};
-use near_crypto::{InMemorySigner, KeyType, SecretKey};
+use near_crypto::{KeyType, SecretKey};
 use near_primitives::types::AccountId;
 use uuid::Uuid;
-use x402_chain_near::{JsonRpcNearRpc, NearChainProvider, NearNetwork, NearRpc, V2NearExact};
-use x402_facilitator_local::FacilitatorLocal;
 use x402_near_facilitator::auth::{ApiKeyAuthenticator, GeneratedApiKey};
-use x402_near_facilitator::config::{Environment, SecretFiles, ServiceConfig, read_secret};
+use x402_near_facilitator::bootstrap::build_chain_provider;
+use x402_near_facilitator::config::{
+    Environment, SecretFiles, ServiceConfig, is_evm_address, network_environment, read_secret,
+};
 use x402_near_facilitator::leadership::{LeadershipHandle, ReadinessState};
 use x402_near_facilitator::service::{AppState, reconcile};
 use x402_near_facilitator::store::{ApiClient, PgStore};
 use x402_near_facilitator::telemetry::TelemetryGuard;
-use x402_types::chain::{ChainIdPattern, ChainProviderOps, ChainRegistry};
-use x402_types::scheme::{SchemeBlueprints, SchemeConfig, SchemeRegistry};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -124,6 +121,12 @@ enum ClientCommand {
 enum KeyCommand {
     /// Write a new ED25519 secret to a mode-0600, create-new file.
     GenerateRelayer {
+        #[arg(long)]
+        output: PathBuf,
+    },
+    /// Write a new secp256k1 EVM signer to a mode-0600, create-new file; print
+    /// only its 0x address (put that in the eip155 config's `relayer_account_id`).
+    GenerateEvmRelayer {
         #[arg(long)]
         output: PathBuf,
     },
@@ -233,8 +236,15 @@ async fn client(command: ClientCommand) -> Result<()> {
                     .await
                     .context("load client environment")?,
             )?;
-            if environment.network() != network {
-                bail!("payee network does not match the client environment");
+            // The payee's network must belong to the client's deployment tier
+            // (chain-agnostic): a testnet client accepts near:testnet or
+            // eip155:84532, a mainnet client the mainnet networks — never across
+            // tiers.
+            if network_environment(&network) != Some(environment) {
+                bail!(
+                    "payee network {network} does not match the client environment tier {}",
+                    environment_name(environment)
+                );
             }
             validate_exact_policy(&network, &asset, &pay_to)?;
             store
@@ -280,9 +290,19 @@ fn key(command: KeyCommand) -> Result<()> {
             println!("{public}");
             Ok(())
         }
+        KeyCommand::GenerateEvmRelayer { output } => {
+            // The secp256k1 key is generated, written mode-0600, and dropped
+            // inside the provider crate; only the 0x address is returned here.
+            let address = x402_chain_eip155_provider::provider::generate_signer_key_file(&output)
+                .with_context(|| format!("create {}", output.display()))?;
+            println!("{address}");
+            Ok(())
+        }
     }
 }
 
+// One ordered construction sequence (shared `build_chain_provider`, then
+// leadership + reconcile), mirroring the service binary's startup.
 async fn reconcile_command(config_path: &Path) -> Result<()> {
     let config = ServiceConfig::load(config_path).context("load service config")?;
     let secrets = SecretFiles::from_environment()
@@ -303,31 +323,17 @@ async fn reconcile_command(config_path: &Path) -> Result<()> {
         secrets.api_key_pepper.as_bytes(),
     )
     .context("initialize authentication")?;
-    let account =
-        AccountId::from_str(&config.relayer_account_id).context("parse relayer account")?;
-    let secret =
-        SecretKey::from_str(secrets.relayer_key.as_str()).context("parse relayer service key")?;
-    let signer = InMemorySigner::from_secret_key(account, secret);
-    let primary: Arc<JsonRpcNearRpc> =
-        Arc::new(JsonRpcNearRpc::connect(config.primary_rpc_url.as_str()));
-    let backup: Arc<JsonRpcNearRpc> =
-        Arc::new(JsonRpcNearRpc::connect(config.backup_rpc_url.as_str()));
-    let network = match config.environment {
-        Environment::Mainnet => NearNetwork::Mainnet,
-        Environment::Testnet => NearNetwork::Testnet,
-    };
-    let provider = NearChainProvider::new(
-        network,
-        Arc::clone(&primary) as Arc<dyn NearRpc>,
-        Arc::new(signer),
-    )
-    .with_backup_rpc(Arc::clone(&backup) as Arc<dyn NearRpc>);
+    // Build the settlement provider exactly as the service binary does, so
+    // recovery runs against the same chain wiring the running service uses.
+    let (facilitator, provider) = build_chain_provider(&config, secrets.relayer_key.as_str())
+        .await
+        .context("construct settlement provider")?;
     let readiness = ReadinessState::default();
     let state = AppState::new(
         config.clone(),
         store,
         auth,
-        build_facilitator(provider.clone()),
+        facilitator,
         provider,
         readiness.clone(),
         telemetry.metrics(),
@@ -362,21 +368,6 @@ async fn connect(database_url_file: &Path) -> Result<PgStore> {
         .context("connect database")
 }
 
-fn build_facilitator(provider: NearChainProvider) -> FacilitatorLocal<SchemeRegistry> {
-    let chain_id = provider.chain_id();
-    let mut providers = HashMap::new();
-    providers.insert(chain_id.clone(), provider);
-    let chains = ChainRegistry::new(providers);
-    let blueprints = SchemeBlueprints::new().and_register(V2NearExact);
-    let schemes = vec![SchemeConfig {
-        enabled: true,
-        id: "v2-near-exact".to_owned(),
-        chains: ChainIdPattern::exact(chain_id.namespace, chain_id.reference),
-        config: None,
-    }];
-    FacilitatorLocal::new(SchemeRegistry::build(chains, blueprints, &schemes))
-}
-
 fn validate_decimal(value: &str) -> Result<()> {
     if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
         bail!("value must be an unsigned base-10 integer");
@@ -385,11 +376,21 @@ fn validate_decimal(value: &str) -> Result<()> {
 }
 
 fn validate_exact_policy(network: &str, asset: &str, pay_to: &str) -> Result<()> {
-    if !matches!(network, "near:mainnet" | "near:testnet") {
-        bail!("network must be near:mainnet or near:testnet");
+    match network {
+        "near:mainnet" | "near:testnet" => {
+            AccountId::from_str(asset).context("parse asset account")?;
+            AccountId::from_str(pay_to).context("parse payee account")?;
+        }
+        "eip155:8453" | "eip155:84532" => {
+            if !is_evm_address(asset) {
+                bail!("asset must be a 0x EVM address for {network}");
+            }
+            if !is_evm_address(pay_to) {
+                bail!("pay_to must be a 0x EVM address for {network}");
+            }
+        }
+        _ => bail!("network must be a supported near or eip155 network"),
     }
-    AccountId::from_str(asset).context("parse asset account")?;
-    AccountId::from_str(pay_to).context("parse payee account")?;
     Ok(())
 }
 
