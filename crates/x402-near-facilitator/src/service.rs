@@ -1566,6 +1566,11 @@ async fn finalize_terminal(
         gas_burnt: Some(outcome.gas_units.to_string()),
         tokens_burnt: Some(outcome.fee_atomic.to_string()),
         actual_yocto_near: outcome.fee_atomic.to_string(),
+        mined_block_number: outcome.mined_block_number.map(|number| number.to_string()),
+        mined_block_hash: outcome.mined_block_hash.clone(),
+        confirmations: outcome
+            .confirmations
+            .and_then(|depth| i32::try_from(depth).ok()),
     };
     if state.store.mark_terminal(&entry).await.is_err() {
         state.readiness.set_reconciliation(false);
@@ -1618,6 +1623,9 @@ async fn terminal_protocol_failure(
             gas_burnt: Some("0".to_owned()),
             tokens_burnt: Some("0".to_owned()),
             actual_yocto_near: "0".to_owned(),
+            mined_block_number: None,
+            mined_block_hash: None,
+            confirmations: None,
         })
         .await;
     if result.is_ok() {
@@ -1647,6 +1655,9 @@ async fn terminal_service_failure(
             gas_burnt: Some("0".to_owned()),
             tokens_burnt: Some("0".to_owned()),
             actual_yocto_near: "0".to_owned(),
+            mined_block_number: None,
+            mined_block_hash: None,
+            confirmations: None,
         })
         .await;
     if result.is_ok() {
@@ -1691,6 +1702,9 @@ async fn terminal_transaction_rejected(
             gas_burnt: Some("0".to_owned()),
             tokens_burnt: Some("0".to_owned()),
             actual_yocto_near: "0".to_owned(),
+            mined_block_number: None,
+            mined_block_hash: None,
+            confirmations: None,
         })
         .await;
     if result.is_ok() {
@@ -2181,6 +2195,11 @@ async fn finalize_reconciled_terminal(
             gas_burnt: Some(outcome.gas_units.to_string()),
             tokens_burnt: Some(outcome.fee_atomic.to_string()),
             actual_yocto_near: outcome.fee_atomic.to_string(),
+            mined_block_number: outcome.mined_block_number.map(|number| number.to_string()),
+            mined_block_hash: outcome.mined_block_hash.clone(),
+            confirmations: outcome
+                .confirmations
+                .and_then(|depth| i32::try_from(depth).ok()),
         })
         .await?;
     state

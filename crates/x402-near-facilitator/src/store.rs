@@ -209,6 +209,12 @@ pub struct TerminalJournalEntry {
     pub gas_burnt: Option<String>,
     pub tokens_burnt: Option<String>,
     pub actual_yocto_near: String,
+    /// eip155 reorg-safety audit trail behind the confirmation-depth decision;
+    /// all `None` for NEAR. `mined_block_number` is a decimal string for the
+    /// `NUMERIC(20,0)` column.
+    pub mined_block_number: Option<String>,
+    pub mined_block_hash: Option<String>,
+    pub confirmations: Option<i32>,
 }
 
 #[derive(Clone, Debug)]
@@ -680,6 +686,10 @@ impl PgStore {
         Ok(())
     }
 
+    // One cohesive terminalization transaction: lock the row, enforce the
+    // idempotent/allowed transition, release the budget, and write the terminal
+    // result plus the eip155 confirmation-depth audit columns.
+    #[allow(clippy::too_many_lines)]
     pub async fn mark_terminal(&self, entry: &TerminalJournalEntry) -> Result<(), StoreError> {
         if !entry.state.is_terminal() {
             return Err(StoreError::Transition {
@@ -756,7 +766,9 @@ impl PgStore {
             "UPDATE settlements SET \
                 state = $2, terminal_http_status = $3, terminal_response_bytes = $4, \
                 error_code = $5, error_detail = $6, gas_burnt = $7::numeric, \
-                tokens_burnt = $8::numeric, finalized_at = now(), updated_at = now() \
+                tokens_burnt = $8::numeric, mined_block_number = $9::numeric, \
+                mined_block_hash = $10, confirmations = $11, \
+                finalized_at = now(), updated_at = now() \
              WHERE id = $1",
         )
         .bind(entry.settlement_id)
@@ -767,6 +779,9 @@ impl PgStore {
         .bind(&entry.error_detail)
         .bind(entry.gas_burnt.as_deref().unwrap_or("0"))
         .bind(entry.tokens_burnt.as_deref().unwrap_or("0"))
+        .bind(entry.mined_block_number.as_deref())
+        .bind(entry.mined_block_hash.as_deref())
+        .bind(entry.confirmations)
         .execute(&mut *transaction)
         .await?;
         insert_event(

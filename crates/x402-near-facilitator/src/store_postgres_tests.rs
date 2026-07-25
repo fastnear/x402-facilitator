@@ -415,6 +415,9 @@ async fn lifecycle_terminalization_and_replay_are_durable_and_idempotent() -> Te
         gas_burnt: Some("3".to_owned()),
         tokens_burnt: Some("7".to_owned()),
         actual_yocto_near: "7".to_owned(),
+        mined_block_number: None,
+        mined_block_hash: None,
+        confirmations: None,
     };
     assert!(matches!(
         database.store.mark_terminal(&invalid_success).await,
@@ -442,6 +445,9 @@ async fn lifecycle_terminalization_and_replay_are_durable_and_idempotent() -> Te
         gas_burnt: Some("3".to_owned()),
         tokens_burnt: Some("7".to_owned()),
         actual_yocto_near: "7".to_owned(),
+        mined_block_number: None,
+        mined_block_hash: None,
+        confirmations: None,
     };
     database.store.mark_terminal(&terminal).await?;
     database.store.mark_terminal(&terminal).await?;

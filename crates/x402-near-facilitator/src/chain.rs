@@ -654,6 +654,15 @@ pub struct TerminalOutcome {
     pub gas_units: u64,
     /// Present iff `!success`: the authoritative on-chain failure reason.
     pub failure_detail: Option<String>,
+    /// The block the settled transaction mined into. `None` for NEAR (finality
+    /// is fast-final, not block-anchored); `Some` for eip155, journaled as the
+    /// reorg-safety audit trail behind the confirmation-depth decision.
+    pub mined_block_number: Option<u64>,
+    /// The mined block hash, when the chain reports it. eip155-only.
+    pub mined_block_hash: Option<String>,
+    /// The confirmation depth observed when this outcome was accepted as
+    /// terminal (`>= required_confirmations` for eip155). `None` for NEAR.
+    pub confirmations: Option<u64>,
 }
 
 /// A neutral verification rejection: the machine reason plus the flag the engine
@@ -755,6 +764,9 @@ fn evm_terminal_to_neutral(outcome: &EvmTerminalOutcome) -> TerminalOutcome {
         fee_atomic: outcome.fee_wei,
         gas_units: outcome.gas_used,
         failure_detail: (!outcome.success).then(|| "evm_execution_reverted".to_owned()),
+        mined_block_number: Some(outcome.block_number),
+        mined_block_hash: outcome.block_hash.map(|hash| hash.to_string()),
+        confirmations: Some(outcome.confirmations),
     }
 }
 
@@ -830,6 +842,9 @@ fn interpret_near_final(
             fee_atomic,
             gas_units,
             failure_detail: None,
+            mined_block_number: None,
+            mined_block_hash: None,
+            confirmations: None,
         }),
         Err(error) if error.is_definitive_failure() => {
             NearInterpretation::Terminal(TerminalOutcome {
@@ -839,6 +854,9 @@ fn interpret_near_final(
                 fee_atomic,
                 gas_units,
                 failure_detail: Some(error.to_string()),
+                mined_block_number: None,
+                mined_block_hash: None,
+                confirmations: None,
             })
         }
         Err(error) => NearInterpretation::Indeterminate(error.to_string()),
