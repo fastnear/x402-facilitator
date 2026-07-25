@@ -86,6 +86,26 @@ impl ChainProvider {
         }
     }
 
+    /// The eip155 pre-verify payment identity: the offline ERC-3009 EIP-712
+    /// transfer hash used by the settle path for idempotency before the
+    /// authoritative on-chain verify. NEAR derives its equivalent hash by
+    /// decoding the signed delegate at the service layer, so this is eip155-only
+    /// and returns `not_eip155` for a NEAR provider (the settle path never calls
+    /// it there).
+    ///
+    /// # Errors
+    ///
+    /// Returns the rejection reason string if the request is not a well-formed
+    /// eip155 payment, or `not_eip155` for a NEAR provider.
+    pub fn offline_payment_hash(&self, request: &proto::VerifyRequest) -> Result<[u8; 32], String> {
+        match self {
+            Self::Near(_) => Err("not_eip155".to_owned()),
+            Self::Evm(provider) => provider
+                .offline_payment_hash(request)
+                .map_err(|rejection| rejection.reason),
+        }
+    }
+
     /// Probe that both configured RPC endpoints report the expected chain and a
     /// final block. This is the chain-liveness half of readiness.
     pub async fn readiness_probe(&self) -> bool {

@@ -639,34 +639,61 @@ async fn settle_inner(state: &AppState, request: Request) -> Response {
         Ok(parsed) => parsed,
         Err(error) => return error.into_response(),
     };
-    let decoded = match decode_signed_delegate(&parsed.meta.signed_delegate_action) {
-        Ok(decoded) => decoded,
-        Err(failure) => {
-            return protocol_json(
-                StatusCode::OK,
-                &SettleResponse::failure(
-                    failure.reason(),
-                    None,
-                    None,
-                    String::new(),
-                    state.config.network.clone(),
-                ),
-            );
+    // Chain-neutral pre-verify payment identity for idempotency. NEAR decodes
+    // and signature-checks the base64 signed delegate; eip155 computes the
+    // offline ERC-3009 EIP-712 transfer hash from the authorization (no RPC).
+    // The authoritative on-chain validity check is `provider.verify` below, for
+    // both chains; this only establishes the idempotency key.
+    let payment_hash = match state.config.chain_kind {
+        ChainKind::Near => {
+            let signed_delegate_action =
+                parsed.meta.signed_delegate_action.as_deref().unwrap_or("");
+            let decoded = match decode_signed_delegate(signed_delegate_action) {
+                Ok(decoded) => decoded,
+                Err(failure) => {
+                    return protocol_json(
+                        StatusCode::OK,
+                        &SettleResponse::failure(
+                            failure.reason(),
+                            None,
+                            None,
+                            String::new(),
+                            state.config.network.clone(),
+                        ),
+                    );
+                }
+            };
+            if !decoded.signed_delegate.verify() {
+                return protocol_json(
+                    StatusCode::OK,
+                    &SettleResponse::failure(
+                        VerificationFailure::InvalidSignature.reason(),
+                        None,
+                        None,
+                        String::new(),
+                        state.config.network.clone(),
+                    ),
+                );
+            }
+            decoded.payment_hash
         }
+        ChainKind::Eip155 => match state.provider.offline_payment_hash(&parsed.raw) {
+            Ok(hash) => hash,
+            Err(reason) => {
+                return protocol_json(
+                    StatusCode::OK,
+                    &SettleResponse::failure(
+                        reason,
+                        None,
+                        None,
+                        String::new(),
+                        state.config.network.clone(),
+                    ),
+                );
+            }
+        },
     };
-    if !decoded.signed_delegate.verify() {
-        return protocol_json(
-            StatusCode::OK,
-            &SettleResponse::failure(
-                VerificationFailure::InvalidSignature.reason(),
-                None,
-                None,
-                String::new(),
-                state.config.network.clone(),
-            ),
-        );
-    }
-    let Ok(fingerprint) = request_fingerprint(&parsed.value, &decoded.payment_hash) else {
+    let Ok(fingerprint) = request_fingerprint(&parsed.value, &payment_hash) else {
         return ApiError::new(
             StatusCode::BAD_REQUEST,
             "invalid_json",
@@ -678,7 +705,7 @@ async fn settle_inner(state: &AppState, request: Request) -> Response {
         state,
         client.id,
         parsed.meta.payment_identifier.as_deref(),
-        &decoded.payment_hash,
+        &payment_hash,
         &fingerprint,
     )
     .await
@@ -701,7 +728,7 @@ async fn settle_inner(state: &AppState, request: Request) -> Response {
             state,
             client.id,
             parsed.meta.payment_identifier.as_deref(),
-            &decoded.payment_hash,
+            &payment_hash,
             &fingerprint,
         )
         .await
@@ -730,7 +757,7 @@ async fn settle_inner(state: &AppState, request: Request) -> Response {
                 state,
                 client.id,
                 parsed.meta.payment_identifier.as_deref(),
-                &decoded.payment_hash,
+                &payment_hash,
                 &fingerprint,
             )
             .await
@@ -766,7 +793,7 @@ async fn settle_inner(state: &AppState, request: Request) -> Response {
             state,
             facilitator,
             &parsed,
-            &decoded.payment_hash,
+            &payment_hash,
             client.id,
             &fingerprint,
         )
@@ -784,7 +811,7 @@ async fn settle_inner(state: &AppState, request: Request) -> Response {
                 state,
                 client.id,
                 parsed.meta.payment_identifier.as_deref(),
-                &decoded.payment_hash,
+                &payment_hash,
                 &fingerprint,
             )
             .await
@@ -802,7 +829,7 @@ async fn settle_inner(state: &AppState, request: Request) -> Response {
                 state,
                 client.id,
                 parsed.meta.payment_identifier.as_deref(),
-                &decoded.payment_hash,
+                &payment_hash,
                 &fingerprint,
             )
             .await
@@ -821,7 +848,7 @@ async fn settle_inner(state: &AppState, request: Request) -> Response {
             );
         }
     };
-    if verified.payment_hash != decoded.payment_hash {
+    if verified.payment_hash != payment_hash {
         return ApiError::unavailable(
             "verification_inconsistent",
             "payment verification was internally inconsistent",

@@ -36,7 +36,9 @@ pub struct RequestMeta {
     pub asset: String,
     pub amount: String,
     pub pay_to: String,
-    pub signed_delegate_action: String,
+    /// NEAR only: the base64 `SignedDelegateAction`. `None` for eip155, whose
+    /// mechanism payload is an ERC-3009 authorization plus the payer signature.
+    pub signed_delegate_action: Option<String>,
     pub payment_identifier: Option<String>,
 }
 
@@ -221,11 +223,6 @@ pub fn parse_request(
         .get("payload")
         .and_then(Value::as_object)
         .ok_or(RequestError::Field("paymentPayload.payload"))?;
-    ensure_allowed_keys(
-        mechanism_payload,
-        &["signedDelegateAction"],
-        "paymentPayload.payload",
-    )?;
     if let Some(extensions) = payload.get("extensions")
         && !extensions.is_object()
     {
@@ -237,11 +234,8 @@ pub fn parse_request(
     let asset = required_string(requirements, "asset", "paymentRequirements.asset")?;
     let amount = required_decimal_string(requirements, "amount", "paymentRequirements.amount")?;
     let pay_to = required_string(requirements, "payTo", "paymentRequirements.payTo")?;
-    let signed_delegate_action = required_string(
-        mechanism_payload,
-        "signedDelegateAction",
-        "paymentPayload.payload.signedDelegateAction",
-    )?;
+
+    let signed_delegate_action = parse_mechanism_payload(mechanism_payload, &network)?;
 
     // These fields must at least have the expected scalar shape at the HTTP
     // boundary. Exact equality and chain semantics remain the mechanism's job.
@@ -267,6 +261,48 @@ pub fn parse_request(
             payment_identifier,
         },
     })
+}
+
+/// Validate the chain-specific mechanism payload (`paymentPayload.payload`) and
+/// return the NEAR base64 `SignedDelegateAction`, or `None` for eip155. NEAR
+/// carries a signed delegate; eip155 carries an ERC-3009 `authorization` object
+/// plus the payer `signature`. Only the shape is checked here — the deep field
+/// and signature validation is the mechanism's job (NEAR decode at settle, or
+/// the upstream eip155 provider parser at verify/settle).
+fn parse_mechanism_payload(
+    mechanism_payload: &Map<String, Value>,
+    network: &str,
+) -> Result<Option<String>, RequestError> {
+    if network.starts_with("eip155:") {
+        ensure_allowed_keys(
+            mechanism_payload,
+            &["authorization", "signature"],
+            "paymentPayload.payload",
+        )?;
+        if !mechanism_payload
+            .get("authorization")
+            .is_some_and(Value::is_object)
+        {
+            return Err(RequestError::Field("paymentPayload.payload.authorization"));
+        }
+        required_string(
+            mechanism_payload,
+            "signature",
+            "paymentPayload.payload.signature",
+        )?;
+        Ok(None)
+    } else {
+        ensure_allowed_keys(
+            mechanism_payload,
+            &["signedDelegateAction"],
+            "paymentPayload.payload",
+        )?;
+        Ok(Some(required_string(
+            mechanism_payload,
+            "signedDelegateAction",
+            "paymentPayload.payload.signedDelegateAction",
+        )?))
+    }
 }
 
 pub fn request_fingerprint(
@@ -641,6 +677,96 @@ mod tests {
         assert!(parse_request(&encoded(&missing_nested_version), &policy).is_err());
     }
 
+    fn eip155_request_value() -> Value {
+        serde_json::json!({
+            "x402Version": 2,
+            "paymentPayload": {
+                "x402Version": 2,
+                "accepted": {
+                    "scheme": "exact",
+                    "network": "eip155:84532",
+                    "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+                    "amount": "1000",
+                    "payTo": "0xA2AcB5d3aC1c35999532624188470eC6228039Dc",
+                    "maxTimeoutSeconds": 60,
+                    "extra": { "name": "USDC", "version": "2" },
+                },
+                "payload": {
+                    "authorization": {
+                        "from": "0x11eFA374c489D106F9B6AC1b9b73a7A54C237c6D",
+                        "to": "0xA2AcB5d3aC1c35999532624188470eC6228039Dc",
+                        "value": "1000",
+                        "validAfter": "0",
+                        "validBefore": "9999999999",
+                        "nonce": "0x0000000000000000000000000000000000000000000000000000000000000001",
+                    },
+                    "signature": "0xdeadbeef",
+                },
+            },
+            "paymentRequirements": {
+                "scheme": "exact",
+                "network": "eip155:84532",
+                "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+                "amount": "1000",
+                "payTo": "0xA2AcB5d3aC1c35999532624188470eC6228039Dc",
+                "maxTimeoutSeconds": 60,
+                "extra": { "name": "USDC", "version": "2" },
+            },
+        })
+    }
+
+    #[test]
+    fn eip155_payload_parses_with_authorization_and_no_signed_delegate() {
+        let policy = PaymentIdentifierConfig::default();
+        let Ok(parsed) = parse_request(&encoded(&eip155_request_value()), &policy) else {
+            std::process::abort();
+        };
+        assert_eq!(parsed.meta.network, "eip155:84532");
+        assert!(parsed.meta.signed_delegate_action.is_none());
+    }
+
+    #[test]
+    fn near_payload_still_requires_signed_delegate() {
+        let policy = PaymentIdentifierConfig::default();
+        let Ok(parsed) = parse_request(&encoded(&request_value()), &policy) else {
+            std::process::abort();
+        };
+        assert_eq!(
+            parsed.meta.signed_delegate_action.as_deref(),
+            Some("c2lnbmVkLWRlbGVnYXRl")
+        );
+    }
+
+    #[test]
+    fn mechanism_payload_must_match_network_namespace() {
+        let policy = PaymentIdentifierConfig::default();
+        // eip155 network carrying a NEAR signed-delegate payload is rejected.
+        let mut evm_with_near = eip155_request_value();
+        evm_with_near["paymentPayload"]["payload"] =
+            serde_json::json!({ "signedDelegateAction": "c2lnbmVk" });
+        assert!(parse_request(&encoded(&evm_with_near), &policy).is_err());
+        // NEAR network carrying an eip155 authorization payload is rejected.
+        let mut near_with_evm = request_value();
+        near_with_evm["paymentPayload"]["payload"] =
+            serde_json::json!({ "authorization": {}, "signature": "0xab" });
+        assert!(parse_request(&encoded(&near_with_evm), &policy).is_err());
+    }
+
+    #[test]
+    fn eip155_requires_authorization_object_and_signature_string() {
+        let policy = PaymentIdentifierConfig::default();
+        let mut no_signature = eip155_request_value();
+        if let Some(payload) = no_signature["paymentPayload"]["payload"].as_object_mut() {
+            payload.remove("signature");
+        }
+        assert!(parse_request(&encoded(&no_signature), &policy).is_err());
+
+        let mut authorization_not_object = eip155_request_value();
+        authorization_not_object["paymentPayload"]["payload"]["authorization"] =
+            Value::String("nope".to_owned());
+        assert!(parse_request(&encoded(&authorization_not_object), &policy).is_err());
+    }
+
     #[test]
     fn decimal_comparison_is_numeric() {
         assert!(decimal_is_at_least("001000", "1000"));
@@ -677,7 +803,7 @@ mod tests {
             asset: "usdc.testnet".to_owned(),
             amount: "1000".to_owned(),
             pay_to: "sensitive-payee.testnet".to_owned(),
-            signed_delegate_action: "sensitive-signed-delegate".to_owned(),
+            signed_delegate_action: Some("sensitive-signed-delegate".to_owned()),
             payment_identifier: Some("sensitive_identifier_1234".to_owned()),
         };
         let debug = format!("{meta:?}");

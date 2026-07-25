@@ -506,6 +506,52 @@ impl EvmChainProvider {
         })
     }
 
+    /// Compute the ERC-3009 EIP-712 transfer hash offline (no RPC) from a raw
+    /// verify/settle request. This is the payment's idempotency identity; the
+    /// settle path needs it before the authoritative on-chain [`Self::verify`].
+    /// It is byte-identical to the `payment_hash` `verify` returns for the same
+    /// payment, so the downstream consistency check holds for eip155 exactly as
+    /// it does for NEAR's decoded delegate hash.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EvmVerifyRejection`] if the request is not a well-formed eip155
+    /// exact (ERC-3009) payment or its asset does not match this instance.
+    pub fn offline_payment_hash(
+        &self,
+        request: &proto::VerifyRequest,
+    ) -> Result<[u8; 32], EvmVerifyRejection> {
+        let parsed = FacilitatorVerifyRequest::try_from(request.clone())
+            .map_err(|error| EvmVerifyRejection::definitive(error.to_string()))?;
+        let payload = match parsed {
+            FacilitatorVerifyRequest::Eip3009 {
+                payment_payload, ..
+            } => payment_payload,
+            FacilitatorVerifyRequest::Permit2 { .. } => {
+                return Err(EvmVerifyRejection::definitive("unsupported_permit2_scheme"));
+            }
+        };
+        let asset = Address::from(payload.accepted.asset);
+        if asset != self.asset {
+            return Err(EvmVerifyRejection::definitive("asset_mismatch"));
+        }
+        let authorization = Erc3009Authorization {
+            from: payload.payload.authorization.from,
+            to: payload.payload.authorization.to,
+            value: payload.payload.authorization.value,
+            valid_after: U256::from(payload.payload.authorization.valid_after.as_secs()),
+            valid_before: U256::from(payload.payload.authorization.valid_before.as_secs()),
+            nonce: payload.payload.authorization.nonce,
+        };
+        let domain = build_transfer_domain(
+            &payload.accepted.extra.name,
+            &payload.accepted.extra.version,
+            self.chain_id,
+            asset,
+        );
+        Ok(eip712_transfer_hash(&authorization, &domain).0)
+    }
+
     /// Snapshot the signer's next account (transaction) nonce.
     ///
     /// # Errors
