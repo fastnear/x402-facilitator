@@ -128,6 +128,12 @@ enum KeyCommand {
         #[arg(long)]
         output: PathBuf,
     },
+    /// Write a new secp256k1 EVM signer to a mode-0600, create-new file; print
+    /// only its 0x address (put that in the eip155 config's `relayer_account_id`).
+    GenerateEvmRelayer {
+        #[arg(long)]
+        output: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -279,6 +285,15 @@ fn key(command: KeyCommand) -> Result<()> {
             writeln!(file, "{secret}").context("write relayer credential")?;
             file.sync_all().context("sync relayer credential")?;
             println!("{public}");
+            Ok(())
+        }
+        KeyCommand::GenerateEvmRelayer { output } => {
+            // The secp256k1 key is generated, written mode-0600, and dropped
+            // inside the provider crate; only the 0x address is returned here.
+            let address =
+                x402_chain_eip155_provider::provider::generate_signer_key_file(&output)
+                    .with_context(|| format!("create {}", output.display()))?;
+            println!("{address}");
             Ok(())
         }
     }

@@ -119,6 +119,17 @@ async fn main() -> Result<()> {
                 )
                 .await
                 .context("connect EVM settlement provider")?;
+                // The signer address is derived from the key file, but the
+                // relayer-policy lookups key on config.relayer_account_id. A
+                // mismatch would fail readiness silently, so fail fast instead.
+                let signer_address = provider.signer_address().to_string();
+                ensure!(
+                    config.relayer_account_id.eq_ignore_ascii_case(&signer_address),
+                    "config relayer_account_id {} does not match the EVM signer address {} \
+                     derived from the key file",
+                    config.relayer_account_id,
+                    signer_address
+                );
                 (None, ChainProvider::Evm(Box::new(provider)))
             }
         };

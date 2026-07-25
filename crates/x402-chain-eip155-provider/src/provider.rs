@@ -17,6 +17,8 @@ use alloy_primitives::{Address, B256, Bytes, U256};
 use alloy_provider::Provider;
 use alloy_signer_local::PrivateKeySigner;
 use std::fmt;
+use std::io::Write as _;
+use std::path::Path;
 use url::Url;
 use x402_types::chain::{ChainId, FromConfig};
 use x402_types::proto;
@@ -163,6 +165,34 @@ pub enum EvmConnectError {
     /// The upstream provider failed to connect / validate required contracts.
     #[error("evm provider connect failed: {0}")]
     Connect(String),
+}
+
+/// Generate a new secp256k1 signer, write its `0x`-prefixed hex private key to a
+/// fresh mode-0600 file, and return the signer's `0x` address. The file is opened
+/// `create_new`, so an existing credential is never clobbered. The private key is
+/// never returned, printed, or placed in process arguments — it exists only in the
+/// short-lived generator process and in `output`. The written form (`0x` + 64 hex,
+/// one trailing newline) is exactly what the service credential loader expects.
+///
+/// # Errors
+///
+/// Returns the underlying [`std::io::Error`] if `output` already exists or cannot
+/// be created / written.
+pub fn generate_signer_key_file(output: &Path) -> std::io::Result<String> {
+    let signer = PrivateKeySigner::random();
+    let address = signer.address().to_string();
+    let key_hex = format!("0x{}", hex::encode(signer.to_bytes().as_slice()));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options.open(output)?;
+    writeln!(file, "{key_hex}")?;
+    file.sync_all()?;
+    Ok(address)
 }
 
 /// Why an RPC-facing operation failed.
@@ -729,5 +759,31 @@ mod tests {
             classify_confirmations(&facts(false), 200, 5),
             EvmReconcileStatus::Terminal(ref outcome) if !outcome.success
         ));
+    }
+
+    #[test]
+    fn generated_signer_file_is_private_and_round_trips() -> Result<(), Box<dyn std::error::Error>> {
+        let path = std::env::temp_dir().join(format!("x402-evm-keygen-{}.key", std::process::id()));
+        let _remove_stale = std::fs::remove_file(&path);
+        let address = generate_signer_key_file(&path)?;
+
+        // The printed value is a valid 0x address.
+        assert!(address.parse::<Address>().is_ok());
+        // The credential round-trips to the same signer address the caller was told.
+        let contents = std::fs::read_to_string(&path)?;
+        let signer = contents.trim().parse::<PrivateKeySigner>()?;
+        assert_eq!(signer.address().to_string(), address);
+        // The credential is owner-only (mode 0600).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&path)?.permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        // create_new refuses to clobber an existing credential.
+        assert!(generate_signer_key_file(&path).is_err());
+
+        let _remove = std::fs::remove_file(&path);
+        Ok(())
     }
 }
