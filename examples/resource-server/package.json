@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "check": "node --check index.mjs && node --check journal.mjs && node --test journal.test.mjs && node check-imports.mjs",
+    "check": "node --check index.mjs && node --check journal.mjs && node --check legacy-v1.mjs && node --test journal.test.mjs && node --test legacy-v1.test.mjs && node check-imports.mjs",
     "start": "node index.mjs"
   },
   "dependencies": {

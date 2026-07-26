@@ -23,6 +23,11 @@ import {
   payloadFingerprint,
   workFingerprint,
 } from "./journal.mjs";
+import {
+  buildUnpaidHintBody,
+  buildV1PaymentRequiredBody,
+  buildV1Requirements,
+} from "./legacy-v1.mjs";
 
 const facilitatorUrl = requiredEnvironment("FACILITATOR_URL");
 const apiKey = await readCredential(requiredEnvironment("FACILITATOR_API_KEY_FILE"));
@@ -95,6 +100,38 @@ const routes = {
     },
   },
 };
+
+// Dual-emit: the v2 PAYMENT-REQUIRED header stays authoritative, but legacy
+// x402 v1 (0.x SDK) clients only read the 402 JSON body, so eip155 routes
+// also serve the v1 shape there. NEAR has no v1 network name; those demos
+// serve a hint pointing at the header instead.
+const v1Requirements = isEvm
+  ? buildV1Requirements({
+      network,
+      asset,
+      payTo,
+      amount,
+      resourceUrl,
+      description: routes[route].description,
+      mimeType: routes[route].mimeType,
+      extra: acceptsExtra,
+    })
+  : undefined;
+const unpaidBody = v1Requirements
+  ? buildV1PaymentRequiredBody(v1Requirements)
+  : buildUnpaidHintBody();
+// These hooks must never throw: @x402/core awaits them uncaught, so a throw
+// would turn the 402 into a 500. Both close over frozen precomputed objects.
+routes[route].unpaidResponseBody = () => ({
+  contentType: "application/json",
+  body: unpaidBody,
+});
+routes[route].settlementFailedResponseBody = (context, failure) => ({
+  contentType: "application/json",
+  body: v1Requirements
+    ? buildV1PaymentRequiredBody(v1Requirements, failure?.errorReason ?? "settlement_failed")
+    : { ...unpaidBody, error: failure?.errorReason ?? "settlement_failed" },
+});
 
 // Development-only journal. Production must use durable transactional storage.
 const deliveries = new DeliveryJournal();
