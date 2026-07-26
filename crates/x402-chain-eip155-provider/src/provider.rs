@@ -17,8 +17,10 @@ use alloy_primitives::{Address, B256, Bytes, U256};
 use alloy_provider::Provider;
 use alloy_signer_local::PrivateKeySigner;
 use std::fmt;
+use std::future::Future;
 use std::io::Write as _;
 use std::path::Path;
+use std::time::Duration;
 use url::Url;
 use x402_types::chain::{ChainId, FromConfig};
 use x402_types::proto;
@@ -468,9 +470,14 @@ impl EvmChainProvider {
         }
 
         // Upstream's authoritative decision (domain, balance, simulation).
-        let response = verify_eip3009_payment(&self.upstream, &payload, &requirements)
-            .await
-            .map_err(|error| classify_verify_error(&error))?;
+        // Ambiguous transport failures (public endpoints 429 under burst) get
+        // the bounded retry; definitive rejections return immediately.
+        let response = retry_transient(
+            || verify_eip3009_payment(&self.upstream, &payload, &requirements),
+            |error| classify_verify_error(error).rpc_ambiguous,
+        )
+        .await
+        .map_err(|error| classify_verify_error(&error))?;
         let payer = match response {
             VerifyResponse::Valid { payer } => payer,
             VerifyResponse::Invalid { reason, .. } => {
@@ -558,11 +565,17 @@ impl EvmChainProvider {
     ///
     /// Returns [`EvmRpcError`] if the nonce lookup fails.
     pub async fn account_nonce(&self) -> Result<u64, EvmRpcError> {
-        self.upstream
-            .inner()
-            .get_transaction_count(self.signer.address())
-            .await
-            .map_err(|error| EvmRpcError::Rpc(error.to_string()))
+        retry_transient(
+            || async {
+                self.upstream
+                    .inner()
+                    .get_transaction_count(self.signer.address())
+                    .await
+                    .map_err(|error| EvmRpcError::Rpc(error.to_string()))
+            },
+            |_| true,
+        )
+        .await
     }
 
     /// The signer's native-gas (ETH) balance in wei. Clamped into `u128`, which
@@ -572,12 +585,17 @@ impl EvmChainProvider {
     ///
     /// Returns [`EvmRpcError`] if the balance lookup fails.
     pub async fn gas_balance_wei(&self) -> Result<u128, EvmRpcError> {
-        let balance = self
-            .upstream
-            .inner()
-            .get_balance(self.signer.address())
-            .await
-            .map_err(|error| EvmRpcError::Rpc(error.to_string()))?;
+        let balance = retry_transient(
+            || async {
+                self.upstream
+                    .inner()
+                    .get_balance(self.signer.address())
+                    .await
+                    .map_err(|error| EvmRpcError::Rpc(error.to_string()))
+            },
+            |_| true,
+        )
+        .await?;
         Ok(u128::try_from(balance).unwrap_or(u128::MAX))
     }
 
@@ -589,6 +607,10 @@ impl EvmChainProvider {
     ///
     /// Returns [`EvmRpcError`] if any of the block/nonce/balance lookups fail.
     pub async fn head(&self) -> Result<EvmHead, EvmRpcError> {
+        retry_transient(|| self.head_once(), |_| true).await
+    }
+
+    async fn head_once(&self) -> Result<EvmHead, EvmRpcError> {
         let inner = self.upstream.inner();
         let address = self.signer.address();
         let block_number = inner
@@ -669,12 +691,17 @@ impl EvmChainProvider {
     /// gas cap. Priced with alloy's estimator (which carries base-fee headroom);
     /// the cap is immutable once signed.
     async fn fee_envelope(&self) -> Result<EvmFeeEnvelope, EvmRpcError> {
-        let estimate = self
-            .upstream
-            .inner()
-            .estimate_eip1559_fees()
-            .await
-            .map_err(|error| EvmRpcError::Rpc(error.to_string()))?;
+        let estimate = retry_transient(
+            || async {
+                self.upstream
+                    .inner()
+                    .estimate_eip1559_fees()
+                    .await
+                    .map_err(|error| EvmRpcError::Rpc(error.to_string()))
+            },
+            |_| true,
+        )
+        .await?;
         Ok(EvmFeeEnvelope {
             gas_limit: self.gas_limit,
             max_fee_per_gas: estimate.max_fee_per_gas,
@@ -692,6 +719,10 @@ impl EvmChainProvider {
     ///
     /// Returns [`EvmRpcError`] if the receipt or head lookups fail.
     pub async fn reconcile(&self, tx_hash: B256) -> Result<EvmReconcileStatus, EvmRpcError> {
+        retry_transient(|| self.reconcile_once(tx_hash), |_| true).await
+    }
+
+    async fn reconcile_once(&self, tx_hash: B256) -> Result<EvmReconcileStatus, EvmRpcError> {
         let inner = self.upstream.inner();
         let Some(receipt) = inner
             .get_transaction_receipt(tx_hash)
@@ -752,10 +783,95 @@ impl EvmChainProvider {
     }
 }
 
+/// Backoff schedule between read-only RPC retry attempts (initial attempt plus
+/// one retry per entry). Public endpoints rate-limit under burst — a paid flow
+/// fans out several calls — and without retries one throttled call surfaces as
+/// a client-facing 503 through the engine's fail-closed ambiguity handling
+/// (2026-07-26 incident). Two short retries absorb burst throttling without
+/// masking a real outage.
+const RPC_RETRY_DELAYS: [Duration; 2] = [Duration::from_millis(300), Duration::from_millis(900)];
+
+/// Bounded retry for read-only RPC operations. Retries only while `transient`
+/// classifies the error as retryable; definitive results and rejections return
+/// immediately. Broadcast is deliberately never routed through this helper —
+/// submission recovery belongs to the journaled reconcile loop, which
+/// rebroadcasts exact stored bytes.
+async fn retry_transient<T, E, Fut>(
+    mut call: impl FnMut() -> Fut,
+    transient: impl Fn(&E) -> bool,
+) -> Result<T, E>
+where
+    Fut: Future<Output = Result<T, E>>,
+{
+    let mut result = call().await;
+    for delay in RPC_RETRY_DELAYS {
+        match &result {
+            Err(error) if transient(error) => {
+                tokio::time::sleep(delay).await;
+                result = call().await;
+            }
+            _ => break,
+        }
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use x402_types::proto::PaymentVerificationError;
+
+    #[tokio::test(start_paused = true)]
+    async fn transient_errors_retry_until_success() {
+        let attempts = std::cell::Cell::new(0_u32);
+        let result: Result<u32, &str> = retry_transient(
+            || {
+                attempts.set(attempts.get() + 1);
+                let attempt = attempts.get();
+                async move {
+                    if attempt < 3 {
+                        Err("throttled")
+                    } else {
+                        Ok(attempt)
+                    }
+                }
+            },
+            |_| true,
+        )
+        .await;
+        assert_eq!(result, Ok(3));
+        assert_eq!(attempts.get(), 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn definitive_errors_never_retry() {
+        let attempts = std::cell::Cell::new(0_u32);
+        let result: Result<u32, &str> = retry_transient(
+            || {
+                attempts.set(attempts.get() + 1);
+                async { Err("invalid_signature") }
+            },
+            |_| false,
+        )
+        .await;
+        assert_eq!(result, Err("invalid_signature"));
+        assert_eq!(attempts.get(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn transient_retries_are_bounded_and_return_the_last_error() {
+        let attempts = std::cell::Cell::new(0_u32);
+        let result: Result<u32, &str> = retry_transient(
+            || {
+                attempts.set(attempts.get() + 1);
+                async { Err("throttled") }
+            },
+            |_| true,
+        )
+        .await;
+        assert_eq!(result, Err("throttled"));
+        assert_eq!(attempts.get(), 1 + RPC_RETRY_DELAYS.len() as u32);
+    }
 
     #[test]
     fn onchain_failure_is_ambiguous_verification_error_is_definitive() {

@@ -4,6 +4,28 @@ All notable changes to the x402 NEAR facilitator are recorded here. The format
 follows [Keep a Changelog](https://keepachangelog.com/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.1]
+
+Operational hardening after the first third-party paid traffic on Base
+(2026-07-26): public RPC endpoints rate-limit under real paid-flow bursts,
+and one throttled call previously surfaced as a client-facing 503 through
+the engine's fail-closed ambiguity handling.
+
+### Fixed
+
+- **Bounded retry with backoff for read-only EVM RPC operations** (verify,
+  signer head/nonce/balance, fee estimation, reconcile receipt lookups): up
+  to two short retries absorb burst throttling without masking real
+  outages. Broadcast is deliberately not retried — submission recovery
+  remains the journaled reconcile loop's job, which rebroadcasts exact
+  stored bytes.
+- Chain-neutral wording for the shared verify-timeout, settle re-verify,
+  and settlement-worker unavailability messages, which said "NEAR" on
+  eip155 instances.
+- `deploy/config/base.json.example` now carries the burst-tolerant public
+  RPC pair (`base.drpc.org` primary, Blast API backup) matching the live
+  Base instance.
+
 ## [0.4.0]
 
 Legacy x402 v1 wire compatibility, gated and off by default. Aimed at

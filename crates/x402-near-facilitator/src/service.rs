@@ -405,8 +405,9 @@ async fn verify(State(state): State<AppState>, request: Request) -> Response {
     let deadline = Duration::from_secs(state.config.request_limits.verify_timeout_seconds);
     let response = match tokio::time::timeout(deadline, verify_inner(&state, request)).await {
         Ok(response) => response,
-        Err(_) => ApiError::unavailable("verification_timeout", "NEAR verification timed out")
-            .into_response(),
+        Err(_) => {
+            ApiError::unavailable("verification_timeout", "verification timed out").into_response()
+        }
     };
     state.metrics.record_request(
         "verify",
@@ -847,7 +848,7 @@ async fn settle_inner(state: &AppState, request: Request) -> Response {
                 }
                 return ApiError::unavailable(
                     "rpc_unavailable",
-                    "NEAR verification is temporarily unavailable",
+                    "verification is temporarily unavailable",
                 )
                 .into_response();
             }
@@ -1377,7 +1378,7 @@ async fn run_new_settlement(
                 &state,
                 settlement_id,
                 "rpc_unavailable",
-                "NEAR verification was unavailable before transaction preparation",
+                "verification was unavailable before transaction preparation",
             )
             .await;
             return;
