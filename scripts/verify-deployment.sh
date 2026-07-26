@@ -32,15 +32,27 @@ import json
 import sys
 
 body = json.load(sys.stdin)
-assert len(body["kinds"]) == 1
-kind = body["kinds"][0]
+kinds = body["kinds"]
+assert 1 <= len(kinds) <= 2
+kind = kinds[0]
 assert kind["x402Version"] == 2
 assert kind["scheme"] == "exact"
 assert kind["network"] in {
     "near:testnet", "near:mainnet",   # NEAR instances
     "eip155:84532", "eip155:8453",    # Base Sepolia / Base mainnet (eip155)
 }
-assert "payment-identifier" in body["extensions"]
+if len(kinds) == 2:
+    # accept_v1 eip155 instances additionally advertise the legacy v1 kind.
+    legacy = kinds[1]
+    assert legacy["x402Version"] == 1
+    assert legacy["scheme"] == "exact"
+    assert legacy["network"] in {"base", "base-sepolia"}
+if kind["network"].startswith("near:"):
+    # The payment-identifier extension is advertised by the NEAR scheme
+    # handler; EVM instances advertise no extensions.
+    assert "payment-identifier" in body["extensions"]
+else:
+    assert isinstance(body["extensions"], list)
 assert isinstance(body["signers"], dict)
 '
 
