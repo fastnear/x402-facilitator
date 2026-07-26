@@ -32,6 +32,15 @@ const payTo = requiredEnvironment("PAY_TO");
 const amount = process.env.AMOUNT ?? "1000";
 const port = parsePort(process.env.PORT ?? "4021");
 
+// Public https URL of the paid endpoint, advertised verbatim as the x402
+// resource URL. The demo sits behind a TLS-terminating proxy that does not
+// forward the original scheme, so deriving the URL per-request would
+// advertise http://.
+const resourceUrl = process.env.RESOURCE_URL;
+if (resourceUrl !== undefined && !/^https:\/\/\S+$/.test(resourceUrl)) {
+  throw new Error("RESOURCE_URL must be an https:// URL");
+}
+
 const isEvm = network.startsWith("eip155:");
 const isNear = network === "near:testnet" || network === "near:mainnet";
 if (!isEvm && !isNear) {
@@ -77,6 +86,7 @@ const routes = {
     ],
     description: "Deterministic paid work with independent delivery deduplication",
     mimeType: "application/json",
+    ...(resourceUrl ? { resource: resourceUrl } : {}),
     extensions: {
       // Optional (not required): a client may send a payment-identifier to opt
       // into resource-layer delivery idempotency (replay returns the cached

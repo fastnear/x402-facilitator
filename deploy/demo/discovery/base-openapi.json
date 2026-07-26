@@ -2,9 +2,10 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Base x402 demo paid work API",
-    "version": "0.3.0",
+    "version": "0.3.1",
     "contact": { "email": "mikedotexe@gmail.com" },
-    "description": "Deterministic paid work demo behind the Base x402 facilitator at base.x402.mikedotexe.com. Payment is 1,000 atomic units of Circle USDC on Base mainnet (eip155:8453, $0.001) per request, settled through an ERC-3009 transferWithAuthorization with relayer-sponsored gas."
+    "description": "Deterministic paid work demo behind the Base x402 facilitator at base.x402.mikedotexe.com. Payment is 1,000 atomic units of Circle USDC on Base mainnet (eip155:8453, $0.001) per request, settled through an ERC-3009 transferWithAuthorization with relayer-sponsored gas.",
+    "x-guidance": "POST /work with JSON {\"input\": \"<string>\"}. An unpaid request returns 402 with x402 v2 payment requirements base64-encoded in the PAYMENT-REQUIRED response header (scheme exact, network eip155:8453, 1000 atomic units of USDC). Sign an ERC-3009 transferWithAuthorization over the token's EIP-712 domain from the requirements extra (name \"USD Coin\", version \"2\") and retry with the signed payment payload base64-encoded in the PAYMENT-SIGNATURE request header. The 200 response is the deterministic SHA-256 digest of the canonical request body."
   },
   "servers": [{ "url": "https://x402-demo-base.mikedotexe.com" }],
   "paths": {
@@ -12,10 +13,10 @@
       "post": {
         "operationId": "paidWork",
         "summary": "Deterministic SHA-256 work, paid via x402 (Base USDC)",
-        "description": "Unpaid requests receive a 402 with x402 v2 payment requirements in the base64 PAYMENT-REQUIRED header (scheme exact, network eip155:8453, with the USDC EIP-712 domain in extra). Resubmit with a PAYMENT-SIGNATURE header containing the signed ERC-3009 payment payload (the payment-identifier extension is required). Replaying the identical paid request returns the cached result without a second settlement; reusing a payment identifier with different work is rejected.",
+        "description": "Unpaid requests receive a 402 with x402 v2 payment requirements in the base64 PAYMENT-REQUIRED header (scheme exact, network eip155:8453, with the USDC EIP-712 domain in extra). Resubmit with a PAYMENT-SIGNATURE header containing the signed ERC-3009 payment payload. The payment-identifier extension is optional: include it to opt into delivery-replay idempotency (replaying the identical paid request returns the cached result without a second settlement; reusing an identifier with different work is rejected).",
         "x-payment-info": {
-          "protocols": ["x402"],
-          "price": { "mode": "fixed", "currency": "USD", "amount": "0.001" }
+          "protocols": [{ "x402": {} }],
+          "price": { "mode": "fixed", "currency": "USD", "amount": "0.001000" }
         },
         "requestBody": {
           "required": true,
