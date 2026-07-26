@@ -27,6 +27,8 @@ import {
   buildUnpaidHintBody,
   buildV1PaymentRequiredBody,
   buildV1Requirements,
+  translateSettleHeaderToV1,
+  translateV1PaymentToV2,
 } from "./legacy-v1.mjs";
 
 const facilitatorUrl = requiredEnvironment("FACILITATOR_URL");
@@ -133,6 +135,31 @@ routes[route].settlementFailedResponseBody = (context, failure) => ({
     : { ...unpaidBody, error: failure?.errorReason ?? "settlement_failed" },
 });
 
+// The v2 requirements this route resolves to, for injecting into translated
+// legacy v1 payments as `accepted`. The middleware deep-equals the accepted
+// core (scheme, network, amount, asset, payTo, maxTimeoutSeconds) against
+// what it computes from `routes` and requires its extra to be a subset of
+// this one (@x402/core@2.19.0 server/index.js:1080-1092, :1847), so this
+// object is built from the same constants as `routes` and must stay
+// byte-identical to the accepts entry in the emitted PAYMENT-REQUIRED
+// header.
+const requirementsV2 = Object.freeze({
+  scheme: "exact",
+  network,
+  amount,
+  asset,
+  payTo,
+  maxTimeoutSeconds: 300,
+  ...(acceptsExtra ? { extra: Object.freeze({ ...acceptsExtra }) } : {}),
+});
+const resourceObject = resourceUrl
+  ? Object.freeze({
+      url: resourceUrl,
+      description: routes[route].description,
+      mimeType: routes[route].mimeType,
+    })
+  : undefined;
+
 // Development-only journal. Production must use durable transactional storage.
 const deliveries = new DeliveryJournal();
 const resourceServer = new x402ResourceServer(facilitator)
@@ -198,6 +225,7 @@ const httpServer = new x402HTTPResourceServer(resourceServer, routes).onProtecte
 );
 
 const app = express();
+app.use(legacyV1PaymentShim);
 app.use(express.json({ limit: "16kb", strict: true }));
 app.use(paymentMiddlewareFromHTTPServer(httpServer));
 app.post("/work", (request, response) => {
@@ -234,6 +262,83 @@ app.post("/work", (request, response) => {
 app.listen(port, "127.0.0.1", () => {
   console.log(`NEAR x402 reference workload listening on http://127.0.0.1:${port}`);
 });
+
+// Legacy v1 payment acceptance. The @x402 middleware reads payments only
+// from the payment-signature header, so a v1 client's X-PAYMENT would be
+// ignored and answered with another 402. When a well-formed v1 exact
+// payment for this route's network arrives, rewrite it into the v2 shape on
+// the request, and mirror the middleware's settlement/rejection responses
+// back into the v1 dialect (X-PAYMENT-RESPONSE header, v1 402 body). On any
+// decode or shape problem the request is left untouched and falls through
+// to the normal unpaid 402, which dual-emits the v1 body.
+function legacyV1PaymentShim(request, response, next) {
+  if (!isEvm || request.headers["payment-signature"]) {
+    next();
+    return;
+  }
+  const header = request.headers["x-payment"];
+  if (typeof header !== "string" || header === "") {
+    next();
+    return;
+  }
+  let v1Payload;
+  try {
+    v1Payload = JSON.parse(Buffer.from(header, "base64").toString("utf8"));
+  } catch {
+    next();
+    return;
+  }
+  const translated = translateV1PaymentToV2(v1Payload, { requirementsV2, resourceObject });
+  if (!translated) {
+    next();
+    return;
+  }
+  request.headers["payment-signature"] = Buffer.from(JSON.stringify(translated)).toString("base64");
+  request.x402LegacyV1 = true;
+  // The middleware sets PAYMENT-RESPONSE via setHeader after settling,
+  // while the handler's output is still buffered, so wrapping setHeader is
+  // early enough to mirror it.
+  const setHeader = response.setHeader.bind(response);
+  response.setHeader = (name, value) => {
+    if (typeof name === "string" && name.toLowerCase() === "payment-response") {
+      try {
+        setHeader("X-PAYMENT-RESPONSE", translateSettleHeaderToV1(value));
+      } catch {
+        // Undecodable settle header: leave only the v2 header in place.
+      }
+    }
+    return setHeader(name, value);
+  };
+  // Post-payment 402s (requirements mismatch, verify failure) carry a `{}`
+  // body plus the refreshed PAYMENT-REQUIRED header; a v1 client needs the
+  // v1 body there too, with the error the header carries.
+  const json = response.json.bind(response);
+  response.json = body => {
+    if (
+      response.statusCode === 402 &&
+      v1Requirements &&
+      (body === undefined ||
+        body === null ||
+        (typeof body === "object" && !Array.isArray(body) && body.x402Version === undefined))
+    ) {
+      let error = "payment_rejected";
+      const headerValue = response.getHeader("PAYMENT-REQUIRED");
+      if (typeof headerValue === "string") {
+        try {
+          const decoded = JSON.parse(Buffer.from(headerValue, "base64").toString("utf8"));
+          if (typeof decoded.error === "string" && decoded.error !== "") {
+            error = decoded.error;
+          }
+        } catch {
+          // Keep the generic error when the header cannot be decoded.
+        }
+      }
+      return json(buildV1PaymentRequiredBody(v1Requirements, error));
+    }
+    return json(body);
+  };
+  next();
+}
 
 function requiredEnvironment(name) {
   const value = process.env[name];

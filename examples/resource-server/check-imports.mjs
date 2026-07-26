@@ -18,6 +18,8 @@ import {
   buildV1PaymentRequiredBody,
   buildV1Requirements,
   caip2ForV1Network,
+  translateSettleHeaderToV1,
+  translateV1PaymentToV2,
   v1NetworkName,
 } from "./legacy-v1.mjs";
 
@@ -34,6 +36,8 @@ for (const [name, value] of Object.entries({
   buildV1PaymentRequiredBody,
   buildV1Requirements,
   caip2ForV1Network,
+  translateSettleHeaderToV1,
+  translateV1PaymentToV2,
   v1NetworkName,
 })) {
   if (typeof value !== "function") {
