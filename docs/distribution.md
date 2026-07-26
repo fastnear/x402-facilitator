@@ -26,7 +26,15 @@ PRs for maintainer feedback. The NEAR integrations coordination hub entry
 ### 1. x402scan — resource registration (web form, no PR)
 
 - Submit at <https://www.x402scan.com/resources/register>.
-- URL to submit: `https://x402-demo.mikedotexe.com/work`.
+- **URL to submit now: `https://x402-demo-base.mikedotexe.com/work`** (Base
+  mainnet — the network their validator supports). As of 2026-07-26 every
+  requirement their validator checks is in place: https resource URL in the
+  402 header, `info.x-guidance`, object-form `x-payment-info.protocols`,
+  input/output schemas, 402-before-validation, and a third-party client has
+  settled through the endpoint end to end (see
+  [evidence](evidence/2026-07-26-legacy-v1-compat-and-base-e2e.md)).
+- The NEAR resource below remains blocked on their upstream NEAR support.
+- Original NEAR target: `https://x402-demo.mikedotexe.com/work`.
 - Per their discovery spec (`Merit-Systems/x402scan`
   `docs/DISCOVERY.md`, OpenAPI-first), both demo hostnames serve
   `/openapi.json` declaring the paid `POST /work` operation with
