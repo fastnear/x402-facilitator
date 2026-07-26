@@ -89,6 +89,12 @@ pub struct ServiceConfig {
     pub sponsorship: SponsorshipConfig,
     #[serde(default)]
     pub payment_identifier: PaymentIdentifierConfig,
+    /// Accept legacy x402 v1 wire requests (translated to canonical v2
+    /// internally) and advertise a v1 kind on `/supported`. Only meaningful
+    /// for eip155 networks with a legacy alias ("base", "base-sepolia");
+    /// rejected for NEAR configs, whose networks v1 never covered.
+    #[serde(default)]
+    pub accept_v1: bool,
     /// EVM (eip155) settlement parameters. Present iff `chain_kind` is `eip155`;
     /// omitted (and `None`) for NEAR configs so they parse unchanged.
     #[serde(default)]
@@ -318,6 +324,11 @@ impl ServiceConfig {
         if self.payment_identifier.min_length != 16 || self.payment_identifier.max_length != 128 {
             return Err(ConfigError::Invalid(
                 "payment_identifier bounds must match the x402 extension (16..=128)".to_owned(),
+            ));
+        }
+        if self.accept_v1 && self.chain_kind == ChainKind::Near {
+            return Err(ConfigError::Invalid(
+                "accept_v1 requires an eip155 chain_kind (x402 v1 never covered NEAR)".to_owned(),
             ));
         }
         match self.chain_kind {
@@ -683,6 +694,7 @@ mod tests {
                 balance_hard_stop_yocto_near: "250000000000000000000000".to_owned(),
             },
             payment_identifier: PaymentIdentifierConfig::default(),
+            accept_v1: false,
             eip155: None,
         }
     }
@@ -713,6 +725,7 @@ mod tests {
                 balance_hard_stop_yocto_near: "250000000000000000".to_owned(),
             },
             payment_identifier: PaymentIdentifierConfig::default(),
+            accept_v1: true,
             eip155: Some(Eip155Config {
                 chain_id: 84532,
                 required_confirmations: 2,
@@ -728,7 +741,15 @@ mod tests {
 
     #[test]
     fn accepts_base_sepolia_eip155_policy() {
+        // Includes `accept_v1: true`: the legacy-wire gate is valid on eip155.
         assert!(valid_base_sepolia_config().validate().is_ok());
+    }
+
+    #[test]
+    fn accept_v1_is_rejected_for_near_chain_kind() {
+        let mut config = valid_mainnet_config();
+        config.accept_v1 = true;
+        assert!(config.validate().is_err());
     }
 
     #[test]

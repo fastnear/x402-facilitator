@@ -4,6 +4,34 @@ All notable changes to the x402 NEAR facilitator are recorded here. The format
 follows [Keep a Changelog](https://keepachangelog.com/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.0]
+
+Legacy x402 v1 wire compatibility, gated and off by default. Aimed at
+merchants still on the 0.x Coinbase SDKs who point their facilitator URL at
+this service. NEAR instances are unaffected: the gate is rejected at config
+validation for `near` chain kinds, and v1 never covered NEAR networks.
+
+### Added
+
+- `accept_v1` config flag (default `false`; eip155 only). When enabled,
+  `/verify` and `/settle` also accept legacy x402 v1 wire requests —
+  top-level `x402Version: 1`, `paymentPayload` with `scheme`/`network`
+  (legacy aliases `base` / `base-sepolia`) instead of an `accepted` echo, and
+  `maxAmountRequired` in place of `amount`. Requests are strictly translated
+  (deny-unknown-keys at every level, mirroring the v2 parser) to the
+  canonical v2 shape before the normal pipeline runs, so the durable journal
+  fingerprint and every downstream check see one settlement identity
+  regardless of wire dialect.
+- v1-dialect responses: 200 protocol responses to v1 requests echo `network`
+  as the legacy alias (all other emitted fields were already a v1-compatible
+  superset — `isValid`/`invalidReason`/`payer`,
+  `success`/`errorReason`/`transaction`). Non-200 errors are unchanged.
+- `/supported` on gated eip155 instances advertises an additional
+  `{"x402Version": 1, "scheme": "exact", "network": "base"}` kind, matching
+  the dual-advertising precedent of the x402.org hosted facilitator.
+- Fuzz coverage: `parse_http_request` now exercises the v1 sniff/translation
+  branch, with a legacy v1 request seeded in the corpus.
+
 ## [0.3.0]
 
 Multi-chain settlement. The durable engine is now chain-neutral, and a second

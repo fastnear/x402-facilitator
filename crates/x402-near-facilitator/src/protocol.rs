@@ -6,6 +6,7 @@ use sha2::{Digest, Sha256};
 use x402_types::proto;
 
 use crate::config::PaymentIdentifierConfig;
+use crate::v1_compat::{self, WireVersion};
 
 pub const PAYMENT_IDENTIFIER_EXTENSION: &str = "payment-identifier";
 const REQUEST_FINGERPRINT_DOMAIN: &[u8] = b"x402-near/request/v1\0";
@@ -14,6 +15,10 @@ const REQUEST_FINGERPRINT_DOMAIN: &[u8] = b"x402-near/request/v1\0";
 pub struct ParsedRequest {
     pub raw: proto::VerifyRequest,
     pub value: Value,
+    /// The wire dialect the request arrived in. `raw`/`value`/`meta` are
+    /// always canonical v2 (v1 requests are translated before parsing); the
+    /// tag only drives response formatting.
+    pub wire: WireVersion,
     pub meta: RequestMeta,
 }
 
@@ -23,6 +28,7 @@ impl fmt::Debug for ParsedRequest {
             .debug_struct("ParsedRequest")
             .field("raw", &"<redacted>")
             .field("value", &"<redacted>")
+            .field("wire", &self.wire)
             .field("meta", &self.meta)
             .finish()
     }
@@ -179,8 +185,21 @@ pub enum RequestError {
 pub fn parse_request(
     body: &[u8],
     identifier_policy: &PaymentIdentifierConfig,
+    accept_v1: bool,
 ) -> Result<ParsedRequest, RequestError> {
-    let value: Value = serde_json::from_slice(body)?;
+    let mut value: Value = serde_json::from_slice(body)?;
+    let wire = if accept_v1 && value.as_object().is_some_and(v1_compat::is_v1_request) {
+        WireVersion::V1
+    } else {
+        WireVersion::V2
+    };
+    if wire == WireVersion::V1 {
+        let translated = {
+            let object = value.as_object().ok_or(RequestError::NotObject)?;
+            v1_compat::translate_v1_to_v2(object)?
+        };
+        value = translated;
+    }
     let object = value.as_object().ok_or(RequestError::NotObject)?;
     ensure_allowed_keys(
         object,
@@ -250,6 +269,7 @@ pub fn parse_request(
     Ok(ParsedRequest {
         raw,
         value,
+        wire,
         meta: RequestMeta {
             x402_version,
             scheme,
@@ -471,7 +491,7 @@ fn validate_resource(resource: Option<&Value>) -> Result<(), RequestError> {
     Ok(())
 }
 
-fn ensure_allowed_keys(
+pub(crate) fn ensure_allowed_keys(
     object: &Map<String, Value>,
     allowed: &[&str],
     path: &'static str,
@@ -497,7 +517,7 @@ fn required_u8(
         .ok_or(RequestError::Field(path))
 }
 
-fn required_string(
+pub(crate) fn required_string(
     object: &Map<String, Value>,
     key: &'static str,
     path: &'static str,
@@ -657,15 +677,15 @@ mod tests {
     fn request_shape_rejects_unknown_and_missing_nested_fields() {
         let policy = PaymentIdentifierConfig::default();
         let valid = request_value();
-        assert!(parse_request(&encoded(&valid), &policy).is_ok());
+        assert!(parse_request(&encoded(&valid), &policy, false).is_ok());
 
         let mut unknown_top = valid.clone();
         unknown_top["unexpected"] = Value::Bool(true);
-        assert!(parse_request(&encoded(&unknown_top), &policy).is_err());
+        assert!(parse_request(&encoded(&unknown_top), &policy, false).is_err());
 
         let mut unknown_payload = valid.clone();
         unknown_payload["paymentPayload"]["unexpected"] = Value::Bool(true);
-        assert!(parse_request(&encoded(&unknown_payload), &policy).is_err());
+        assert!(parse_request(&encoded(&unknown_payload), &policy, false).is_err());
 
         let mut missing_nested_version = valid;
         if let Some(payload) = missing_nested_version
@@ -674,7 +694,7 @@ mod tests {
         {
             payload.remove("x402Version");
         }
-        assert!(parse_request(&encoded(&missing_nested_version), &policy).is_err());
+        assert!(parse_request(&encoded(&missing_nested_version), &policy, false).is_err());
     }
 
     fn eip155_request_value() -> Value {
@@ -718,7 +738,7 @@ mod tests {
     #[test]
     fn eip155_payload_parses_with_authorization_and_no_signed_delegate() {
         let policy = PaymentIdentifierConfig::default();
-        let Ok(parsed) = parse_request(&encoded(&eip155_request_value()), &policy) else {
+        let Ok(parsed) = parse_request(&encoded(&eip155_request_value()), &policy, false) else {
             std::process::abort();
         };
         assert_eq!(parsed.meta.network, "eip155:84532");
@@ -728,7 +748,7 @@ mod tests {
     #[test]
     fn near_payload_still_requires_signed_delegate() {
         let policy = PaymentIdentifierConfig::default();
-        let Ok(parsed) = parse_request(&encoded(&request_value()), &policy) else {
+        let Ok(parsed) = parse_request(&encoded(&request_value()), &policy, false) else {
             std::process::abort();
         };
         assert_eq!(
@@ -744,12 +764,12 @@ mod tests {
         let mut evm_with_near = eip155_request_value();
         evm_with_near["paymentPayload"]["payload"] =
             serde_json::json!({ "signedDelegateAction": "c2lnbmVk" });
-        assert!(parse_request(&encoded(&evm_with_near), &policy).is_err());
+        assert!(parse_request(&encoded(&evm_with_near), &policy, false).is_err());
         // NEAR network carrying an eip155 authorization payload is rejected.
         let mut near_with_evm = request_value();
         near_with_evm["paymentPayload"]["payload"] =
             serde_json::json!({ "authorization": {}, "signature": "0xab" });
-        assert!(parse_request(&encoded(&near_with_evm), &policy).is_err());
+        assert!(parse_request(&encoded(&near_with_evm), &policy, false).is_err());
     }
 
     #[test]
@@ -759,12 +779,78 @@ mod tests {
         if let Some(payload) = no_signature["paymentPayload"]["payload"].as_object_mut() {
             payload.remove("signature");
         }
-        assert!(parse_request(&encoded(&no_signature), &policy).is_err());
+        assert!(parse_request(&encoded(&no_signature), &policy, false).is_err());
 
         let mut authorization_not_object = eip155_request_value();
         authorization_not_object["paymentPayload"]["payload"]["authorization"] =
             Value::String("nope".to_owned());
-        assert!(parse_request(&encoded(&authorization_not_object), &policy).is_err());
+        assert!(parse_request(&encoded(&authorization_not_object), &policy, false).is_err());
+    }
+
+    fn v1_wire_request_value() -> Value {
+        serde_json::json!({
+            "x402Version": 1,
+            "paymentPayload": {
+                "x402Version": 1,
+                "scheme": "exact",
+                "network": "base",
+                "payload": {
+                    "signature": "0xdeadbeef",
+                    "authorization": {
+                        "from": "0x150B4b68F0Aa687a70d2383A88A5294E6077296E",
+                        "to": "0x7Ff46ab88688D528bCE3e59c470240c6901cF88c",
+                        "value": "1000",
+                        "validAfter": "0",
+                        "validBefore": "9999999999",
+                        "nonce": "0x0000000000000000000000000000000000000000000000000000000000000001",
+                    },
+                },
+            },
+            "paymentRequirements": {
+                "scheme": "exact",
+                "network": "base",
+                "maxAmountRequired": "1000",
+                "resource": "https://x402-demo-base.mikedotexe.com/work",
+                "description": "Deterministic paid work",
+                "mimeType": "application/json",
+                "payTo": "0x7Ff46ab88688D528bCE3e59c470240c6901cF88c",
+                "maxTimeoutSeconds": 300,
+                "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                "extra": { "name": "USD Coin", "version": "2" },
+            },
+        })
+    }
+
+    #[test]
+    fn v1_wire_requests_translate_only_when_accepted() {
+        let policy = PaymentIdentifierConfig::default();
+        let body = encoded(&v1_wire_request_value());
+        // Gate off: the strict v2 walker rejects the legacy shape outright.
+        assert!(parse_request(&body, &policy, false).is_err());
+        let Ok(parsed) = parse_request(&body, &policy, true) else {
+            std::process::abort();
+        };
+        assert_eq!(parsed.wire, WireVersion::V1);
+        assert_eq!(parsed.meta.x402_version, 2);
+        assert_eq!(parsed.meta.network, "eip155:8453");
+        assert_eq!(parsed.meta.amount, "1000");
+        assert_eq!(parsed.meta.scheme, "exact");
+        assert!(parsed.meta.signed_delegate_action.is_none());
+        // The preserved request value is canonical v2, so the journal
+        // fingerprint is dialect-independent.
+        assert_eq!(parsed.value["x402Version"], 2);
+        assert_eq!(parsed.value["paymentPayload"]["accepted"]["amount"], "1000");
+    }
+
+    #[test]
+    fn v2_wire_requests_are_untouched_by_the_v1_gate() {
+        let policy = PaymentIdentifierConfig::default();
+        let body = encoded(&eip155_request_value());
+        let Ok(parsed) = parse_request(&body, &policy, true) else {
+            std::process::abort();
+        };
+        assert_eq!(parsed.wire, WireVersion::V2);
+        assert_eq!(parsed.meta.network, "eip155:84532");
     }
 
     #[test]
