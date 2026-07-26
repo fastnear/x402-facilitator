@@ -30,6 +30,7 @@ import {
   translateSettleHeaderToV1,
   translateV1PaymentToV2,
 } from "./legacy-v1.mjs";
+import { withFacilitatorRetries } from "./retry.mjs";
 
 const facilitatorUrl = requiredEnvironment("FACILITATOR_URL");
 const apiKey = await readCredential(requiredEnvironment("FACILITATOR_API_KEY_FILE"));
@@ -70,14 +71,22 @@ if (isEvm && !eip712Name) {
 }
 const acceptsExtra = isEvm ? { name: eip712Name, version: eip712Version } : undefined;
 
-const facilitator = new HTTPFacilitatorClient({
-  url: facilitatorUrl,
-  createAuthHeaders: async () => ({
-    supported: {},
-    verify: { "X-API-Key": apiKey },
-    settle: { "X-API-Key": apiKey },
+// Facilitator throws (transient 503s like rpc_unavailable, or a settlement
+// still reaching its terminal state) are retried with short backoff: verify
+// is read-only and settle is idempotent at the facilitator (a repeat replays
+// the journaled terminal result), while the middleware would otherwise
+// surface one transient throw as a client-facing failure even after the
+// settlement succeeds.
+const facilitator = withFacilitatorRetries(
+  new HTTPFacilitatorClient({
+    url: facilitatorUrl,
+    createAuthHeaders: async () => ({
+      supported: {},
+      verify: { "X-API-Key": apiKey },
+      settle: { "X-API-Key": apiKey },
+    }),
   }),
-});
+);
 
 const route = "POST /work";
 const routes = {
