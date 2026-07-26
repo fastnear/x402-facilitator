@@ -1,0 +1,64 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Base x402 demo paid work API",
+    "version": "0.3.0",
+    "contact": { "email": "mikedotexe@gmail.com" },
+    "description": "Deterministic paid work demo behind the Base x402 facilitator at base.x402.mikedotexe.com. Payment is 1,000 atomic units of Circle USDC on Base mainnet (eip155:8453, $0.001) per request, settled through an ERC-3009 transferWithAuthorization with relayer-sponsored gas."
+  },
+  "servers": [{ "url": "https://x402-demo-base.mikedotexe.com" }],
+  "paths": {
+    "/work": {
+      "post": {
+        "operationId": "paidWork",
+        "summary": "Deterministic SHA-256 work, paid via x402 (Base USDC)",
+        "description": "Unpaid requests receive a 402 with x402 v2 payment requirements in the base64 PAYMENT-REQUIRED header (scheme exact, network eip155:8453, with the USDC EIP-712 domain in extra). Resubmit with a PAYMENT-SIGNATURE header containing the signed ERC-3009 payment payload (the payment-identifier extension is required). Replaying the identical paid request returns the cached result without a second settlement; reusing a payment identifier with different work is rejected.",
+        "x-payment-info": {
+          "protocols": ["x402"],
+          "price": { "mode": "fixed", "currency": "USD", "amount": "0.001" }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["input"],
+                "additionalProperties": false,
+                "properties": {
+                  "input": {
+                    "type": "string",
+                    "maxLength": 4096,
+                    "description": "Arbitrary input string; the result is the deterministic SHA-256 digest of the canonical request body"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Deterministic work result (replayed is true when served from the delivery journal)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "result": { "type": "string" },
+                    "replayed": { "type": "boolean" }
+                  }
+                }
+              }
+            }
+          },
+          "402": {
+            "description": "x402 payment required; requirements are in the base64 PAYMENT-REQUIRED response header"
+          },
+          "409": {
+            "description": "Payment identifier already used for different work"
+          }
+        }
+      }
+    }
+  }
+}
