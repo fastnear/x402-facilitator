@@ -201,6 +201,10 @@ hash; it is never retried by signing a new transaction.
   policy, quota, and infrastructure errors.
 - Write forward-only SQL migrations. Production startup must not migrate.
 - Every concurrency or recovery fix needs a deterministic regression test.
+- Resilience and operator-facing enhancements land with cross-chain parity:
+  when one chain's path gains a behavior (retry, message clarity, metrics),
+  give the other chain the equivalent in the same change or record why it
+  does not apply.
 - Keep generated TypeScript oracle tooling in development/test scope; the
   production binary must not depend on Node.
 - The demo's legacy-v1 acceptance injects an `accepted` object that must

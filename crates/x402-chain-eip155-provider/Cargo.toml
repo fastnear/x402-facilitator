@@ -24,8 +24,15 @@ alloy-sol-types = "1.6"
 hex.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+# Bounded backoff between read-only RPC retries (public endpoints rate-limit
+# under burst).
+tokio.workspace = true
 url.workspace = true
 x402-types.workspace = true
+
+[dev-dependencies]
+# Paused-clock tests for the retry backoff.
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

@@ -6372,7 +6372,7 @@ dependencies = [
 
 [[package]]
 name = "x402-chain-eip155-provider"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -6384,6 +6384,7 @@ dependencies = [
  "hex",
  "serde_json",
  "thiserror",
+ "tokio",
  "url",
  "x402-chain-eip155",
  "x402-types",
@@ -6391,7 +6392,7 @@ dependencies = [
 
 [[package]]
 name = "x402-chain-near"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -6427,7 +6428,7 @@ dependencies = [
 
 [[package]]
 name = "x402-near-facilitator"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "async-trait",

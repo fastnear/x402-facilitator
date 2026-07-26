@@ -405,8 +405,9 @@ async fn verify(State(state): State<AppState>, request: Request) -> Response {
     let deadline = Duration::from_secs(state.config.request_limits.verify_timeout_seconds);
     let response = match tokio::time::timeout(deadline, verify_inner(&state, request)).await {
         Ok(response) => response,
-        Err(_) => ApiError::unavailable("verification_timeout", "NEAR verification timed out")
-            .into_response(),
+        Err(_) => {
+            ApiError::unavailable("verification_timeout", "verification timed out").into_response()
+        }
     };
     state.metrics.record_request(
         "verify",
@@ -498,29 +499,46 @@ async fn verify_inner(state: &AppState, request: Request) -> Response {
             drop(permit);
             return response;
         };
-        let result = tokio::time::timeout(deadline, facilitator.verify(&parsed.raw)).await;
+        let response = near_routed_verify(facilitator, &parsed, deadline).await;
         drop(permit);
-        match result {
-            Ok(Ok(response)) => {
-                if response_is_rpc_ambiguous(&response.0) {
-                    ApiError::unavailable(
-                        "rpc_unavailable",
-                        "NEAR verification is temporarily unavailable",
-                    )
-                    .into_response()
-                } else {
-                    axum::Json(response.0).into_response()
-                }
-            }
-            Ok(Err(_)) | Err(_) => ApiError::unavailable(
-                "verification_unavailable",
-                "NEAR verification is temporarily unavailable",
-            )
-            .into_response(),
-        }
+        response
     }
     .await;
     finalize_wire_response(response, wire).await
+}
+
+/// Route a NEAR verify through the registered facilitator. Parity with the
+/// EVM retry: an ambiguous lookup response gets the same bounded retry before
+/// surfacing as a 503. Timeouts are not retried — the outer verify deadline
+/// already bounds the exchange.
+async fn near_routed_verify(
+    facilitator: &FacilitatorLocal<SchemeRegistry>,
+    parsed: &ParsedRequest,
+    deadline: Duration,
+) -> Response {
+    let result = crate::retry::retry_while_transient(
+        || tokio::time::timeout(deadline, facilitator.verify(&parsed.raw)),
+        |outcome| matches!(outcome, Ok(Ok(response)) if response_is_rpc_ambiguous(&response.0)),
+    )
+    .await;
+    match result {
+        Ok(Ok(response)) => {
+            if response_is_rpc_ambiguous(&response.0) {
+                ApiError::unavailable(
+                    "rpc_unavailable",
+                    "NEAR verification is temporarily unavailable",
+                )
+                .into_response()
+            } else {
+                axum::Json(response.0).into_response()
+            }
+        }
+        Ok(Err(_)) | Err(_) => ApiError::unavailable(
+            "verification_unavailable",
+            "NEAR verification is temporarily unavailable",
+        )
+        .into_response(),
+    }
 }
 
 /// Verify an EVM payment through the neutral provider (EVM has no registered
@@ -559,7 +577,13 @@ async fn facilitator_verify_gate(
     client_id: Uuid,
     fingerprint: &[u8; 32],
 ) -> Option<Response> {
-    let routed = facilitator.verify(&parsed.raw).await;
+    // Parity with the EVM retry: retry ambiguous lookup responses before the
+    // gate short-circuits settlement with a 503.
+    let routed = crate::retry::retry_while_transient(
+        || facilitator.verify(&parsed.raw),
+        |outcome| matches!(outcome, Ok(response) if response_is_rpc_ambiguous(&response.0)),
+    )
+    .await;
     let Ok(routed) = routed else {
         if let Some(response) = prior_settlement_race_response(
             state,
@@ -847,7 +871,7 @@ async fn settle_inner(state: &AppState, request: Request) -> Response {
                 }
                 return ApiError::unavailable(
                     "rpc_unavailable",
-                    "NEAR verification is temporarily unavailable",
+                    "verification is temporarily unavailable",
                 )
                 .into_response();
             }
@@ -1377,7 +1401,7 @@ async fn run_new_settlement(
                 &state,
                 settlement_id,
                 "rpc_unavailable",
-                "NEAR verification was unavailable before transaction preparation",
+                "verification was unavailable before transaction preparation",
             )
             .await;
             return;
