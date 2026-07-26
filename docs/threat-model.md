@@ -1,5 +1,9 @@
 # Threat model
 
+This model was written for the NEAR launch and remains the baseline; the
+[EVM and legacy-v1 delta](#evm-eip155-and-legacy-v1-delta) section extends it
+to the Base instance and the gated v1 wire.
+
 ## Protected assets and trust boundaries
 
 The facilitator protects:
@@ -100,6 +104,35 @@ quarantines the relayer. No recovery path signs replacement bytes.
   keys nor signs payments. CI fails on high-severity npm findings and this
   low-severity exception must be re-evaluated whenever `@x402/near` changes.
 
+## EVM (eip155) and legacy-v1 delta
+
+The Base instance reuses the entire chain-neutral control set (API keys,
+exact policies, budgets, journal, fail-closed recovery). The additional
+assets and threats:
+
+- **Protected assets**: the secp256k1 signer key and its ETH gas balance
+  (readiness enforces a hard-stop balance; a compromised signer can spend
+  gas but cannot redirect payments, which are bound to the signed ERC-3009
+  authorization).
+- **Single-use anchor**: the ERC-3009 authorization nonce replaces the
+  delegate hash; the token contract enforces it on-chain, and the journal
+  enforces it globally before broadcast.
+- **Reorg instead of receipt ambiguity**: success requires the stored
+  transaction identity to hold the configured confirmation depth; a
+  mined-then-missing transaction returns to nonterminal. No recovery path
+  signs replacement bytes, matching the NEAR rule.
+- **RPC trust**: the Base primary and backup endpoints (`mainnet.base.org`,
+  a PublicNode host) are independent operators, unlike the NEAR pair's
+  shared-operator caveat, but both are public infrastructure with no
+  authenticated SLA; fail-closed ambiguity handling is the control.
+- **Legacy v1 wire (`accept_v1`)**: adds no new authorization semantics — a
+  v1 request is strictly translated (deny-unknown-fields) into the canonical
+  v2 shape at the parse boundary, so policy, verification, budgets, and the
+  journal fingerprint are dialect-independent, and one payment retried in
+  either dialect deduplicates to one settlement. The gate is off by default,
+  is rejected at config validation for NEAR chain kinds, and only changes
+  parse and response formatting; the API-key boundary is unchanged.
+
 ## Security review triggers
 
 Repeat the threat review before enabling any of:
@@ -111,4 +144,6 @@ Repeat the threat review before enabling any of:
 - gas-key relayers, DelegateV2, or another signature curve;
 - automatic relayer refill;
 - partner-controlled webhooks or administrative HTTP endpoints;
-- transaction replacement or any recovery path that signs new bytes.
+- transaction replacement or any recovery path that signs new bytes;
+- an additional EVM chain, a non-canonical asset binding, or `accept_v1` on
+  any new instance class.
