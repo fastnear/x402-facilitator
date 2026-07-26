@@ -346,6 +346,7 @@ fn service_config() -> TestResult<ServiceConfig> {
             balance_hard_stop_yocto_near: "100".to_owned(),
         },
         payment_identifier: PaymentIdentifierConfig::default(),
+        accept_v1: false,
         eip155: None,
     })
 }

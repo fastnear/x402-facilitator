@@ -92,6 +92,13 @@ native atomic gas unit — **wei** for eip155. In the Base Sepolia example the
 `10000000000000000` hard stop is 0.01 ETH and the `50000000000000000` warning
 is 0.05 ETH.
 
+An eip155 instance may additionally set `"accept_v1": true` to accept legacy
+x402 v1 wire requests on `/verify` and `/settle` (translated internally to
+the canonical v2 shape; responses echo `network` as the legacy alias `base` /
+`base-sepolia`) and to advertise an `x402Version: 1` kind on `/supported`.
+The flag defaults to `false` and is rejected at validation for `near`
+configs — x402 v1 never covered NEAR networks.
+
 Base Sepolia isolation, parallel to the NEAR table above:
 
 | Setting | Base Sepolia |

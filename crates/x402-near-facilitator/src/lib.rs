@@ -16,6 +16,7 @@ pub mod protocol;
 pub mod service;
 pub mod store;
 pub mod telemetry;
+pub mod v1_compat;
 
 /// Build identifier supplied by Cargo.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

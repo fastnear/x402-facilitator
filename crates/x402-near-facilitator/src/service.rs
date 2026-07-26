@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::extract::{Request, State};
-use axum::http::header::{AUTHORIZATION, CONTENT_TYPE, RETRY_AFTER};
+use axum::http::header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, RETRY_AFTER};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -60,6 +60,7 @@ use crate::store::{
     SettlementRecord, SettlementState, StoreError, TerminalJournalEntry,
 };
 use crate::telemetry::Metrics;
+use crate::v1_compat::{self, WireVersion};
 
 const SERVICE_NAME: &str = "x402-near-facilitator";
 const RETRY_SECONDS: &str = "1";
@@ -376,13 +377,24 @@ fn evm_supported(state: &AppState) -> SupportedResponse {
     if let Ok(chain_id) = state.config.network.parse::<ChainId>() {
         signers.insert(chain_id, vec![state.provider.signer_account_id()]);
     }
-    SupportedResponse {
-        kinds: vec![SupportedPaymentKind {
-            x402_version: 2,
+    let mut kinds = vec![SupportedPaymentKind {
+        x402_version: 2,
+        scheme: "exact".to_owned(),
+        network: state.config.network.clone(),
+        extra: None,
+    }];
+    if state.config.accept_v1
+        && let Some(alias) = v1_compat::v1_network_name(&state.config.network)
+    {
+        kinds.push(SupportedPaymentKind {
+            x402_version: 1,
             scheme: "exact".to_owned(),
-            network: state.config.network.clone(),
+            network: alias.to_owned(),
             extra: None,
-        }],
+        });
+    }
+    SupportedResponse {
+        kinds,
         extensions: vec![],
         signers,
     }
@@ -432,73 +444,83 @@ async fn verify_inner(state: &AppState, request: Request) -> Response {
         Ok(parsed) => parsed,
         Err(error) => return error.into_response(),
     };
-    if let Some(response) = static_verify_failure(state, &parsed) {
-        return protocol_json(StatusCode::OK, &response);
-    }
-    match state
-        .store
-        .payee_allowed(
-            client.id,
-            &parsed.meta.network,
-            &parsed.meta.asset,
-            &parsed.meta.pay_to,
-        )
-        .await
-    {
-        Ok(true) => {}
-        Ok(false) => {
-            return protocol_json(
-                StatusCode::OK,
-                &VerifyResponse::invalid("payee_not_allowed", None, None),
-            );
+    // Every protocol response below (including journal replays) flows through
+    // the wire-dialect finalizer, so a legacy v1 request gets v1-shaped output
+    // no matter which branch produced it.
+    let wire = parsed.wire;
+    let response = async {
+        if let Some(response) = static_verify_failure(state, &parsed) {
+            return protocol_json(StatusCode::OK, &response);
         }
-        Err(_) => {
-            return ApiError::unavailable(
-                "database_unavailable",
-                "verification policy is temporarily unavailable",
+        match state
+            .store
+            .payee_allowed(
+                client.id,
+                &parsed.meta.network,
+                &parsed.meta.asset,
+                &parsed.meta.pay_to,
             )
-            .into_response();
-        }
-    }
-
-    let Ok(permit) = state.verify_slots.clone().try_acquire_owned() else {
-        return ApiError::unavailable(
-            "verification_capacity_exhausted",
-            "verification capacity is temporarily exhausted",
-        )
-        .into_response();
-    };
-    let deadline = Duration::from_secs(state.config.request_limits.verify_timeout_seconds);
-    let Some(facilitator) = &state.facilitator else {
-        // EVM: the neutral provider verifies (no registered facilitator surface).
-        let response = match tokio::time::timeout(deadline, evm_verify(state, &parsed)).await {
-            Ok(response) => response,
-            Err(_) => ApiError::unavailable("verification_timeout", "EVM verification timed out")
-                .into_response(),
-        };
-        drop(permit);
-        return response;
-    };
-    let result = tokio::time::timeout(deadline, facilitator.verify(&parsed.raw)).await;
-    drop(permit);
-    match result {
-        Ok(Ok(response)) => {
-            if response_is_rpc_ambiguous(&response.0) {
-                ApiError::unavailable(
-                    "rpc_unavailable",
-                    "NEAR verification is temporarily unavailable",
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                return protocol_json(
+                    StatusCode::OK,
+                    &VerifyResponse::invalid("payee_not_allowed", None, None),
+                );
+            }
+            Err(_) => {
+                return ApiError::unavailable(
+                    "database_unavailable",
+                    "verification policy is temporarily unavailable",
                 )
-                .into_response()
-            } else {
-                axum::Json(response.0).into_response()
+                .into_response();
             }
         }
-        Ok(Err(_)) | Err(_) => ApiError::unavailable(
-            "verification_unavailable",
-            "NEAR verification is temporarily unavailable",
-        )
-        .into_response(),
+
+        let Ok(permit) = state.verify_slots.clone().try_acquire_owned() else {
+            return ApiError::unavailable(
+                "verification_capacity_exhausted",
+                "verification capacity is temporarily exhausted",
+            )
+            .into_response();
+        };
+        let deadline = Duration::from_secs(state.config.request_limits.verify_timeout_seconds);
+        let Some(facilitator) = &state.facilitator else {
+            // EVM: the neutral provider verifies (no registered facilitator surface).
+            let response = match tokio::time::timeout(deadline, evm_verify(state, &parsed)).await {
+                Ok(response) => response,
+                Err(_) => {
+                    ApiError::unavailable("verification_timeout", "EVM verification timed out")
+                        .into_response()
+                }
+            };
+            drop(permit);
+            return response;
+        };
+        let result = tokio::time::timeout(deadline, facilitator.verify(&parsed.raw)).await;
+        drop(permit);
+        match result {
+            Ok(Ok(response)) => {
+                if response_is_rpc_ambiguous(&response.0) {
+                    ApiError::unavailable(
+                        "rpc_unavailable",
+                        "NEAR verification is temporarily unavailable",
+                    )
+                    .into_response()
+                } else {
+                    axum::Json(response.0).into_response()
+                }
+            }
+            Ok(Err(_)) | Err(_) => ApiError::unavailable(
+                "verification_unavailable",
+                "NEAR verification is temporarily unavailable",
+            )
+            .into_response(),
+        }
     }
+    .await;
+    finalize_wire_response(response, wire).await
 }
 
 /// Verify an EVM payment through the neutral provider (EVM has no registered
@@ -639,22 +661,40 @@ async fn settle_inner(state: &AppState, request: Request) -> Response {
         Ok(parsed) => parsed,
         Err(error) => return error.into_response(),
     };
-    // Chain-neutral pre-verify payment identity for idempotency. NEAR decodes
-    // and signature-checks the base64 signed delegate; eip155 computes the
-    // offline ERC-3009 EIP-712 transfer hash from the authorization (no RPC).
-    // The authoritative on-chain validity check is `provider.verify` below, for
-    // both chains; this only establishes the idempotency key.
-    let payment_hash = match state.config.chain_kind {
-        ChainKind::Near => {
-            let signed_delegate_action =
-                parsed.meta.signed_delegate_action.as_deref().unwrap_or("");
-            let decoded = match decode_signed_delegate(signed_delegate_action) {
-                Ok(decoded) => decoded,
-                Err(failure) => {
+    // Every protocol response below (including journal replays) flows through
+    // the wire-dialect finalizer, so a legacy v1 request gets v1-shaped output
+    // no matter which branch produced it.
+    let wire = parsed.wire;
+    let response = async {
+        // Chain-neutral pre-verify payment identity for idempotency. NEAR decodes
+        // and signature-checks the base64 signed delegate; eip155 computes the
+        // offline ERC-3009 EIP-712 transfer hash from the authorization (no RPC).
+        // The authoritative on-chain validity check is `provider.verify` below, for
+        // both chains; this only establishes the idempotency key.
+        let payment_hash = match state.config.chain_kind {
+            ChainKind::Near => {
+                let signed_delegate_action =
+                    parsed.meta.signed_delegate_action.as_deref().unwrap_or("");
+                let decoded = match decode_signed_delegate(signed_delegate_action) {
+                    Ok(decoded) => decoded,
+                    Err(failure) => {
+                        return protocol_json(
+                            StatusCode::OK,
+                            &SettleResponse::failure(
+                                failure.reason(),
+                                None,
+                                None,
+                                String::new(),
+                                state.config.network.clone(),
+                            ),
+                        );
+                    }
+                };
+                if !decoded.signed_delegate.verify() {
                     return protocol_json(
                         StatusCode::OK,
                         &SettleResponse::failure(
-                            failure.reason(),
+                            VerificationFailure::InvalidSignature.reason(),
                             None,
                             None,
                             String::new(),
@@ -662,69 +702,33 @@ async fn settle_inner(state: &AppState, request: Request) -> Response {
                         ),
                     );
                 }
-            };
-            if !decoded.signed_delegate.verify() {
-                return protocol_json(
-                    StatusCode::OK,
-                    &SettleResponse::failure(
-                        VerificationFailure::InvalidSignature.reason(),
-                        None,
-                        None,
-                        String::new(),
-                        state.config.network.clone(),
-                    ),
-                );
+                decoded.payment_hash
             }
-            decoded.payment_hash
-        }
-        ChainKind::Eip155 => match state.provider.offline_payment_hash(&parsed.raw) {
-            Ok(hash) => hash,
-            Err(reason) => {
-                return protocol_json(
-                    StatusCode::OK,
-                    &SettleResponse::failure(
-                        reason,
-                        None,
-                        None,
-                        String::new(),
-                        state.config.network.clone(),
-                    ),
-                );
-            }
-        },
-    };
-    let Ok(fingerprint) = request_fingerprint(&parsed.value, &payment_hash) else {
-        return ApiError::new(
-            StatusCode::BAD_REQUEST,
-            "invalid_json",
-            "request JSON cannot be canonicalized",
-        )
-        .into_response();
-    };
-    match prior_settlement_response(
-        state,
-        client.id,
-        parsed.meta.payment_identifier.as_deref(),
-        &payment_hash,
-        &fingerprint,
-    )
-    .await
-    {
-        Ok(Some(response)) => return response,
-        Ok(None) => {}
-        Err(_) => {
-            return ApiError::unavailable(
-                "database_unavailable",
-                "settlement journal is temporarily unavailable",
+            ChainKind::Eip155 => match state.provider.offline_payment_hash(&parsed.raw) {
+                Ok(hash) => hash,
+                Err(reason) => {
+                    return protocol_json(
+                        StatusCode::OK,
+                        &SettleResponse::failure(
+                            reason,
+                            None,
+                            None,
+                            String::new(),
+                            state.config.network.clone(),
+                        ),
+                    );
+                }
+            },
+        };
+        let Ok(fingerprint) = request_fingerprint(&parsed.value, &payment_hash) else {
+            return ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_json",
+                "request JSON cannot be canonicalized",
             )
             .into_response();
-        }
-    }
-    if let Some(response) = static_settle_failure(state, &parsed) {
-        return protocol_json(StatusCode::OK, &response);
-    }
-    if !state.readiness.can_settle() {
-        if let Some(response) = prior_settlement_race_response(
+        };
+        match prior_settlement_response(
             state,
             client.id,
             parsed.meta.payment_identifier.as_deref(),
@@ -733,253 +737,322 @@ async fn settle_inner(state: &AppState, request: Request) -> Response {
         )
         .await
         {
+            Ok(Some(response)) => return response,
+            Ok(None) => {}
+            Err(_) => {
+                return ApiError::unavailable(
+                    "database_unavailable",
+                    "settlement journal is temporarily unavailable",
+                )
+                .into_response();
+            }
+        }
+        if let Some(response) = static_settle_failure(state, &parsed) {
+            return protocol_json(StatusCode::OK, &response);
+        }
+        if !state.readiness.can_settle() {
+            if let Some(response) = prior_settlement_race_response(
+                state,
+                client.id,
+                parsed.meta.payment_identifier.as_deref(),
+                &payment_hash,
+                &fingerprint,
+            )
+            .await
+            {
+                return response;
+            }
+            return ApiError::unavailable(
+                "settlement_unavailable",
+                "settlement is temporarily unavailable",
+            )
+            .into_response();
+        }
+        match state
+            .store
+            .payee_allowed(
+                client.id,
+                &parsed.meta.network,
+                &parsed.meta.asset,
+                &parsed.meta.pay_to,
+            )
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                if let Some(response) = prior_settlement_race_response(
+                    state,
+                    client.id,
+                    parsed.meta.payment_identifier.as_deref(),
+                    &payment_hash,
+                    &fingerprint,
+                )
+                .await
+                {
+                    return response;
+                }
+                return protocol_json(
+                    StatusCode::OK,
+                    &SettleResponse::failure(
+                        "payee_not_allowed",
+                        None,
+                        None,
+                        String::new(),
+                        state.config.network.clone(),
+                    ),
+                );
+            }
+            Err(_) => {
+                return ApiError::unavailable(
+                    "database_unavailable",
+                    "settlement policy is temporarily unavailable",
+                )
+                .into_response();
+            }
+        }
+
+        // Route the raw payment through the registered x402-rs scheme before exposing
+        // the chain-specific VerifiedPayment needed by the durable journal. EVM has no
+        // registered facilitator; its neutral provider.verify below is the sole
+        // verification, so the gate is skipped for EVM.
+        if let Some(facilitator) = &state.facilitator
+            && let Some(response) = facilitator_verify_gate(
+                state,
+                facilitator,
+                &parsed,
+                &payment_hash,
+                client.id,
+                &fingerprint,
+            )
+            .await
+        {
             return response;
         }
-        return ApiError::unavailable(
-            "settlement_unavailable",
-            "settlement is temporarily unavailable",
-        )
-        .into_response();
-    }
-    match state
-        .store
-        .payee_allowed(
-            client.id,
-            &parsed.meta.network,
-            &parsed.meta.asset,
-            &parsed.meta.pay_to,
-        )
-        .await
-    {
-        Ok(true) => {}
-        Ok(false) => {
-            if let Some(response) = prior_settlement_race_response(
-                state,
-                client.id,
-                parsed.meta.payment_identifier.as_deref(),
-                &payment_hash,
-                &fingerprint,
-            )
-            .await
-            {
-                return response;
+        let policy = VerificationPolicy {
+            max_sponsored_gas: state.config.max_inner_gas,
+        };
+        let verified = match state.provider.verify(&parsed.raw, &policy).await {
+            Ok(verified) => verified,
+            Err(rejection) if rejection.rpc_ambiguous => {
+                if let Some(response) = prior_settlement_race_response(
+                    state,
+                    client.id,
+                    parsed.meta.payment_identifier.as_deref(),
+                    &payment_hash,
+                    &fingerprint,
+                )
+                .await
+                {
+                    return response;
+                }
+                return ApiError::unavailable(
+                    "rpc_unavailable",
+                    "NEAR verification is temporarily unavailable",
+                )
+                .into_response();
             }
-            return protocol_json(
-                StatusCode::OK,
-                &SettleResponse::failure(
-                    "payee_not_allowed",
-                    None,
-                    None,
-                    String::new(),
-                    state.config.network.clone(),
-                ),
-            );
+            Err(rejection) => {
+                if let Some(response) = prior_settlement_race_response(
+                    state,
+                    client.id,
+                    parsed.meta.payment_identifier.as_deref(),
+                    &payment_hash,
+                    &fingerprint,
+                )
+                .await
+                {
+                    return response;
+                }
+                return protocol_json(
+                    StatusCode::OK,
+                    &SettleResponse::failure(
+                        rejection.reason,
+                        None,
+                        None,
+                        String::new(),
+                        state.config.network.clone(),
+                    ),
+                );
+            }
+        };
+        if verified.payment_hash != payment_hash {
+            return ApiError::unavailable(
+                "verification_inconsistent",
+                "payment verification was internally inconsistent",
+            )
+            .into_response();
         }
-        Err(_) => {
+        // The neutral verified payment drives the journal; the reservation row records
+        // the chain-specific authorization identity (generalized at migration 0002).
+        // NEAR persists the delegate identity; EVM persists the ERC-3009 authorization
+        // plus the facilitator signer address. The signed submission bytes are
+        // journaled later, at prepare (`mark_prepared` / `mark_prepared_evm`).
+        let (
+            chain_kind,
+            delegate_public_key,
+            delegate_nonce,
+            delegate_max_block_height,
+            evm_authorization,
+            signer_address,
+        ) = match &verified.detail {
+            VerifiedDetail::Near(near_verified) => (
+                ChainKind::Near,
+                Some(near_verified.payer_public_key.to_string()),
+                Some(near_verified.delegate_nonce.to_string()),
+                Some(near_verified.max_block_height.to_string()),
+                None,
+                None,
+            ),
+            VerifiedDetail::Evm(evm_verified) => (
+                ChainKind::Eip155,
+                None,
+                None,
+                None,
+                Some(evm_verified.authorization_json()),
+                Some(state.provider.signer_account_id()),
+            ),
+        };
+        let new = NewSettlement {
+            id: Uuid::new_v4(),
+            api_client_id: client.id,
+            payment_identifier: parsed.meta.payment_identifier.clone(),
+            payment_hash: verified.payment_hash,
+            request_fingerprint: fingerprint,
+            x402_version: parsed.meta.x402_version,
+            scheme: parsed.meta.scheme.clone(),
+            network: parsed.meta.network.clone(),
+            asset: parsed.meta.asset.clone(),
+            pay_to: parsed.meta.pay_to.clone(),
+            amount: parsed.meta.amount.clone(),
+            payer: verified.payer.clone(),
+            chain_kind,
+            delegate_public_key,
+            delegate_nonce,
+            delegate_max_block_height,
+            evm_authorization,
+            signer_address,
+            policy_snapshot: state.config.policy_snapshot(),
+            reservation_yocto_near: state.config.sponsorship.reservation_yocto_near.clone(),
+            global_daily_budget_yocto_near: state
+                .config
+                .sponsorship
+                .global_daily_yocto_near
+                .clone(),
+            client_daily_budget_yocto_near: client.daily_budget_yocto_near.clone(),
+        };
+        let Ok(claim) = state.store.claim_settlement(&new).await else {
             return ApiError::unavailable(
                 "database_unavailable",
-                "settlement policy is temporarily unavailable",
+                "settlement journal is temporarily unavailable",
             )
             .into_response();
+        };
+        let settlement_id = match claim {
+            ClaimOutcome::New(record) => {
+                let worker_state = state.clone();
+                let raw_request = parsed.raw.clone();
+                let worker_span = tracing::info_span!(
+                    "settlement_worker",
+                    network = %state.config.network,
+                    version = VERSION
+                );
+                tokio::spawn(
+                    async move {
+                        run_new_settlement(worker_state, record.id, raw_request).await;
+                    }
+                    .instrument(worker_span),
+                );
+                record.id
+            }
+            ClaimOutcome::Existing(record) => {
+                state.metrics.record_idempotency_replay();
+                if record.state.is_terminal() {
+                    return stored_terminal_response(&record);
+                }
+                record.id
+            }
+            ClaimOutcome::IdentifierConflict => {
+                return ApiError::new(
+                    StatusCode::CONFLICT,
+                    "payment_identifier_conflict",
+                    "payment identifier was already used for another request",
+                )
+                .into_response();
+            }
+            ClaimOutcome::DuplicateSettlement => {
+                return protocol_json(
+                    StatusCode::OK,
+                    &SettleResponse::failure(
+                        "duplicate_settlement",
+                        None,
+                        Some(verified.payer.clone()),
+                        String::new(),
+                        state.config.network.clone(),
+                    ),
+                );
+            }
+            ClaimOutcome::BudgetExceeded => {
+                return ApiError::rate_limited(
+                    "sponsorship_budget_exhausted",
+                    "sponsorship budget is exhausted",
+                )
+                .into_response();
+            }
+        };
+
+        let deadline = Duration::from_secs(state.config.request_limits.settle_timeout_seconds);
+        match tokio::time::timeout(deadline, wait_for_terminal(&state.store, settlement_id)).await {
+            Ok(Ok(record)) => stored_terminal_response(&record),
+            Ok(Err(_)) => ApiError::unavailable(
+                "database_unavailable",
+                "settlement journal is temporarily unavailable",
+            )
+            .into_response(),
+            Err(_) => ApiError::unavailable(
+                "settlement_pending",
+                "settlement is still pending; retry with the same payment identifier",
+            )
+            .into_response(),
         }
     }
+    .await;
+    finalize_wire_response(response, wire).await
+}
 
-    // Route the raw payment through the registered x402-rs scheme before exposing
-    // the chain-specific VerifiedPayment needed by the durable journal. EVM has no
-    // registered facilitator; its neutral provider.verify below is the sole
-    // verification, so the gate is skipped for EVM.
-    if let Some(facilitator) = &state.facilitator
-        && let Some(response) = facilitator_verify_gate(
-            state,
-            facilitator,
-            &parsed,
-            &payment_hash,
-            client.id,
-            &fingerprint,
-        )
-        .await
-    {
+/// Protocol responses are small in-memory JSON bodies; this bound only guards
+/// the re-buffering in [`finalize_wire_response`] against a pathological bug.
+const PROTOCOL_RESPONSE_REBUFFER_LIMIT: usize = 1_048_576;
+
+/// Rewrite a successful protocol response into the legacy v1 dialect when the
+/// request arrived as v1 wire. Our response fields are already a v1-compatible
+/// superset, so the only change is echoing `network` as the legacy alias.
+/// Non-200 responses (auth, rate, malformed, availability) pass through: v1
+/// SDKs treat those as ordinary HTTP failures.
+async fn finalize_wire_response(response: Response, wire: WireVersion) -> Response {
+    if wire == WireVersion::V2 || response.status() != StatusCode::OK {
         return response;
     }
-    let policy = VerificationPolicy {
-        max_sponsored_gas: state.config.max_inner_gas,
-    };
-    let verified = match state.provider.verify(&parsed.raw, &policy).await {
-        Ok(verified) => verified,
-        Err(rejection) if rejection.rpc_ambiguous => {
-            if let Some(response) = prior_settlement_race_response(
-                state,
-                client.id,
-                parsed.meta.payment_identifier.as_deref(),
-                &payment_hash,
-                &fingerprint,
-            )
-            .await
-            {
-                return response;
-            }
-            return ApiError::unavailable(
-                "rpc_unavailable",
-                "NEAR verification is temporarily unavailable",
-            )
-            .into_response();
-        }
-        Err(rejection) => {
-            if let Some(response) = prior_settlement_race_response(
-                state,
-                client.id,
-                parsed.meta.payment_identifier.as_deref(),
-                &payment_hash,
-                &fingerprint,
-            )
-            .await
-            {
-                return response;
-            }
-            return protocol_json(
-                StatusCode::OK,
-                &SettleResponse::failure(
-                    rejection.reason,
-                    None,
-                    None,
-                    String::new(),
-                    state.config.network.clone(),
-                ),
-            );
-        }
-    };
-    if verified.payment_hash != payment_hash {
+    let (parts, body) = response.into_parts();
+    let Ok(bytes) = to_bytes(body, PROTOCOL_RESPONSE_REBUFFER_LIMIT).await else {
         return ApiError::unavailable(
-            "verification_inconsistent",
-            "payment verification was internally inconsistent",
-        )
-        .into_response();
-    }
-    // The neutral verified payment drives the journal; the reservation row records
-    // the chain-specific authorization identity (generalized at migration 0002).
-    // NEAR persists the delegate identity; EVM persists the ERC-3009 authorization
-    // plus the facilitator signer address. The signed submission bytes are
-    // journaled later, at prepare (`mark_prepared` / `mark_prepared_evm`).
-    let (
-        chain_kind,
-        delegate_public_key,
-        delegate_nonce,
-        delegate_max_block_height,
-        evm_authorization,
-        signer_address,
-    ) = match &verified.detail {
-        VerifiedDetail::Near(near_verified) => (
-            ChainKind::Near,
-            Some(near_verified.payer_public_key.to_string()),
-            Some(near_verified.delegate_nonce.to_string()),
-            Some(near_verified.max_block_height.to_string()),
-            None,
-            None,
-        ),
-        VerifiedDetail::Evm(evm_verified) => (
-            ChainKind::Eip155,
-            None,
-            None,
-            None,
-            Some(evm_verified.authorization_json()),
-            Some(state.provider.signer_account_id()),
-        ),
-    };
-    let new = NewSettlement {
-        id: Uuid::new_v4(),
-        api_client_id: client.id,
-        payment_identifier: parsed.meta.payment_identifier.clone(),
-        payment_hash: verified.payment_hash,
-        request_fingerprint: fingerprint,
-        x402_version: parsed.meta.x402_version,
-        scheme: parsed.meta.scheme.clone(),
-        network: parsed.meta.network.clone(),
-        asset: parsed.meta.asset.clone(),
-        pay_to: parsed.meta.pay_to.clone(),
-        amount: parsed.meta.amount.clone(),
-        payer: verified.payer.clone(),
-        chain_kind,
-        delegate_public_key,
-        delegate_nonce,
-        delegate_max_block_height,
-        evm_authorization,
-        signer_address,
-        policy_snapshot: state.config.policy_snapshot(),
-        reservation_yocto_near: state.config.sponsorship.reservation_yocto_near.clone(),
-        global_daily_budget_yocto_near: state.config.sponsorship.global_daily_yocto_near.clone(),
-        client_daily_budget_yocto_near: client.daily_budget_yocto_near.clone(),
-    };
-    let Ok(claim) = state.store.claim_settlement(&new).await else {
-        return ApiError::unavailable(
-            "database_unavailable",
-            "settlement journal is temporarily unavailable",
+            "response_serialization_failed",
+            "response serialization failed",
         )
         .into_response();
     };
-    let settlement_id = match claim {
-        ClaimOutcome::New(record) => {
-            let worker_state = state.clone();
-            let raw_request = parsed.raw.clone();
-            let worker_span = tracing::info_span!(
-                "settlement_worker",
-                network = %state.config.network,
-                version = VERSION
-            );
-            tokio::spawn(
-                async move {
-                    run_new_settlement(worker_state, record.id, raw_request).await;
-                }
-                .instrument(worker_span),
-            );
-            record.id
-        }
-        ClaimOutcome::Existing(record) => {
-            state.metrics.record_idempotency_replay();
-            if record.state.is_terminal() {
-                return stored_terminal_response(&record);
-            }
-            record.id
-        }
-        ClaimOutcome::IdentifierConflict => {
-            return ApiError::new(
-                StatusCode::CONFLICT,
-                "payment_identifier_conflict",
-                "payment identifier was already used for another request",
-            )
-            .into_response();
-        }
-        ClaimOutcome::DuplicateSettlement => {
-            return protocol_json(
-                StatusCode::OK,
-                &SettleResponse::failure(
-                    "duplicate_settlement",
-                    None,
-                    Some(verified.payer.clone()),
-                    String::new(),
-                    state.config.network.clone(),
-                ),
-            );
-        }
-        ClaimOutcome::BudgetExceeded => {
-            return ApiError::rate_limited(
-                "sponsorship_budget_exhausted",
-                "sponsorship budget is exhausted",
-            )
-            .into_response();
-        }
+    let Ok(mut value) = serde_json::from_slice::<Value>(&bytes) else {
+        return Response::from_parts(parts, Body::from(bytes));
     };
-
-    let deadline = Duration::from_secs(state.config.request_limits.settle_timeout_seconds);
-    match tokio::time::timeout(deadline, wait_for_terminal(&state.store, settlement_id)).await {
-        Ok(Ok(record)) => stored_terminal_response(&record),
-        Ok(Err(_)) => ApiError::unavailable(
-            "database_unavailable",
-            "settlement journal is temporarily unavailable",
-        )
-        .into_response(),
+    v1_compat::translate_response_value_to_v1(&mut value);
+    match serde_json::to_vec(&value) {
+        Ok(translated) => {
+            let mut response = Response::from_parts(parts, Body::from(translated));
+            response.headers_mut().remove(CONTENT_LENGTH);
+            response
+        }
         Err(_) => ApiError::unavailable(
-            "settlement_pending",
-            "settlement is still pending; retry with the same payment identifier",
+            "response_serialization_failed",
+            "response serialization failed",
         )
         .into_response(),
     }
@@ -1113,7 +1186,12 @@ async fn read_and_parse(state: &AppState, request: Request) -> Result<ParsedRequ
                 "request body exceeds 64 KiB",
             )
         })?;
-    parse_request(&bytes, &state.config.payment_identifier).map_err(|_| {
+    parse_request(
+        &bytes,
+        &state.config.payment_identifier,
+        state.config.accept_v1,
+    )
+    .map_err(|_| {
         ApiError::new(
             StatusCode::BAD_REQUEST,
             "malformed_request",
@@ -2310,6 +2388,42 @@ mod tests {
         assert!(!limiter.check("x402_test_a", Operation::Verify, 1).await);
         assert!(limiter.check("x402_test_b", Operation::Verify, 1).await);
         assert!(limiter.check("x402_test_a", Operation::Settle, 1).await);
+    }
+
+    #[tokio::test]
+    async fn v1_wire_responses_echo_the_legacy_network_alias() {
+        let settle = SettleResponse::failure(
+            "payee_not_allowed",
+            None,
+            None,
+            String::new(),
+            "eip155:8453".to_owned(),
+        );
+        let translated =
+            finalize_wire_response(protocol_json(StatusCode::OK, &settle), WireVersion::V1).await;
+        assert_eq!(translated.status(), StatusCode::OK);
+        let bytes = to_bytes(translated.into_body(), PROTOCOL_RESPONSE_REBUFFER_LIMIT)
+            .await
+            .unwrap_or_default();
+        let value: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        assert_eq!(value["network"], "base");
+        assert_eq!(value["success"], false);
+        assert_eq!(value["errorReason"], "payee_not_allowed");
+
+        let untouched =
+            finalize_wire_response(protocol_json(StatusCode::OK, &settle), WireVersion::V2).await;
+        let bytes = to_bytes(untouched.into_body(), PROTOCOL_RESPONSE_REBUFFER_LIMIT)
+            .await
+            .unwrap_or_default();
+        let value: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        assert_eq!(value["network"], "eip155:8453");
+
+        let error = finalize_wire_response(
+            ApiError::new(StatusCode::BAD_REQUEST, "malformed_request", "bad").into_response(),
+            WireVersion::V1,
+        )
+        .await;
+        assert_eq!(error.status(), StatusCode::BAD_REQUEST);
     }
 
     #[test]
