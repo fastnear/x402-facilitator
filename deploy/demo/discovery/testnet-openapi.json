@@ -53,7 +53,7 @@
             }
           },
           "402": {
-            "description": "x402 payment required; requirements are in the base64 PAYMENT-REQUIRED response header"
+            "description": "x402 payment required. v2 requirements are base64-encoded in the PAYMENT-REQUIRED response header (authoritative); the JSON body carries an informational hint pointing at the header"
           },
           "409": {
             "description": "Payment identifier already used for different work"
