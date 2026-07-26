@@ -506,6 +506,7 @@ fn service_config() -> TestResult<ServiceConfig> {
             balance_hard_stop_yocto_near: HARD_STOP.to_owned(),
         },
         payment_identifier: PaymentIdentifierConfig::default(),
+        accept_v1: false,
         eip155: None,
     })
 }
@@ -605,6 +606,7 @@ fn valid_request(
     Ok(parse_request(
         &serde_json::to_vec(&request)?,
         &PaymentIdentifierConfig::default(),
+        false,
     )?)
 }
 
