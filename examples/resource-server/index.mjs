@@ -13,6 +13,7 @@ import {
   declarePaymentIdentifierExtension,
   extractPaymentIdentifier,
 } from "@x402/extensions/payment-identifier";
+import { ExactEvmScheme } from "@x402/evm/exact/server";
 import { ExactNearScheme } from "@x402/near/exact/server";
 import express from "express";
 
@@ -31,12 +32,27 @@ const payTo = requiredEnvironment("PAY_TO");
 const amount = process.env.AMOUNT ?? "1000";
 const port = parsePort(process.env.PORT ?? "4021");
 
-if (!["near:testnet", "near:mainnet"].includes(network)) {
-  throw new Error("NETWORK must be near:testnet or near:mainnet");
+const isEvm = network.startsWith("eip155:");
+const isNear = network === "near:testnet" || network === "near:mainnet";
+if (!isEvm && !isNear) {
+  throw new Error("NETWORK must be near:testnet, near:mainnet, or eip155:<chainId>");
 }
 if (!/^[0-9]+$/.test(amount) || BigInt(amount) < 1000n) {
   throw new Error("AMOUNT must be at least 1000 atomic USDC");
 }
+
+// eip155 "exact" is ERC-3009: the client signs an EIP-712 TransferWithAuthorization
+// over the token's domain, so the payment requirements must carry the token's
+// EIP-712 `name`/`version` in `extra`. These are the token contract's own domain
+// values (e.g. Base USDC is name "USD Coin", version "2") — not the symbol.
+const eip712Name = process.env.ASSET_EIP712_NAME;
+const eip712Version = process.env.ASSET_EIP712_VERSION ?? "2";
+if (isEvm && !eip712Name) {
+  throw new Error(
+    "ASSET_EIP712_NAME is required for eip155 networks (e.g. 'USD Coin' for Base USDC)",
+  );
+}
+const acceptsExtra = isEvm ? { name: eip712Name, version: eip712Version } : undefined;
 
 const facilitator = new HTTPFacilitatorClient({
   url: facilitatorUrl,
@@ -56,6 +72,7 @@ const routes = {
         price: { asset, amount },
         network,
         payTo,
+        ...(acceptsExtra ? { extra: acceptsExtra } : {}),
       },
     ],
     description: "Deterministic paid work with independent delivery deduplication",
@@ -69,7 +86,7 @@ const routes = {
 // Development-only journal. Production must use durable transactional storage.
 const deliveries = new DeliveryJournal();
 const resourceServer = new x402ResourceServer(facilitator)
-  .register(network, new ExactNearScheme())
+  .register(network, isEvm ? new ExactEvmScheme() : new ExactNearScheme())
   .onAfterSettle(async ({ paymentPayload, result }) => {
     if (!result.success) {
       return;
