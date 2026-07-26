@@ -78,7 +78,10 @@ const routes = {
     description: "Deterministic paid work with independent delivery deduplication",
     mimeType: "application/json",
     extensions: {
-      [PAYMENT_IDENTIFIER]: declarePaymentIdentifierExtension(true),
+      // Optional (not required): a client may send a payment-identifier to opt
+      // into resource-layer delivery idempotency (replay returns the cached
+      // result), but standard x402 clients that omit it are still served.
+      [PAYMENT_IDENTIFIER]: declarePaymentIdentifierExtension(false),
     },
   },
 };
@@ -93,7 +96,9 @@ const resourceServer = new x402ResourceServer(facilitator)
     }
     const identifier = extractPaymentIdentifier(paymentPayload);
     if (!identifier) {
-      throw new Error("payment-identifier is required for paid work");
+      // payment-identifier is optional: a payment without one is a
+      // payment-per-request settlement with no delivery-journal entry to mark.
+      return;
     }
     if (!deliveries.markSettled(identifier, payloadFingerprint(paymentPayload))) {
       throw new Error("settlement succeeded without a matching delivery-journal entry");
@@ -149,9 +154,14 @@ const app = express();
 app.use(express.json({ limit: "16kb", strict: true }));
 app.use(paymentMiddlewareFromHTTPServer(httpServer));
 app.post("/work", (request, response) => {
+  const work = () => ({
+    result: createHash("sha256").update(canonicalJson(request.body)).digest("hex"),
+  });
   const identifier = request.x402PaymentIdentifier;
   if (!identifier) {
-    response.status(500).json({ error: "payment identifier was not bound to request" });
+    // payment-identifier is optional: with no identifier this is a
+    // payment-per-request delivery and there is no journal entry to dedup.
+    response.json({ ...work(), replayed: false });
     return;
   }
   if (request.x402PaymentConflict) {
@@ -162,9 +172,7 @@ app.post("/work", (request, response) => {
     identifier,
     request.x402PaymentFingerprint,
     request.x402WorkFingerprint,
-    () => ({
-      result: createHash("sha256").update(canonicalJson(request.body)).digest("hex"),
-    }),
+    work,
   );
   if (prepared.status === "conflict") {
     response.status(409).json({ error: "payment identifier already used for other work" });
