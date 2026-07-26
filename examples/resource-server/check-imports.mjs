@@ -22,6 +22,7 @@ import {
   translateV1PaymentToV2,
   v1NetworkName,
 } from "./legacy-v1.mjs";
+import { withFacilitatorRetries, withRetries } from "./retry.mjs";
 
 for (const [name, value] of Object.entries({
   HTTPFacilitatorClient,
@@ -39,6 +40,8 @@ for (const [name, value] of Object.entries({
   translateSettleHeaderToV1,
   translateV1PaymentToV2,
   v1NetworkName,
+  withFacilitatorRetries,
+  withRetries,
 })) {
   if (typeof value !== "function") {
     throw new Error(`${name} is not exported as a function`);
