@@ -13,6 +13,7 @@ pub mod chain;
 pub mod config;
 pub mod leadership;
 pub mod protocol;
+pub(crate) mod retry;
 pub mod service;
 pub mod store;
 pub mod telemetry;

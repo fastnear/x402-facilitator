@@ -160,10 +160,17 @@ impl ChainProvider {
     ) -> Result<VerifiedPayment, VerifyRejection> {
         match self {
             Self::Near(provider) => {
-                let near = provider
-                    .verify(request, policy)
-                    .await
-                    .map_err(VerifyRejection::from_near)?;
+                // Same bounded retry the EVM provider applies internally:
+                // ambiguous RPC lookups (throttling, transient failures) get
+                // two short retries; definitive rejections return immediately.
+                let near = crate::retry::retry_while_transient(
+                    || provider.verify(request, policy),
+                    |outcome| {
+                        matches!(outcome, Err(failure) if near_verification_is_rpc_ambiguous(*failure))
+                    },
+                )
+                .await
+                .map_err(VerifyRejection::from_near)?;
                 Ok(VerifiedPayment {
                     payer: near.payer.to_string(),
                     payment_hash: *near.payment_hash(),

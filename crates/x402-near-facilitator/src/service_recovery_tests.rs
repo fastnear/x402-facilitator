@@ -761,7 +761,7 @@ async fn concurrent_distinct_settlements_serialize_unique_relayer_nonces() -> Te
     else {
         return Ok(());
     };
-    let result = async {
+    let result = Box::pin(async {
         let context = build_context(&database).await?;
         let first = reserve_payment(&context, 1, 1_050, "concurrent_distinct_nonce_0001").await?;
         let second = reserve_payment(&context, 2, 1_050, "concurrent_distinct_nonce_0002").await?;
@@ -808,7 +808,7 @@ async fn concurrent_distinct_settlements_serialize_unique_relayer_nonces() -> Te
             );
         }
         Ok::<(), Box<dyn Error + Send + Sync>>(())
-    }
+    })
     .await;
     database.cleanup().await?;
     result
