@@ -4,9 +4,10 @@ Status (2026-07-26): the x402 Foundation facilitators-table entry **merged**
 (#2941); awesome-agentic-commerce #510 and x402facilitators #15 remain open;
 and the x402scan NEAR feature request remains open as #1040. Base mainnet is
 now live with authentic settlement activity, which makes x402-list actionable
-and creates a future x402scan facilitator path. Do not submit updated
-multi-chain claims until v0.5.1 is deployed and its public landing page and
-Base `payment-identifier` advertisement are visible.
+and creates a future x402scan facilitator path. v0.5.1 is deployed across the
+three live reference instances; its public landing pages and Base
+`payment-identifier` advertisement are visible in the
+[dated rollout evidence](evidence/2026-07-26-v051-reference-deployment.md).
 
 ## Readiness facts registries key off
 
@@ -29,8 +30,7 @@ Base `payment-identifier` advertisement are visible.
 - Description: “Open-source, API-key-gated x402 exact-payment facilitator for
   Circle USDC on NEAR and Base, with sponsored gas and durable settlement
   recovery.”
-- Website: `https://x402.mikedotexe.com/` after the v0.5 landing page is
-  deployed.
+- Website: <https://x402.mikedotexe.com/>.
 - Source/docs: <https://github.com/fastnear/x402-near-facilitator>.
 - Logo: `docs/assets/near-x402-facilitator.svg`; color `#00ec97`.
 - Access: gated; `X-API-Key`; use the
@@ -113,9 +113,9 @@ publish a made-up `/.well-known` facilitator format.
   `| [NEAR x402 Facilitator](https://x402.mikedotexe.com/supported) |
   Independent facilitator for NEAR mainnet and testnet; NEP-141 USDC
   settled through NEP-366 signed delegates with relayer-sponsored gas |`
-- After v0.5.1 and the Base promotion are publicly evidenced, update this
-  existing row in a small follow-up PR to say NEAR and Base and link the
-  human-facing root page. Do not create a second Base-only listing.
+- v0.5.1 and the Base promotion are publicly evidenced. Update this existing
+  row in a small follow-up PR to say NEAR and Base and link the human-facing
+  root page. Do not create a second Base-only listing.
 
 ### 3. x402.org ecosystem page — partner entry (DEPRECATED upstream)
 
@@ -132,8 +132,8 @@ publish a made-up `/.well-known` facilitator format.
 - Staged branch:
   <https://github.com/mikedotexe/awesome-agentic-commerce/tree/x402-near-facilitator-listing>
 - **PR opened 2026-07-23:** <https://github.com/Merit-Systems/awesome-agentic-commerce/pull/510>
-- The open entry still describes NEAR only. After v0.5.1 is deployed, amend
-  that PR to the reusable NEAR-and-Base description before it merges.
+- The open entry still describes NEAR only. v0.5.1 is now deployed; amend that
+  PR to the reusable NEAR-and-Base description before it merges.
 
 ### 5. x402.watch / @swader/x402facilitators — facilitator directory (PR)
 
@@ -165,7 +165,7 @@ publish a made-up `/.well-known` facilitator format.
 - Open the PR from
   <https://github.com/near/awesome-near/compare/main...mikedotexe:awesome-near:x402-near-facilitator-listing>
 
-### 8. x402-list.com — facilitator registry (ready after v0.5 deploy)
+### 8. x402-list.com — facilitator registry (ready for submission)
 
 - Submit through <https://x402-list.com/submit> or
   `POST https://x402-list.com/api/v1/submit`.
@@ -190,8 +190,8 @@ publish a made-up `/.well-known` facilitator format.
 - Submit one bullet at the bottom of the section:
   `[NEAR x402 Facilitator](https://x402.mikedotexe.com/) - Open-source,
   API-key-gated facilitator for exact Circle USDC payments on NEAR and Base.`
-- Wait until the own-domain landing page is live. Their contribution rules
-  require an active, documented, production-ready HTTPS destination.
+- The own-domain landing page is live. Their contribution rules require an
+  active, documented, production-ready HTTPS destination.
 
 ### 10. Gold-402 — hosted-facilitator list (PR)
 
@@ -200,8 +200,8 @@ publish a made-up `/.well-known` facilitator format.
   NEAR paid-flow evidence because the authenticated endpoints cannot be probed
   without a key; arrange a narrowly scoped reviewer credential out of band if
   the maintainer requests a live verification.
-- Submit after v0.5.1 is live so the homepage and `/supported` agree with the
-  multi-chain description.
+- v0.5.1 is live, and the homepage and `/supported` agree with the multi-chain
+  description.
 
 ### 11. x402dev monitor — skip until its gated-facilitator model is fixed
 
