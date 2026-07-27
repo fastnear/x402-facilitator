@@ -1,14 +1,16 @@
 # Threat model
 
-This model was written for the NEAR launch and remains the baseline; the
-[EVM and legacy-v1 delta](#evm-eip155-and-legacy-v1-delta) section extends it
-to the Base instance and the gated v1 wire.
+This model covers the shared facilitator and calls out chain-specific controls
+where they differ. The original NEAR controls remain the baseline; the
+[EVM and legacy-v1 delta](#evm-eip155-and-legacy-v1-delta) extends them to Base
+and the gated v1 wire. Deployment-specific residual risks below describe the
+dated public reference topology, not requirements for every self-hoster.
 
 ## Protected assets and trust boundaries
 
 The facilitator protects:
 
-- the dedicated relayer private key and its NEAR balance;
+- the dedicated relayer/signer private key and its native gas balance;
 - payer-authorized Circle USDC transfers;
 - merchant binding and API client policy;
 - the single-settlement and idempotency guarantees;
@@ -71,7 +73,12 @@ nonce is not safely attributable to failure. Those cases remain nonterminal
 and fail readiness. An advanced nonce with an unknown hash additionally
 quarantines the relayer. No recovery path signs replacement bytes.
 
-## Residual risks
+## Reference deployment residual risks
+
+These observations apply to the reference topology recorded in the
+[historical runbook snapshot](evidence/2026-07-26-reference-deployment-runbook-snapshot.md);
+that snapshot is not go-live evidence. An independent deployment must perform
+its own infrastructure threat review.
 
 - Mainnet and testnet share a host. Host, Nginx, kernel, or network failure can
   affect both.
@@ -116,15 +123,28 @@ assets and threats:
   authorization).
 - **Single-use anchor**: the ERC-3009 authorization nonce replaces the
   delegate hash; the token contract enforces it on-chain, and the journal
-  enforces it globally before broadcast.
+  enforces it in a network/token/payer scope before broadcast. The full signed
+  authorization is not retained before preparation: the journal keeps the
+  nonce anchor, canonical settlement fields, and validity window, then stores
+  the exact signed transaction bytes required for recovery.
+- **Historical authorization retention**: migration `0003` drops the legacy
+  full authorization and the admin migration boundary requires a completed
+  table rewrite before v0.5 can start. Pre-migration backups and archived WAL
+  remain sensitive external copies until the operator's reviewed retention
+  window expires; the application cannot erase or attest to those archives.
+- **Fee exhaustion**: dynamic EIP-1559 estimates are bounded by a configured
+  maximum fee per gas. The budget reservation must exceed that ceiling times
+  the gas limit so Base L1 data fees remain covered, and readiness requires the
+  signer to hold the hard stop plus one full reservation.
 - **Reorg instead of receipt ambiguity**: success requires the stored
   transaction identity to hold the configured confirmation depth; a
   mined-then-missing transaction returns to nonterminal. No recovery path
   signs replacement bytes, matching the NEAR rule.
-- **RPC trust**: the Base primary and backup endpoints (`mainnet.base.org`,
-  a PublicNode host) are independent operators, unlike the NEAR pair's
-  shared-operator caveat, but both are public infrastructure with no
-  authenticated SLA; fail-closed ambiguity handling is the control.
+- **RPC trust**: durable signer-head and receipt decisions require two distinct
+  configured readers. Chain-ID, pending-nonce, or receipt disagreement is
+  indeterminate; conservative head/balance observations gate progress.
+  Operator independence and availability still depend on the endpoints a
+  self-hoster chooses.
 - **Legacy v1 wire (`accept_v1`)**: adds no new authorization semantics — a
   v1 request is strictly translated (deny-unknown-fields) into the canonical
   v2 shape at the parse boundary, so policy, verification, budgets, and the

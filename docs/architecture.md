@@ -35,8 +35,9 @@ responses for one payment unless that server also deduplicates.
 
 Every instance is one process pinned to one network: separate Unix users,
 relayer/signer keys, PostgreSQL databases, configuration files, ports, and
-hostnames. All instances currently share one physical host and therefore do
-not provide host-level high availability.
+hostnames. The public reference deployment described in the dated evidence
+uses one physical host and therefore does not provide host-level high
+availability; that topology is not a requirement of the software.
 
 ## The chain seam
 
@@ -45,10 +46,17 @@ terminalize) speaks neutral value types and dispatches through the
 `ChainProvider` enum in `crates/x402-near-facilitator/src/chain.rs`. Enum
 dispatch was chosen over trait objects deliberately: the chain set is closed
 and providers keep rich typed results (see
-[evm-v2-design.md](evm-v2-design.md) for the full rationale and the design
-history of the seam). Adding a chain means implementing a provider against
-the neutral contract and adding an enum arm; the journal, recovery, HTTP,
-and policy layers do not change.
+[evm-v2-design.md](evm-v2-design.md) for the full rationale and design
+history).
+
+A new chain is an audited in-tree addition, not a runtime plugin. The provider
+crate and enum arm keep chain primitives out of the engine, but the integration
+also needs explicit configuration, canonical payload parsing, a durable store
+projection and chain-conditional schema constraints, recovery/finality logic,
+fixtures, readiness, operations, and public documentation. The complete
+contract is in [adding-a-chain.md](adding-a-chain.md). Provider-specific
+branches should live behind the enum/store boundary; any new engine branch
+must state the invariant that prevents that encapsulation.
 
 Wire dialects are handled entirely at the HTTP boundary: `protocol.rs`
 parses canonical x402 v2 with deny-unknown-fields at every level, and
@@ -84,11 +92,11 @@ The EVM provider owns:
 - payment verification reused wholesale from the pinned upstream
   `x402-chain-eip155` implementation (ERC-3009/EIP-712, smart-wallet
   signature support, balance and authorization-state preflight);
-- an offline payment hash over the ERC-3009 authorization as the
-  chain-enforced single-use anchor;
+- an offline EIP-712 payment hash plus the scoped ERC-3009 authorization nonce
+  as distinct request-identity and chain-enforced single-use values;
 - durable submission of the signed `transferWithAuthorization` with sponsored
-  gas, and status queries that report mined block identity and confirmation
-  depth;
+  gas, exact Base L1 fee accounting, and independent primary/backup reads for
+  signer state and receipt identity;
 - reorg-aware interpretation: terminal success only at the configured
   `required_confirmations`, with mined-then-missing transactions demoted back
   to nonterminal for re-evaluation.
@@ -121,6 +129,11 @@ credentials, set budgets, and start an operator-directed reconciliation.
 It is not exposed over HTTP. Migration credentials are never supplied to the
 service process.
 
+The `x402-near-facilitator` package and binary names are historical
+compatibility identifiers from the original NEAR-only launch. They now contain
+the shared NEAR/Base service and are not intended to describe a NEAR-only
+engine.
+
 ## Verify flow
 
 1. Nginx accepts only JSON bodies no larger than 64 KiB and forwards a request
@@ -149,7 +162,7 @@ repeats it because payer state can change.
 Chain-neutral spine (both chains):
 
 1. Authenticate, enforce policy, derive the chain-enforced payment anchor
-   (delegate hash / ERC-3009 authorization hash), validate the optional
+   (domain-prefixed delegate hash / scoped ERC-3009 authorization nonce), validate the optional
    payment identifier, and begin one PostgreSQL transaction.
 2. Claim the payment, persist the normalized request and policy snapshot, and
    reserve the conservative sponsorship amount atomically.
@@ -185,14 +198,17 @@ The source of truth is PostgreSQL. The minimum logical records are:
 | --- | --- |
 | API client | Public identifier/prefix, HMAC digest, status, rate and sponsorship policy |
 | Payee policy | Exact client, network, asset, and `pay_to` tuple |
-| Settlement | Chain-enforced payment anchor, identifier/fingerprint, policy snapshot, lifecycle, exact outer transaction, chain-specific authorization columns (delegate identity on NEAR; ERC-3009 authorization, signer, mined block, confirmations on eip155), terminal response |
+| Settlement | Scoped chain-enforced payment anchor, identifier/fingerprint, policy snapshot, lifecycle and attempt count, exact signed submission, minimal authorization metadata (delegate identity on NEAR; ERC-3009 validity window on eip155), signer, terminal evidence, and response |
 | Daily sponsorship ledger | Atomic reservation and actual sponsored cost by instance/client/day |
 
-Settlement states are monotonic:
+Submission states move forward. A deliberate pre-broadcast retry loop releases
+budget and signer ownership while retaining the payment anchor:
 
 ```mermaid
 stateDiagram-v2
     [*] --> reserved
+    reserved --> awaiting_retry: retryable failure before signed bytes
+    awaiting_retry --> reserved: same payment, current policy and budget
     reserved --> prepared
     reserved --> failed
     prepared --> submitted: durable before broadcast
@@ -201,8 +217,15 @@ stateDiagram-v2
     submitted --> failed: definitive final outcome
 ```
 
+`awaiting_retry` is dormant: it owns neither budget nor signer nonce, is not
+broadcastable, and can return to `reserved` only when the same canonical
+payment is presented again and current policy and budget are reacquired
+atomically. Its scoped anchor remains reserved, so another identifier cannot
+claim the authorization.
+
 Nonterminal rows are never expired by retention jobs. On startup, the process
-holds a session advisory lock and keeps readiness false while reconciling:
+holds a session advisory lock and keeps readiness false while reconciling active
+rows:
 
 - stale `reserved` rows without an outer transaction can release their budget;
 - `prepared` and `submitted` hashes are queried on primary, then backup RPC;
@@ -221,29 +244,23 @@ holds a session advisory lock and keeps readiness false while reconciling:
   valid and only after both providers' checks — never by signing a new
   transaction.
 
-## Operational topology
+## Deployment boundary
 
-Nginx terminates public TLS and routes:
+The production boundary assumes a TLS reverse proxy in front of a loopback-only
+service. Unknown hostnames and methods should be denied before Axum, request
+bodies and upstream timeouts bounded, and authentication headers marked
+sensitive before request tracing. Each network has a separate process, Unix
+identity, configuration, credential set, database, signer, and public
+hostname.
 
-- `x402.mikedotexe.com` to `127.0.0.1:8402` (NEAR mainnet);
-- `test.x402.mikedotexe.com` to `127.0.0.1:8403` (NEAR testnet);
-- `base.x402.mikedotexe.com` to `127.0.0.1:8405` (Base mainnet;
-  `127.0.0.1:8404` is reserved for Base Sepolia when deployed).
+The checked-in systemd and Nginx files implement that shape without making a
+particular cloud, DNS provider, or account hierarchy part of the architecture.
+Immutable version directories and atomic per-instance pointers allow one
+network to be promoted or rolled back independently. Database migrations are
+forward-only, and the changelog for each release defines its configuration and
+schema rollback boundary.
 
-Route 53 records point the names directly at the host; no CDN or proxy tier
-fronts the origin. Publicly trusted certificates cover exactly these names,
-deny-by-default virtual hosts refuse unknown Host and SNI values, and the
-API-key boundary plus Nginx method, body-size, and timeout limits face the
-public Internet directly. Each systemd unit reads non-secret JSON from
-`/etc/x402-near-facilitator/<instance>.json` and receives the database URL,
-relayer/signer credential, API-key pepper, and OTLP headers through
-`LoadCredential`.
-
-Releases are immutable version directories. The per-instance
-`current-<instance>` symlinks are the only deployment pointers, so each
-instance is promoted or rolled back without changing the others (the NEAR
-fleet and the Base instance intentionally run different versions). Database
-migrations remain forward-only and compatible with the previous binary. Note
-for rollback: a config that sets `accept_v1` must drop that key before
-promoting a pre-v0.4.0 binary, whose configuration parser rejects unknown
-fields.
+The original planned hostnames, ports, identities, and version-specific
+procedures are retained in the dated historical
+[reference-deployment runbook snapshot](evidence/2026-07-26-reference-deployment-runbook-snapshot.md),
+not as software defaults or proof that every target went live.

@@ -79,16 +79,37 @@ jobs:
           gh api "repos/${GITHUB_REPOSITORY}/branches/${default_branch}" \
             >default-branch.json
 
-          printf '%s\n' \
-            '<!-- x402-release-checkpoint:v1' \
-            "repository=${GITHUB_REPOSITORY}" \
-            "tag=${tag}" \
-            "tag-object=${tag_object}" \
-            "commit=${checkout_commit}" \
-            '-->' \
-            'This draft is a resumable release checkpoint. The verified' \
-            'artifact inventory is recorded in release-manifest.json.' \
-            >checkpoint-body.md
+          version="${tag#v}"
+          {
+            printf '%s\n' \
+              '<!-- x402-release-checkpoint:v1' \
+              "repository=${GITHUB_REPOSITORY}" \
+              "tag=${tag}" \
+              "tag-object=${tag_object}" \
+              "commit=${checkout_commit}" \
+              '-->' \
+              '' \
+              "# ${tag}"
+            awk -v version="$version" '
+              $0 == "## [" version "]" ||
+                index($0, "## [" version "] - ") == 1 {
+                found = 1
+                next
+              }
+              found && /^## \[/ { exit }
+              found { print }
+              END {
+                if (!found) {
+                  print "error: CHANGELOG.md has no section for " version > "/dev/stderr"
+                  exit 1
+                }
+              }
+            ' CHANGELOG.md
+            printf '%s\n' \
+              '' \
+              'Release artifacts, checksums, SBOMs, and provenance are listed' \
+              'in the attached `release-manifest.json`.'
+          } >checkpoint-body.md
 
           gh api --paginate --slurp \
             "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
@@ -241,12 +262,19 @@ jobs:
             cargo install cargo-deny --version 0.20.2 --locked
           command -v cargo-audit >/dev/null || \
             cargo install cargo-audit --version 0.22.2 --locked
-          command -v cargo-sqlx >/dev/null || \
-            cargo install sqlx-cli --version 0.8.6 --no-default-features \
-              --features rustls,postgres --locked
 
-      - name: Apply migrations to ephemeral PostgreSQL
-        run: cargo sqlx migrate run --source migrations
+      - name: Apply migrations and physical scrub to ephemeral PostgreSQL
+        shell: bash
+        run: |
+          set -euo pipefail
+          database_url_file="$(mktemp)"
+          trap 'rm -f "$database_url_file"' EXIT
+          chmod 600 "$database_url_file"
+          printf '%s\n' "$DATABASE_URL" >"$database_url_file"
+          cargo run --locked --quiet \
+            --package x402-near-facilitator \
+            --bin x402-near-admin -- \
+            migrate --database-url-file "$database_url_file"
 
       - name: Install official HTTP client conformance dependency
         run: npm --prefix conformance/http-client ci
@@ -286,6 +314,8 @@ jobs:
           mkdir -p "$work/conf.d" "$work/snippets" \
             "$work/letsencrypt/live/x402.mikedotexe.com"
           cp deploy/nginx/x402-near-facilitator.conf "$work/conf.d/default.conf"
+          cp deploy/nginx/x402-base.conf "$work/conf.d/base.conf"
+          cp deploy/nginx/x402-base-sepolia.conf "$work/conf.d/base-sepolia.conf"
           cp deploy/nginx/x402-near-proxy.conf "$work/snippets/"
           openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
             -subj /CN=x402.mikedotexe.com \
@@ -827,16 +857,36 @@ jobs:
           test "$(git rev-parse HEAD)" = "$COMMIT"
           test "$(git rev-parse "${GITHUB_REF_NAME}^{commit}")" = "$COMMIT"
 
-          printf '%s\n' \
-            '<!-- x402-release-checkpoint:v1' \
-            "repository=${GITHUB_REPOSITORY}" \
-            "tag=${GITHUB_REF_NAME}" \
-            "tag-object=${TAG_OBJECT}" \
-            "commit=${COMMIT}" \
-            '-->' \
-            'This draft is a resumable release checkpoint. The verified' \
-            'artifact inventory is recorded in release-manifest.json.' \
-            >work/checkpoint-body.md
+          {
+            printf '%s\n' \
+              '<!-- x402-release-checkpoint:v1' \
+              "repository=${GITHUB_REPOSITORY}" \
+              "tag=${GITHUB_REF_NAME}" \
+              "tag-object=${TAG_OBJECT}" \
+              "commit=${COMMIT}" \
+              '-->' \
+              '' \
+              "# ${GITHUB_REF_NAME}"
+            awk -v version="$VERSION" '
+              $0 == "## [" version "]" ||
+                index($0, "## [" version "] - ") == 1 {
+                found = 1
+                next
+              }
+              found && /^## \[/ { exit }
+              found { print }
+              END {
+                if (!found) {
+                  print "error: CHANGELOG.md has no section for " version > "/dev/stderr"
+                  exit 1
+                }
+              }
+            ' CHANGELOG.md
+            printf '%s\n' \
+              '' \
+              'Release artifacts, checksums, SBOMs, and provenance are listed' \
+              'in the attached `release-manifest.json`.'
+          } >work/checkpoint-body.md
           gh api "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" \
             >work/release.json
           python3 -B scripts/release_guard.py validate-checkpoint \

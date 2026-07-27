@@ -24,7 +24,7 @@ use x402_near_facilitator::telemetry::TelemetryGuard;
 #[command(
     name = "x402-near-admin",
     version,
-    about = "Offline administration for the NEAR x402 facilitator"
+    about = "Offline administration for the NEAR and Base x402 facilitator"
 )]
 struct Cli {
     #[command(subcommand)]

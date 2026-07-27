@@ -12,7 +12,7 @@
 //! - a deployed smart-wallet (EIP-1271) signature → the opaque `bytes` overload;
 //! - a counterfactual (EIP-6492) signature → **rejected**: settling it requires
 //!   deploying the wallet in the same transaction (a Multicall3 aggregate), which
-//!   the durable path does not yet build. This is a deliberate, documented v1
+//!   the durable path does not yet build. This is an explicit capability
 //!   boundary, not silent behavior.
 //!
 //! The EIP-712 transfer hash doubles as the payment's canonical identity (the
@@ -77,6 +77,29 @@ pub enum UnsupportedSignature {
     Malformed,
 }
 
+pub(crate) enum SettleableSignature {
+    Eoa { v: u8, r: B256, s: B256 },
+    Eip1271(Bytes),
+}
+
+pub(crate) fn classify_settleable_signature(
+    payer: Address,
+    signature: &Bytes,
+    eip712_prehash: &B256,
+) -> Result<SettleableSignature, UnsupportedSignature> {
+    let structured = StructuredSignature::try_from_bytes(signature.clone(), payer, eip712_prehash)
+        .map_err(|_| UnsupportedSignature::Malformed)?;
+    match structured {
+        StructuredSignature::EOA(eoa) => Ok(SettleableSignature::Eoa {
+            v: eoa.v_legacy(),
+            r: eoa.r_bytes(),
+            s: eoa.s_bytes(),
+        }),
+        StructuredSignature::EIP1271(bytes) => Ok(SettleableSignature::Eip1271(bytes)),
+        StructuredSignature::EIP6492 { .. } => Err(UnsupportedSignature::CounterfactualWallet),
+    }
+}
+
 /// Select the ERC-3009 overload matching the payer signature's shape and return
 /// the encoded `transferWithAuthorization` calldata.
 ///
@@ -93,21 +116,17 @@ pub fn settlement_calldata(
     signature: &Bytes,
     eip712_prehash: &B256,
 ) -> Result<Bytes, UnsupportedSignature> {
-    let structured =
-        StructuredSignature::try_from_bytes(signature.clone(), authorization.from, eip712_prehash)
-            .map_err(|_| UnsupportedSignature::Malformed)?;
-    match structured {
-        StructuredSignature::EOA(eoa) => Ok(transfer_with_authorization_vrs_calldata(
+    match classify_settleable_signature(authorization.from, signature, eip712_prehash)? {
+        SettleableSignature::Eoa { v, r, s } => Ok(transfer_with_authorization_vrs_calldata(
             authorization,
-            eoa.v_legacy(),
-            eoa.r_bytes(),
-            eoa.s_bytes(),
+            v,
+            r,
+            s,
         )),
-        StructuredSignature::EIP1271(bytes) => Ok(transfer_with_authorization_bytes_calldata(
+        SettleableSignature::Eip1271(bytes) => Ok(transfer_with_authorization_bytes_calldata(
             authorization,
             bytes,
         )),
-        StructuredSignature::EIP6492 { .. } => Err(UnsupportedSignature::CounterfactualWallet),
     }
 }
 
@@ -117,6 +136,7 @@ mod tests {
     use alloy_primitives::{U256, address, b256, hex, keccak256};
     use alloy_signer::SignerSync;
     use alloy_signer_local::PrivateKeySigner;
+    use alloy_sol_types::SolValue;
 
     // Base Sepolia USDC — a realistic verifying contract for the domain.
     const ASSET: Address = address!("0x036CbD53842c5426634e7929541eC2318f3dCF7e");
@@ -124,7 +144,8 @@ mod tests {
     const BYTES_SELECTOR_SIG: &str =
         "transferWithAuthorization(address,address,uint256,uint256,uint256,bytes32,bytes)";
 
-    // A throwaway test key standing in for a payer wallet. NOT a real credential.
+    // DO NOT FUND. A deterministic throwaway key used only with expired test
+    // authorizations.
     fn payer() -> Result<PrivateKeySigner, Box<dyn std::error::Error>> {
         let key = b256!("00000000000000000000000000000000000000000000000000000000000000a1");
         Ok(PrivateKeySigner::from_bytes(&key)?)
@@ -136,7 +157,7 @@ mod tests {
             to: address!("0x2222222222222222222222222222222222222222"),
             value: U256::from(1_000_000_u64),
             valid_after: U256::ZERO,
-            valid_before: U256::from(4_000_000_000_u64),
+            valid_before: U256::from(1_u64),
             nonce: b256!("00000000000000000000000000000000000000000000000000000000000000aa"),
         }
     }
@@ -195,6 +216,28 @@ mod tests {
             "6492649264926492649264926492649264926492649264926492649264926492"
         ));
         let signature_bytes = Bytes::from(blob);
-        assert!(settlement_calldata(&auth, &signature_bytes, &prehash).is_err());
+        assert!(matches!(
+            settlement_calldata(&auth, &signature_bytes, &prehash),
+            Err(UnsupportedSignature::Malformed)
+        ));
+    }
+
+    #[test]
+    fn well_formed_eip6492_signature_is_definitively_unsupported() {
+        let auth = authorization(address!("0x1111111111111111111111111111111111111111"));
+        let prehash = B256::repeat_byte(0xbb);
+        let mut wrapper = (
+            address!("0x3333333333333333333333333333333333333333"),
+            Bytes::from(vec![0x12_u8; 48]),
+            Bytes::from(vec![0x34_u8; 80]),
+        )
+            .abi_encode_params();
+        wrapper.extend_from_slice(&hex!(
+            "6492649264926492649264926492649264926492649264926492649264926492"
+        ));
+        assert!(matches!(
+            settlement_calldata(&auth, &Bytes::from(wrapper), &prehash),
+            Err(UnsupportedSignature::CounterfactualWallet)
+        ));
     }
 }

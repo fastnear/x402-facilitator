@@ -35,6 +35,7 @@
   "eip155": {
     "chain_id": 8453,
     "required_confirmations": 2,
-    "gas_limit": 120000
+    "gas_limit": 120000,
+    "max_fee_per_gas_wei": "1000000000"
   }
 }

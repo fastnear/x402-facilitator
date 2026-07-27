@@ -1,0 +1,67 @@
+name: Reference-instance access
+description: Request bounded access to a public NEAR or Base facilitator
+title: "access: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This issue is public. Never include an API key, private key, signed
+        payment authorization, credentialed URL, raw transaction bytes, or
+        other bearer instrument. Approval is not guaranteed and the reference
+        service has no availability SLA.
+
+  - type: checkboxes
+    id: networks
+    attributes:
+      label: Requested networks
+      options:
+        - label: near:testnet
+        - label: near:mainnet
+        - label: eip155:84532 (Base Sepolia rollout target)
+        - label: eip155:8453 (Base)
+    validations:
+      required: true
+
+  - type: textarea
+    id: project
+    attributes:
+      label: Integration
+      description: Describe the resource server and link public source or documentation when available.
+    validations:
+      required: true
+
+  - type: textarea
+    id: recipients
+    attributes:
+      label: Exact USDC recipients
+      description: List only public recipient accounts or addresses. Wildcards are not supported.
+    validations:
+      required: true
+
+  - type: textarea
+    id: usage
+    attributes:
+      label: Expected usage
+      description: Give the verify/settle rate, daily settlement count, evaluation duration, and expected atomic USDC amount range.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: transport
+    attributes:
+      label: Wire transport
+      options:
+        - Canonical x402 v2
+        - Canonical v2 plus gated EVM v1 compatibility
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: acknowledgement
+    attributes:
+      label: Acknowledgements
+      options:
+        - label: This issue contains no secret or signed payment authorization.
+          required: true
+        - label: I understand access is exact-policy, bounded, revocable, and has no SLA.
+          required: true

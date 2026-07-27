@@ -1,36 +1,86 @@
-# NEAR paid-work reference service
+# x402 paid-work reference server
 
-This runnable Express service protects `POST /work` with a 1,000-atomic-USDC
-NEAR x402 payment. It uses the official x402 server middleware and NEAR scheme,
-authenticates to this facilitator, and independently deduplicates the
-`payment-identifier` before delivering work.
+This runnable Express service protects `POST /work` with an exact Circle USDC
+payment on NEAR or Base. One codebase:
 
-The in-memory delivery journal is intentionally a development example. A real
-service must replace it with durable, transactional storage shared by every
-resource-server instance.
+- registers the official NEAR or EVM server scheme selected by `NETWORK`;
+- emits canonical v2 `PAYMENT-REQUIRED` requirements;
+- accepts canonical v2 `PAYMENT-SIGNATURE` payments;
+- optionally accepts legacy v1 `X-PAYMENT` on EVM and translates it before the
+  official middleware;
+- retries transient facilitator failures with bounded backoff;
+- independently deduplicates delivered work when a payment identifier is
+  supplied.
 
-## Run
+The delivery journal is intentionally in-memory. A production resource server
+must replace it with durable, transactional storage shared by every instance;
+facilitator settlement idempotency does not by itself prevent duplicate
+application delivery.
+
+## Configure
+
+Install the pinned dependencies:
 
 ```sh
 npm ci
-export FACILITATOR_URL=https://test.x402.mikedotexe.com
-export FACILITATOR_API_KEY_FILE=/secure/path/test-resource-server-api-key
+```
+
+Set one profile. Values below are placeholders; use the canonical asset and an
+exact payee authorized for your facilitator API client.
+
+| Variable | NEAR example | Base example |
+| --- | --- | --- |
+| `FACILITATOR_URL` | `https://test.x402.example` | `https://base-test.x402.example` |
+| `NETWORK` | `near:testnet` | `eip155:84532` |
+| `ASSET` | canonical testnet USDC account | canonical Base Sepolia USDC address |
+| `PAY_TO` | exact NEAR recipient | exact EVM recipient |
+| `AMOUNT` | `1000` | `1000` |
+| `PORT` | `4021` | `4021` |
+| `RESOURCE_URL` | public HTTPS `/work` URL | public HTTPS `/work` URL |
+
+The API key must be stored in a mode-0600 regular file:
+
+```sh
+export FACILITATOR_URL=https://test.x402.example
+export FACILITATOR_API_KEY_FILE=/secure/path/resource-server-api-key
 export NETWORK=near:testnet
-export ASSET=3e2210e1184b45b64c8a434c0a7e7b23cc04ea7eb7a6c3c32520d03d4afcb8af
-export PAY_TO=merchant.mike.testnet
+export ASSET=your-canonical-usdc-asset
+export PAY_TO=your-exact-payee
+export AMOUNT=1000
+export PORT=4021
 npm start
 ```
 
-`FACILITATOR_API_KEY_FILE` must be a mode-0600 regular file containing exactly
-one newline-terminated key. The service never accepts the key directly in an
-environment variable and never logs it.
+`FACILITATOR_API_KEY_FILE` must contain exactly one newline-terminated key. The
+service does not accept the key directly in an environment variable and does
+not log it.
 
-An unpaid `POST /work` receives the normal x402 `402 Payment Required`
-challenge. After a compatible NEAR client resubmits with a payment signature,
-the endpoint settles through the configured facilitator and returns a
-deterministic SHA-256 result. Replaying the same identifier and payment returns
-the stored result without another settlement or another work execution. The
-same identifier with another payload returns 409.
+## Exercise
 
-This example is a launch workload, not evidence that either planned hostname
-is currently deployed.
+An unpaid request returns `402 Payment Required`:
+
+```sh
+curl -i \
+  -H 'Content-Type: application/json' \
+  --data '{"input":"hello"}' \
+  http://127.0.0.1:4021/work
+```
+
+A compatible client signs the advertised requirements and resubmits. A valid
+payment returns a deterministic SHA-256 result. Replaying the identical
+payment identifier and work returns the stored result without another
+settlement; reusing the identifier for different work returns 409.
+
+Legacy v1 is never enabled for NEAR. On EVM, the reference server emits a v1
+compatibility body and accepts `X-PAYMENT` only when the configured facilitator
+also enables `accept_v1`.
+
+## Tests
+
+```sh
+npm run check
+```
+
+The suite covers delivery-journal conflicts, bounded retries, the strict v1
+translation contract, and import hygiene. It uses no funded credentials and
+broadcasts no transaction.

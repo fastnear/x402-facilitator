@@ -7,8 +7,13 @@ Production files are installed as:
 ```text
 /etc/x402-near-facilitator/mainnet.json
 /etc/x402-near-facilitator/testnet.json
+/etc/x402-near-facilitator/base.json
 /etc/x402-near-facilitator/base-sepolia.json
 ```
+
+The `x402-near-facilitator` directory and environment-variable prefix are
+historical compatibility names retained from the original NEAR-only launch.
+They apply equally to EVM instances.
 
 The service must reject startup when a required key is unknown, a number is
 out of range, a network does not match its Circle asset, a public bind address
@@ -20,26 +25,27 @@ is configured for the native deployment, or a secret value is supplied inline.
 | --- | --- | --- |
 | `DATABASE_URL_FILE` | `database-url` | PostgreSQL service-role URL for this environment |
 | `DATABASE_DIRECT_URL_FILE` | `database-direct-url` | Direct PostgreSQL URL for session leadership; may equal the application URL only when it is already direct |
-| `RELAYER_KEY_FILE` | `relayer-key` | Dedicated relayer service key; never the Mike recovery key |
+| `RELAYER_KEY_FILE` | `relayer-key` | Dedicated relayer/signer service key; never an operator recovery key |
 | `API_KEY_PEPPER_FILE` | `api-key-pepper` | Random HMAC pepper independent of all API keys |
-| `OTEL_EXPORTER_OTLP_HEADERS_FILE` | `otel-headers` | OTLP authorization header; absent at launch, added by a systemd drop-in only when telemetry is adopted |
+| `OTEL_EXPORTER_OTLP_HEADERS_FILE` | `otel-headers` | Optional OTLP authorization header; omit when telemetry export is disabled |
 
 Files must contain only the value, end with a newline, be owned by root, and be
 mode 0600 before systemd imports them. The service should trim one terminal
 newline, but no other whitespace. Secret values must never be accepted through
 CLI arguments.
 
-Telemetry export is disabled at launch: leave both OTLP inputs unset. If an
-OTLP backend is adopted later, set its HTTPS endpoint, resource attributes
+The checked-in examples disable telemetry export. If an OTLP backend is
+adopted, set its HTTPS endpoint, resource attributes
 for `service.name=x402-near-facilitator`, `deployment.environment.name`, and
 `service.version`, and repeat the sanitized-event verification before
 production use. Never put a dataset name or API key in source-controlled
 examples if it identifies a private environment.
 
-## Environment isolation
+## NEAR environment isolation
 
-The two example files intentionally differ in every value that can prevent a
-cross-network mistake:
+The two checked-in NEAR examples intentionally differ in every value that can
+prevent a cross-network mistake. The account IDs below describe the public
+reference profile; self-hosters must use dedicated identities they control:
 
 | Setting | Testnet | Mainnet |
 | --- | --- | --- |
@@ -55,7 +61,7 @@ cross-network mistake:
 
 All NEAR-denominated configuration is expressed as decimal yoctoNEAR strings,
 not floating point. Circle USDC quantities are decimal atomic-unit strings.
-The launch minimum is 1,000 atomic USDC.
+Configuration validation requires at least 1,000 atomic USDC.
 
 ## EVM (eip155) instances
 
@@ -80,6 +86,14 @@ The `eip155` block carries the chain-specific settlement parameters:
 | `chain_id` | must equal the numeric suffix of `network` |
 | `required_confirmations` | confirmation depth (≥ 1) a mined transaction must reach before the journal marks it terminal — the reorg-safety margin |
 | `gas_limit` | per-settlement gas cap for the `transferWithAuthorization` call |
+| `max_fee_per_gas_wei` | positive decimal-string ceiling for the EIP-1559 maximum fee per gas; the service never signs above it |
+
+`primary_rpc_url` and `backup_rpc_url` must identify distinct EVM readers.
+Durable head, pending-nonce, balance, and receipt decisions consult both;
+identity or receipt disagreement is indeterminate and fails closed. Both
+endpoints must return Base's `l1Fee` receipt quantity, and preparation must be
+able to call the canonical Base GasPriceOracle predeploy over the exact signed
+transaction bytes.
 
 The service binds `network` to its canonical Circle USDC and refuses a
 mismatch, exactly as the NEAR branch binds a network to its USDC account:
@@ -90,7 +104,10 @@ mismatch, exactly as the NEAR branch binds a network to its USDC account:
 The sponsorship budgets keep their `*_yocto_near` names but hold the chain's
 native atomic gas unit — **wei** for eip155. In the Base Sepolia example the
 `10000000000000000` hard stop is 0.01 ETH and the `50000000000000000` warning
-is 0.05 ETH.
+is 0.05 ETH. `reservation_yocto_near` must be greater than
+`gas_limit × max_fee_per_gas_wei`; the remaining reservation covers Base's L1
+data fee. EVM readiness requires the signer balance to cover both the hard stop
+and one complete reservation.
 
 An eip155 instance may additionally set `"accept_v1": true` to accept legacy
 x402 v1 wire requests on `/verify` and `/settle` (translated internally to
@@ -99,23 +116,26 @@ the canonical v2 shape; responses echo `network` as the legacy alias `base` /
 The flag defaults to `false` and is rejected at validation for `near`
 configs — x402 v1 never covered NEAR networks.
 
-Base Sepolia isolation, parallel to the NEAR table above:
+The checked-in Base profiles are isolated as follows. These are non-secret
+configuration examples, not public deployment status:
 
-| Setting | Base Sepolia |
-| --- | --- |
-| Network | `eip155:84532` |
-| Bind address | `127.0.0.1:8404` |
-| Signer | secp256k1 `0x…` address in `relayer_account_id` |
-| Primary RPC | `https://sepolia.base.org` |
-| Backup RPC | `https://base-sepolia-rpc.publicnode.com` |
-| Asset | USDC `0x036CbD53842c5426634e7929541eC2318f3dCF7e` |
-| Balance warning | 0.05 ETH |
-| Hard stop | 0.01 ETH |
+| Setting | Base Sepolia | Base mainnet |
+| --- | --- | --- |
+| Network | `eip155:84532` | `eip155:8453` |
+| Bind address | `127.0.0.1:8404` | `127.0.0.1:8405` |
+| Signer | placeholder secp256k1 address | placeholder secp256k1 address |
+| Primary RPC | `https://sepolia.base.org` | `https://base.drpc.org` |
+| Backup RPC | `https://base-sepolia-rpc.publicnode.com` | `https://base-mainnet.public.blastapi.io` |
+| Canonical USDC | `0x036CbD53842c5426634e7929541eC2318f3dCF7e` | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` |
+| USDC EIP-712 domain | `USDC` / `2` | `USD Coin` / `2` |
+| Balance warning | 0.05 ETH | 0.005 ETH |
+| Hard stop | 0.01 ETH | 0.002 ETH |
+| Legacy v1 gate | off | on in the example; opt-in only |
 
 ## Database roles
 
-Create independent mainnet and testnet databases in the launch host's
-loopback-only PostgreSQL cluster. Each environment has:
+Create an independent database for every network in a private or loopback-only
+PostgreSQL cluster. Each environment has:
 
 - an owner/migration role used only by `x402-near-admin migrate`;
 - a service role with connect and DML privileges on the facilitator schema,
@@ -136,7 +156,8 @@ any other service.
 The effective configuration check must confirm:
 
 - config and each credential file are readable by the service;
-- the database schema version is compatible, without applying migrations;
+- the database schema version is compatible, without applying migrations, and
+  the v0.5 authorization-scrub table rewrite is marked complete;
 - the advisory leadership connection can remain session-pinned;
 - primary and backup RPCs report the configured network and final blocks;
 - configured asset, relayer, and minimum amount match the environment;

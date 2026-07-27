@@ -1,0 +1,19 @@
+{
+  "type": "facilitator",
+  "email": "mikedotexe@gmail.com",
+  "facilitator_name": "NEAR x402 Facilitator",
+  "website_url": "https://x402.mikedotexe.com/",
+  "description": "Open-source, API-key-gated x402 exact-payment facilitator for Circle USDC on NEAR and Base, with sponsored gas and durable settlement recovery.",
+  "settler_addresses": [
+    "0x7ff46ab88688d528bce3e59c470240c6901cf88c"
+  ],
+  "networks": [
+    "base",
+    "near"
+  ],
+  "facilitator_id_slug": "near-x402-facilitator",
+  "token_claims": [
+    "USDC"
+  ],
+  "notes": "Base mainnet API: https://base.x402.mikedotexe.com. NEAR mainnet API: https://x402.mikedotexe.com. NEAR testnet API: https://test.x402.mikedotexe.com. The NEAR mainnet settlement account is x402-relayer2.mike.near; it is listed here rather than in settler_addresses because this form accepts only EVM and Solana address formats. Source: https://github.com/fastnear/x402-near-facilitator. Sanitized Base paid-flow evidence: https://github.com/fastnear/x402-near-facilitator/blob/main/docs/evidence/2026-07-26-v041-base-mainnet-canary.md."
+}

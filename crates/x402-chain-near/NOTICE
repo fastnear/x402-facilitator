@@ -1,0 +1,16 @@
+x402-chain-near
+Copyright 2026 FastNEAR contributors
+
+This crate is licensed under the Apache License, Version 2.0.
+
+It implements the public NEAR exact-payment specification for x402 and uses
+public extension interfaces and types from the Apache-2.0 x402-rs project:
+https://github.com/x402-rs/x402-rs
+
+The x402 specifications and official TypeScript interoperability packages are
+maintained by the x402 Foundation:
+https://github.com/x402-foundation/x402
+
+NEAR, Circle, x402, and other names may be trademarks of their respective
+owners. Their mention identifies interoperability targets and does not imply
+affiliation or endorsement.

@@ -41,14 +41,25 @@ impl NearRelayerSigner for Signer {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 pub struct RelayerHead {
     pub block_height: u64,
     pub block_hash: CryptoHash,
     pub access_key_nonce: Nonce,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+impl fmt::Debug for RelayerHead {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RelayerHead")
+            .field("block_height", &self.block_height)
+            .field("block_hash", &"<redacted>")
+            .field("access_key_nonce", &"<redacted>")
+            .finish()
+    }
+}
+
+#[derive(Clone, Eq, PartialEq)]
 pub struct RelayerStatus {
     pub block_height: u64,
     pub block_hash: CryptoHash,
@@ -56,7 +67,19 @@ pub struct RelayerStatus {
     pub account: AccountView,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+impl fmt::Debug for RelayerStatus {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RelayerStatus")
+            .field("block_height", &self.block_height)
+            .field("block_hash", &"<redacted>")
+            .field("access_key_nonce", &"<redacted>")
+            .field("account", &"<redacted>")
+            .finish()
+    }
+}
+
+#[derive(Clone, Eq, PartialEq)]
 pub enum SettlementDisposition {
     Succeeded {
         transaction: CryptoHash,
@@ -66,6 +89,27 @@ pub enum SettlementDisposition {
         reason: String,
         message: Option<String>,
     },
+}
+
+impl fmt::Debug for SettlementDisposition {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Succeeded { .. } => formatter
+                .debug_struct("SettlementDisposition::Succeeded")
+                .field("transaction", &"<redacted>")
+                .finish(),
+            Self::Failed {
+                transaction,
+                reason: _,
+                message,
+            } => formatter
+                .debug_struct("SettlementDisposition::Failed")
+                .field("transaction", &transaction.as_ref().map(|_| "<redacted>"))
+                .field("reason", &"<redacted>")
+                .field("message", &message.as_ref().map(|_| "<redacted>"))
+                .finish(),
+        }
+    }
 }
 
 #[async_trait]
@@ -338,8 +382,8 @@ impl fmt::Debug for NearChainProvider {
         formatter
             .debug_struct("NearChainProvider")
             .field("network", &self.network)
-            .field("relayer_account_id", &self.relayer.account_id())
-            .field("relayer_public_key", &self.relayer.public_key())
+            .field("relayer_account_id", &"<redacted>")
+            .field("relayer_public_key", &"<redacted>")
             .field("backup_rpc_configured", &self.backup_rpc.is_some())
             .finish_non_exhaustive()
     }

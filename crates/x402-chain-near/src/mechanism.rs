@@ -103,7 +103,7 @@ impl NearExactFacilitator {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WireRequest {
     x402_version: Value,
@@ -111,7 +111,18 @@ struct WireRequest {
     payment_requirements: WireRequirements,
 }
 
-#[derive(Debug, Deserialize)]
+impl fmt::Debug for WireRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WireRequest")
+            .field("x402_version", &"<redacted>")
+            .field("payment_payload", &self.payment_payload)
+            .field("payment_requirements", &self.payment_requirements)
+            .finish()
+    }
+}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WirePaymentPayload {
     x402_version: Value,
@@ -119,7 +130,18 @@ struct WirePaymentPayload {
     payload: Value,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+impl fmt::Debug for WirePaymentPayload {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WirePaymentPayload")
+            .field("x402_version", &"<redacted>")
+            .field("accepted", &self.accepted)
+            .field("payload", &"<redacted>")
+            .finish()
+    }
+}
+
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WireRequirements {
     scheme: String,
@@ -131,6 +153,21 @@ struct WireRequirements {
     #[serde(default)]
     #[allow(dead_code)]
     extra: Option<Value>,
+}
+
+impl fmt::Debug for WireRequirements {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WireRequirements")
+            .field("scheme", &"<redacted>")
+            .field("network", &"<redacted>")
+            .field("amount", &"<redacted>")
+            .field("pay_to", &"<redacted>")
+            .field("max_timeout_seconds", &"<redacted>")
+            .field("asset", &"<redacted>")
+            .field("extra", &self.extra.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 #[derive(Deserialize)]
@@ -633,4 +670,66 @@ fn _typed_aliases_compile(
     _chain_id: ChainId,
     _balance: Balance,
 ) {
+}
+
+#[cfg(test)]
+mod debug_tests {
+    use super::*;
+
+    #[test]
+    fn wire_debug_output_redacts_untrusted_payment_fields() -> Result<(), serde_json::Error> {
+        let wire: WireRequest = serde_json::from_value(json!({
+            "x402Version": "debug-outer-version-secret",
+            "paymentPayload": {
+                "x402Version": "debug-inner-version-secret",
+                "accepted": {
+                    "scheme": "debug-accepted-scheme-secret",
+                    "network": "debug-accepted-network-secret",
+                    "amount": "debug-accepted-amount-secret",
+                    "payTo": "debug-accepted-payee-secret",
+                    "maxTimeoutSeconds": "debug-accepted-timeout-secret",
+                    "asset": "debug-accepted-asset-secret",
+                    "extra": {"debug": "debug-accepted-extra-secret"}
+                },
+                "payload": {"signedDelegateAction": "debug-signed-delegate-secret"}
+            },
+            "paymentRequirements": {
+                "scheme": "debug-requirements-scheme-secret",
+                "network": "debug-requirements-network-secret",
+                "amount": "debug-requirements-amount-secret",
+                "payTo": "debug-requirements-payee-secret",
+                "maxTimeoutSeconds": "debug-requirements-timeout-secret",
+                "asset": "debug-requirements-asset-secret",
+                "extra": {"debug": "debug-requirements-extra-secret"}
+            }
+        }))?;
+
+        let debug = format!("{wire:?}");
+        assert!(debug.contains("WireRequest"));
+        assert!(debug.contains("WirePaymentPayload"));
+        assert!(debug.contains("WireRequirements"));
+        assert!(debug.contains("<redacted>"));
+        for secret in [
+            "debug-outer-version-secret",
+            "debug-inner-version-secret",
+            "debug-accepted-scheme-secret",
+            "debug-accepted-network-secret",
+            "debug-accepted-amount-secret",
+            "debug-accepted-payee-secret",
+            "debug-accepted-timeout-secret",
+            "debug-accepted-asset-secret",
+            "debug-accepted-extra-secret",
+            "debug-signed-delegate-secret",
+            "debug-requirements-scheme-secret",
+            "debug-requirements-network-secret",
+            "debug-requirements-amount-secret",
+            "debug-requirements-payee-secret",
+            "debug-requirements-timeout-secret",
+            "debug-requirements-asset-secret",
+            "debug-requirements-extra-secret",
+        ] {
+            assert!(!debug.contains(secret));
+        }
+        Ok(())
+    }
 }

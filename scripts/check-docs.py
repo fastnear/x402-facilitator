@@ -3,12 +3,13 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
 import sys
 from pathlib import Path
-from urllib.parse import unquote
+from urllib.parse import unquote, urlparse
 
 ROOT = Path(__file__).resolve().parent.parent
 LINK = re.compile(r"(?<!!)\[[^\]]*\]\(([^)]+)\)")
@@ -76,14 +77,107 @@ def secret_errors(paths: list[Path]) -> list[str]:
     return errors
 
 
+def registry_submission_errors() -> list[str]:
+    relative = Path("docs/registry/x402-list-submission.json")
+    path = ROOT / relative
+    if not path.exists():
+        return [f"{relative}: missing registry submission body"]
+    try:
+        body = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as error:
+        return [f"{relative}: invalid JSON: {error}"]
+    if not isinstance(body, dict):
+        return [f"{relative}: submission body must be a JSON object"]
+
+    errors: list[str] = []
+    required = {
+        "type",
+        "email",
+        "facilitator_name",
+        "website_url",
+        "settler_addresses",
+        "networks",
+    }
+    allowed = required | {
+        "description",
+        "facilitator_id_slug",
+        "token_claims",
+        "claimed_volume_usd",
+        "notes",
+    }
+    missing = sorted(required - body.keys())
+    unknown = sorted(body.keys() - allowed)
+    if missing:
+        errors.append(f"{relative}: missing required fields: {', '.join(missing)}")
+    if unknown:
+        errors.append(f"{relative}: unknown fields: {', '.join(unknown)}")
+    if body.get("type") != "facilitator":
+        errors.append(f'{relative}: type must be "facilitator"')
+
+    email = body.get("email")
+    if not isinstance(email, str) or re.fullmatch(r"[^@\s]+@[^@\s]+", email) is None:
+        errors.append(f"{relative}: email must be a complete submission contact")
+
+    website = body.get("website_url")
+    parsed_website = urlparse(website) if isinstance(website, str) else None
+    if (
+        parsed_website is None
+        or parsed_website.scheme != "https"
+        or parsed_website.hostname != "x402.mikedotexe.com"
+    ):
+        errors.append(f"{relative}: website_url must use the owned HTTPS facilitator domain")
+
+    addresses = body.get("settler_addresses")
+    if not isinstance(addresses, list) or not 1 <= len(addresses) <= 25:
+        errors.append(f"{relative}: settler_addresses must contain 1 to 25 entries")
+        addresses = []
+    evm_address = re.compile(r"0x[0-9a-f]{40}")
+    if any(not isinstance(value, str) or evm_address.fullmatch(value) is None for value in addresses):
+        errors.append(f"{relative}: EVM settler addresses must be lowercase 20-byte hex")
+
+    networks = body.get("networks")
+    if (
+        not isinstance(networks, list)
+        or not 1 <= len(networks) <= 25
+        or not {"base", "near"}.issubset(networks)
+    ):
+        errors.append(f'{relative}: networks must declare both "base" and "near"')
+
+    slug = body.get("facilitator_id_slug")
+    if not isinstance(slug, str) or re.fullmatch(
+        r"[a-z0-9]+(?:-[a-z0-9]+)*", slug
+    ) is None:
+        errors.append(f"{relative}: facilitator_id_slug has an invalid format")
+
+    evidence_relative = Path("docs/evidence/2026-07-26-v041-base-mainnet-canary.md")
+    try:
+        evidence = (ROOT / evidence_relative).read_text(encoding="utf-8").lower()
+    except OSError as error:
+        errors.append(f"{evidence_relative}: cannot read Base settlement evidence: {error}")
+    else:
+        if any(address not in evidence for address in addresses):
+            errors.append(f"{relative}: Base settler is absent from paid-flow evidence")
+
+    notes = body.get("notes")
+    if not isinstance(notes, str) or "x402-relayer2.mike.near" not in notes:
+        errors.append(f"{relative}: notes must identify the NEAR named settlement account")
+    if not isinstance(notes, str) or "2026-07-26-v041-base-mainnet-canary.md" not in notes:
+        errors.append(f"{relative}: notes must link the sanitized Base paid-flow evidence")
+    return errors
+
+
 def main() -> int:
     os.chdir(ROOT)
     paths = tracked_files()
-    errors = markdown_link_errors(paths) + secret_errors(paths)
+    errors = (
+        markdown_link_errors(paths)
+        + secret_errors(paths)
+        + registry_submission_errors()
+    )
     if errors:
         print("\n".join(errors), file=sys.stderr)
         return 1
-    print("documentation links and secret-file guard passed")
+    print("documentation links, registry submission, and secret-file guard passed")
     return 0
 
 

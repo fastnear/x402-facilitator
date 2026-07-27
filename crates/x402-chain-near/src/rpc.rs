@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{fmt, time::Duration};
 
 use async_trait::async_trait;
 use borsh::BorshDeserialize;
@@ -26,13 +26,23 @@ use crate::types::TransactionLookup;
 
 const RPC_CALL_TIMEOUT: Duration = Duration::from_secs(12);
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 pub struct FinalBlock {
     pub height: u64,
     pub hash: CryptoHash,
 }
 
-#[derive(Debug, thiserror::Error)]
+impl fmt::Debug for FinalBlock {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("FinalBlock")
+            .field("height", &self.height)
+            .field("hash", &"<redacted>")
+            .finish()
+    }
+}
+
+#[derive(thiserror::Error)]
 pub enum NearRpcError {
     #[error("account not found")]
     AccountNotFound,
@@ -52,8 +62,32 @@ pub enum NearRpcError {
     InvalidResponse(&'static str),
     #[error("invalid signed transaction bytes")]
     InvalidSignedTransaction,
-    #[error("RPC request failed: {0}")]
+    #[error("RPC request failed")]
     Request(String),
+}
+
+impl fmt::Debug for NearRpcError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AccountNotFound => formatter.write_str("NearRpcError::AccountNotFound"),
+            Self::AccessKeyNotFound => formatter.write_str("NearRpcError::AccessKeyNotFound"),
+            Self::MethodNotFound => formatter.write_str("NearRpcError::MethodNotFound"),
+            Self::TransactionUnknown => formatter.write_str("NearRpcError::TransactionUnknown"),
+            Self::TransactionRejected => formatter.write_str("NearRpcError::TransactionRejected"),
+            Self::TransactionTemporarilyRejected => {
+                formatter.write_str("NearRpcError::TransactionTemporarilyRejected")
+            }
+            Self::Timeout => formatter.write_str("NearRpcError::Timeout"),
+            Self::InvalidResponse(detail) => formatter
+                .debug_tuple("NearRpcError::InvalidResponse")
+                .field(detail)
+                .finish(),
+            Self::InvalidSignedTransaction => {
+                formatter.write_str("NearRpcError::InvalidSignedTransaction")
+            }
+            Self::Request(_) => formatter.write_str("NearRpcError::Request(<redacted>)"),
+        }
+    }
 }
 
 #[async_trait]

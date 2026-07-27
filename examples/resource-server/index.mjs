@@ -269,7 +269,7 @@ app.post("/work", (request, response) => {
 });
 
 app.listen(port, "127.0.0.1", () => {
-  console.log(`NEAR x402 reference workload listening on http://127.0.0.1:${port}`);
+  console.log(`x402 reference workload listening on http://127.0.0.1:${port}`);
 });
 
 // Legacy v1 payment acceptance. The @x402 middleware reads payments only

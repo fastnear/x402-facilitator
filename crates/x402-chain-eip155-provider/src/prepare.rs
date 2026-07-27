@@ -10,7 +10,7 @@
 //!    [`transfer_with_authorization_vrs_calldata`] encode the ERC-3009
 //!    `transferWithAuthorization` call the facilitator submits on the payer's
 //!    behalf. The two overloads mirror upstream `x402-chain-eip155`: the
-//!    `bytes`-signature form for EIP-1271 / EIP-6492 smart-wallet signatures,
+//!    `bytes`-signature form for deployed EIP-1271 smart-wallet signatures,
 //!    and the split `(v, r, s)` form for plain EOA signatures. (Choosing the
 //!    overload from the payer's signature shape happens in the provider, next to
 //!    verification; this module only encodes.)
@@ -30,7 +30,7 @@ use alloy_eips::eip2930::AccessList;
 use alloy_primitives::{Address, B256, Bytes, TxKind, U256};
 use alloy_signer::SignerSync;
 use alloy_signer_local::PrivateKeySigner;
-use alloy_sol_types::SolCall;
+use alloy_sol_types::{Eip712Domain, SolCall};
 use std::fmt;
 
 // ERC-3009 `transferWithAuthorization`, both on-chain overloads. Kept in a
@@ -70,7 +70,7 @@ mod abi {
 /// The ERC-3009 authorization the payer signed, in the token's native units.
 /// These fields are fixed by the verified payment; the facilitator only chooses
 /// the signature encoding and wraps the call in a transaction it pays for.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 pub struct Erc3009Authorization {
     /// Token owner authorizing the transfer (`from`).
     pub from: Address,
@@ -86,9 +86,51 @@ pub struct Erc3009Authorization {
     pub nonce: B256,
 }
 
+impl fmt::Debug for Erc3009Authorization {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Erc3009Authorization")
+            .field("from", &"<redacted>")
+            .field("to", &"<redacted>")
+            .field("value", &"<redacted>")
+            .field("valid_after", &"<redacted>")
+            .field("valid_before", &"<redacted>")
+            .field("nonce", &"<redacted>")
+            .finish()
+    }
+}
+
+/// The minimal replay/recovery identity retained from an ERC-3009
+/// authorization before the facilitator transaction is prepared.
+///
+/// It intentionally excludes the payer signature and the duplicated
+/// payer/payee/value fields. Those values already live in the canonical
+/// settlement row and the signature is carried by the exact signed transaction
+/// bytes once prepared.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct EvmAuthorizationIdentity {
+    /// Unique ERC-3009 replay-protection nonce.
+    pub nonce: B256,
+    /// Authorization lower time bound.
+    pub valid_after: U256,
+    /// Authorization upper time bound.
+    pub valid_before: U256,
+}
+
+impl fmt::Debug for EvmAuthorizationIdentity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EvmAuthorizationIdentity")
+            .field("nonce", &"<redacted>")
+            .field("valid_after", &"<redacted>")
+            .field("valid_before", &"<redacted>")
+            .finish()
+    }
+}
+
 /// Encode `transferWithAuthorization` with an opaque signature blob — the
-/// ERC-3009 `bytes` overload used for EIP-1271 / EIP-6492 smart-wallet
-/// signatures.
+/// ERC-3009 `bytes` overload used for deployed EIP-1271 smart-wallet
+/// signatures. The provider rejects EIP-6492 before preparation.
 #[must_use]
 pub fn transfer_with_authorization_bytes_calldata(
     authorization: &Erc3009Authorization,
@@ -176,6 +218,10 @@ pub struct EvmPrepared {
     pub account_nonce: u64,
     /// EIP-2718 typed-envelope RLP bytes, ready for `eth_sendRawTransaction`.
     signed_tx_rlp: Vec<u8>,
+    /// Base L1 data fee estimated by the `GasPriceOracle` over the fully signed
+    /// EIP-2718 bytes. `None` only for the pure offline signing helper; the live
+    /// provider fills it before returning a prepared submission.
+    estimated_l1_fee_wei: Option<u128>,
 }
 
 impl EvmPrepared {
@@ -185,16 +231,27 @@ impl EvmPrepared {
     pub fn signed_tx_rlp(&self) -> &[u8] {
         &self.signed_tx_rlp
     }
+
+    /// Base L1 data fee estimated over the exact signed bytes.
+    #[must_use]
+    pub const fn estimated_l1_fee_wei(&self) -> Option<u128> {
+        self.estimated_l1_fee_wei
+    }
+
+    pub(crate) const fn set_estimated_l1_fee_wei(&mut self, fee_wei: u128) {
+        self.estimated_l1_fee_wei = Some(fee_wei);
+    }
 }
 
 impl fmt::Debug for EvmPrepared {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("EvmPrepared")
-            .field("tx_hash", &self.tx_hash)
-            .field("signer_address", &self.signer_address)
-            .field("account_nonce", &self.account_nonce)
+            .field("tx_hash", &"<redacted>")
+            .field("signer_address", &"<redacted>")
+            .field("account_nonce", &"<redacted>")
             .field("signed_tx_rlp", &"<redacted>")
+            .field("estimated_l1_fee_wei", &self.estimated_l1_fee_wei)
             .finish()
     }
 }
@@ -244,51 +301,362 @@ pub fn sign_settlement_transaction(
         signer_address: signer.address(),
         account_nonce: head.account_nonce,
         signed_tx_rlp: envelope.encoded_2718(),
+        estimated_l1_fee_wei: None,
     })
 }
 
-/// Validate journaled EVM transaction bytes during recovery: they must decode to
-/// a signed transaction whose hash and recovered signer match the journal, before
-/// any RPC result for this settlement is trusted. Offline and deterministic — the
-/// EVM analog of NEAR's stored-transaction Borsh + signature validation.
+/// Which supported ERC-3009 overload a durable transaction calls.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Erc3009SignatureKind {
+    /// Standard EOA `(v,r,s)` overload.
+    Eoa,
+    /// Opaque deployed-contract EIP-1271 signature overload.
+    Eip1271,
+}
+
+/// Typed expectations used to bind durable signed bytes to one settlement row.
+#[derive(Clone, Eq, PartialEq)]
+pub struct ExpectedEvmSubmission {
+    /// Journaled transaction hash.
+    pub transaction_hash: B256,
+    /// Configured facilitator signer.
+    pub facilitator_signer: Address,
+    /// Configured EIP-155 chain id.
+    pub chain_id: u64,
+    /// Journaled facilitator account nonce.
+    pub account_nonce: u64,
+    /// Configured token call target.
+    pub token: Address,
+    /// Exact configured gas limit.
+    pub gas_limit: u64,
+    /// Absolute fee cap; the signed transaction may not exceed it.
+    pub max_fee_per_gas: u128,
+    /// Verified payer.
+    pub payer: Address,
+    /// Required payee.
+    pub payee: Address,
+    /// Required token amount.
+    pub value: U256,
+    /// Journaled authorization lower time bound.
+    pub valid_after: U256,
+    /// Journaled authorization upper time bound.
+    pub valid_before: U256,
+    /// Journaled chain single-use anchor.
+    pub authorization_nonce: B256,
+    /// Canonical EIP-712 payment hash.
+    pub payment_hash: B256,
+    /// Exact token EIP-712 domain used during verification.
+    pub domain: Eip712Domain,
+}
+
+impl fmt::Debug for ExpectedEvmSubmission {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExpectedEvmSubmission")
+            .field("transaction_hash", &"<redacted>")
+            .field("facilitator_signer", &"<redacted>")
+            .field("chain_id", &self.chain_id)
+            .field("account_nonce", &"<redacted>")
+            .field("token", &self.token)
+            .field("gas_limit", &self.gas_limit)
+            .field("max_fee_per_gas", &self.max_fee_per_gas)
+            .field("payer", &"<redacted>")
+            .field("payee", &"<redacted>")
+            .field("value", &"<redacted>")
+            .field("valid_after", &"<redacted>")
+            .field("valid_before", &"<redacted>")
+            .field("authorization_nonce", &"<redacted>")
+            .field("payment_hash", &"<redacted>")
+            .field("domain", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Safe decoded facts returned after a durable submission passes every binding
+/// check. Bearer signature bytes and authorization nonce are deliberately not
+/// exposed through `Debug`.
+#[derive(Clone, Eq, PartialEq)]
+pub struct DecodedEvmSubmission {
+    /// Transaction hash verified from the exact bytes.
+    pub transaction_hash: B256,
+    /// Recovered facilitator signer.
+    pub facilitator_signer: Address,
+    /// EIP-155 chain id.
+    pub chain_id: u64,
+    /// Facilitator account nonce.
+    pub account_nonce: u64,
+    /// Token call target.
+    pub token: Address,
+    /// Signed gas limit.
+    pub gas_limit: u64,
+    /// Signed maximum fee per gas.
+    pub max_fee_per_gas: u128,
+    /// Signed maximum priority fee per gas.
+    pub max_priority_fee_per_gas: u128,
+    /// Decoded ERC-3009 authorization.
+    pub authorization: Erc3009Authorization,
+    /// Recomputed canonical payment hash.
+    pub payment_hash: B256,
+    /// Supported ERC-3009 overload.
+    pub signature_kind: Erc3009SignatureKind,
+}
+
+impl fmt::Debug for DecodedEvmSubmission {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DecodedEvmSubmission")
+            .field("transaction_hash", &"<redacted>")
+            .field("facilitator_signer", &"<redacted>")
+            .field("chain_id", &self.chain_id)
+            .field("account_nonce", &"<redacted>")
+            .field("token", &self.token)
+            .field("gas_limit", &self.gas_limit)
+            .field("max_fee_per_gas", &self.max_fee_per_gas)
+            .field("max_priority_fee_per_gas", &self.max_priority_fee_per_gas)
+            .field("authorization", &"<redacted>")
+            .field("payment_hash", &"<redacted>")
+            .field("signature_kind", &self.signature_kind)
+            .finish()
+    }
+}
+
+/// A deterministic durable-submission validation failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum StoredTransactionError {
+    /// The bytes are not one canonical EIP-2718 envelope.
+    #[error("stored EVM transaction envelope is invalid")]
+    InvalidEnvelope,
+    /// Extra bytes follow the first decoded envelope.
+    #[error("stored EVM transaction contains trailing bytes")]
+    TrailingBytes,
+    /// Only EIP-1559 submissions are accepted.
+    #[error("stored EVM transaction is not EIP-1559")]
+    UnsupportedEnvelope,
+    /// The computed transaction hash differs from the journal.
+    #[error("stored EVM transaction hash does not match")]
+    TransactionHashMismatch,
+    /// The facilitator signature cannot be recovered.
+    #[error("stored EVM transaction signer cannot be recovered")]
+    SignerRecovery,
+    /// The recovered signer differs from the configured facilitator.
+    #[error("stored EVM transaction signer does not match")]
+    SignerMismatch,
+    /// The EIP-155 chain id differs from the deployment.
+    #[error("stored EVM transaction chain id does not match")]
+    ChainIdMismatch,
+    /// The facilitator account nonce differs from the journal.
+    #[error("stored EVM transaction account nonce does not match")]
+    AccountNonceMismatch,
+    /// The transaction does not call the configured token.
+    #[error("stored EVM transaction token target does not match")]
+    TokenMismatch,
+    /// Settlement transactions must transfer no native ETH.
+    #[error("stored EVM transaction transfers native value")]
+    NativeValue,
+    /// The gas limit differs from the configured durable policy.
+    #[error("stored EVM transaction gas limit does not match")]
+    GasLimitMismatch,
+    /// The signed fee exceeds the configured cap.
+    #[error("stored EVM transaction exceeds the fee cap")]
+    FeeCapExceeded,
+    /// The signed EIP-1559 fee envelope is internally invalid.
+    #[error("stored EVM transaction fee envelope is invalid")]
+    InvalidFeeEnvelope,
+    /// The durable signer never creates access-list entries.
+    #[error("stored EVM transaction carries an unexpected access list")]
+    UnexpectedAccessList,
+    /// The calldata is not one canonical supported ERC-3009 overload.
+    #[error("stored EVM transaction calldata is invalid")]
+    InvalidCalldata,
+    /// A decoded ERC-3009 field differs from the settlement row.
+    #[error("stored EVM authorization does not match the settlement")]
+    AuthorizationMismatch,
+    /// The supplied EIP-712 domain is inconsistent with chain/token identity.
+    #[error("stored EVM payment domain does not match the deployment")]
+    DomainMismatch,
+    /// The decoded authorization does not recompute to the journaled payment hash.
+    #[error("stored EVM payment hash does not match the authorization")]
+    PaymentHashMismatch,
+}
+
+/// Validate journaled EVM transaction bytes during recovery and bind them to
+/// the exact settlement row before any RPC receipt is trusted.
 ///
 /// # Errors
 ///
-/// Returns a describing message if the bytes are malformed, the transaction hash
-/// does not match `expected_tx_hash`, or the recovered signer does not match
-/// `expected_signer` (both compared case-insensitively as `0x` hex).
+/// Returns a typed [`StoredTransactionError`] for any malformed envelope,
+/// identity mismatch, policy violation, or calldata mismatch.
 pub fn validate_signed_transaction(
     signed_tx_rlp: &[u8],
-    expected_tx_hash: &str,
-    expected_signer: &str,
-) -> Result<(), String> {
-    let envelope = TxEnvelope::decode_2718(&mut &signed_tx_rlp[..])
-        .map_err(|error| format!("evm transaction bytes are invalid: {error}"))?;
-    if !envelope
-        .tx_hash()
-        .to_string()
-        .eq_ignore_ascii_case(expected_tx_hash)
-    {
-        return Err("evm transaction bytes do not match journaled hash".to_owned());
+    expected: &ExpectedEvmSubmission,
+) -> Result<DecodedEvmSubmission, StoredTransactionError> {
+    let mut remaining = signed_tx_rlp;
+    let envelope = TxEnvelope::decode_2718(&mut remaining)
+        .map_err(|_| StoredTransactionError::InvalidEnvelope)?;
+    if !remaining.is_empty() {
+        return Err(StoredTransactionError::TrailingBytes);
     }
-    let signer = envelope
+    if envelope.encoded_2718() != signed_tx_rlp {
+        return Err(StoredTransactionError::InvalidEnvelope);
+    }
+    let TxEnvelope::Eip1559(signed_eip1559) = &envelope else {
+        return Err(StoredTransactionError::UnsupportedEnvelope);
+    };
+    if *envelope.tx_hash() != expected.transaction_hash {
+        return Err(StoredTransactionError::TransactionHashMismatch);
+    }
+    let recovered_signer = envelope
         .recover_signer()
-        .map_err(|error| format!("evm signer recovery failed: {error}"))?;
-    if !signer.to_string().eq_ignore_ascii_case(expected_signer) {
-        return Err("evm transaction signer does not match journaled signer".to_owned());
+        .map_err(|_| StoredTransactionError::SignerRecovery)?;
+    if recovered_signer != expected.facilitator_signer {
+        return Err(StoredTransactionError::SignerMismatch);
     }
-    Ok(())
+    let transaction = signed_eip1559.tx();
+    if transaction.chain_id != expected.chain_id {
+        return Err(StoredTransactionError::ChainIdMismatch);
+    }
+    if transaction.nonce != expected.account_nonce {
+        return Err(StoredTransactionError::AccountNonceMismatch);
+    }
+    if transaction.to != TxKind::Call(expected.token) {
+        return Err(StoredTransactionError::TokenMismatch);
+    }
+    if transaction.value != U256::ZERO {
+        return Err(StoredTransactionError::NativeValue);
+    }
+    if transaction.gas_limit != expected.gas_limit {
+        return Err(StoredTransactionError::GasLimitMismatch);
+    }
+    if transaction.max_fee_per_gas > expected.max_fee_per_gas {
+        return Err(StoredTransactionError::FeeCapExceeded);
+    }
+    if transaction.max_fee_per_gas == 0
+        || transaction.max_priority_fee_per_gas > transaction.max_fee_per_gas
+    {
+        return Err(StoredTransactionError::InvalidFeeEnvelope);
+    }
+    if !transaction.access_list.0.is_empty() {
+        return Err(StoredTransactionError::UnexpectedAccessList);
+    }
+    if expected.domain.chain_id != Some(U256::from(expected.chain_id))
+        || expected.domain.verifying_contract != Some(expected.token)
+        || expected.domain.salt.is_some()
+    {
+        return Err(StoredTransactionError::DomainMismatch);
+    }
+
+    let (authorization, signature_kind, payer_signature) =
+        decode_authorization_call(&transaction.input)?;
+    let expected_authorization = Erc3009Authorization {
+        from: expected.payer,
+        to: expected.payee,
+        value: expected.value,
+        valid_after: expected.valid_after,
+        valid_before: expected.valid_before,
+        nonce: expected.authorization_nonce,
+    };
+    if authorization != expected_authorization {
+        return Err(StoredTransactionError::AuthorizationMismatch);
+    }
+    let payment_hash = crate::settle::eip712_transfer_hash(&authorization, &expected.domain);
+    if payment_hash != expected.payment_hash {
+        return Err(StoredTransactionError::PaymentHashMismatch);
+    }
+    let classified = crate::settle::classify_settleable_signature(
+        authorization.from,
+        &payer_signature,
+        &payment_hash,
+    )
+    .map_err(|_| StoredTransactionError::InvalidCalldata)?;
+    let classified_kind = match classified {
+        crate::settle::SettleableSignature::Eoa { .. } => Erc3009SignatureKind::Eoa,
+        crate::settle::SettleableSignature::Eip1271(_) => Erc3009SignatureKind::Eip1271,
+    };
+    if classified_kind != signature_kind {
+        return Err(StoredTransactionError::InvalidCalldata);
+    }
+
+    Ok(DecodedEvmSubmission {
+        transaction_hash: expected.transaction_hash,
+        facilitator_signer: recovered_signer,
+        chain_id: transaction.chain_id,
+        account_nonce: transaction.nonce,
+        token: expected.token,
+        gas_limit: transaction.gas_limit,
+        max_fee_per_gas: transaction.max_fee_per_gas,
+        max_priority_fee_per_gas: transaction.max_priority_fee_per_gas,
+        authorization,
+        payment_hash,
+        signature_kind,
+    })
+}
+
+fn decode_authorization_call(
+    input: &[u8],
+) -> Result<(Erc3009Authorization, Erc3009SignatureKind, Bytes), StoredTransactionError> {
+    if input.starts_with(&abi::IErc3009::transferWithAuthorization_0Call::SELECTOR) {
+        let call = abi::IErc3009::transferWithAuthorization_0Call::abi_decode_validate(input)
+            .map_err(|_| StoredTransactionError::InvalidCalldata)?;
+        if call.abi_encode() != input {
+            return Err(StoredTransactionError::InvalidCalldata);
+        }
+        return Ok((
+            Erc3009Authorization {
+                from: call.from,
+                to: call.to,
+                value: call.value,
+                valid_after: call.validAfter,
+                valid_before: call.validBefore,
+                nonce: call.nonce,
+            },
+            Erc3009SignatureKind::Eip1271,
+            call.signature,
+        ));
+    }
+    if input.starts_with(&abi::IErc3009::transferWithAuthorization_1Call::SELECTOR) {
+        let call = abi::IErc3009::transferWithAuthorization_1Call::abi_decode_validate(input)
+            .map_err(|_| StoredTransactionError::InvalidCalldata)?;
+        if call.abi_encode() != input {
+            return Err(StoredTransactionError::InvalidCalldata);
+        }
+        let mut payer_signature = Vec::with_capacity(65);
+        payer_signature.extend_from_slice(call.r.as_slice());
+        payer_signature.extend_from_slice(call.s.as_slice());
+        payer_signature.push(call.v);
+        return Ok((
+            Erc3009Authorization {
+                from: call.from,
+                to: call.to,
+                value: call.value,
+                valid_after: call.validAfter,
+                valid_before: call.validBefore,
+                nonce: call.nonce,
+            },
+            Erc3009SignatureKind::Eoa,
+            payer_signature.into(),
+        ));
+    }
+    Err(StoredTransactionError::InvalidCalldata)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settle::{build_transfer_domain, eip712_transfer_hash};
     use alloy_primitives::{address, b256, keccak256};
+    use x402_chain_eip155::chain::EOASignatureExt;
 
-    // A throwaway, well-known test private key (secp256k1 scalar = 1). NOT a real
-    // credential — used only to make the signing golden tests deterministic.
+    // DO NOT FUND. A throwaway, well-known test key (secp256k1 scalar = 1),
+    // used only to make expired/impossible signing tests deterministic.
     fn test_signer() -> Result<PrivateKeySigner, Box<dyn std::error::Error>> {
         let key = b256!("0000000000000000000000000000000000000000000000000000000000000001");
+        Ok(PrivateKeySigner::from_bytes(&key)?)
+    }
+
+    fn test_payer() -> Result<PrivateKeySigner, Box<dyn std::error::Error>> {
+        // DO NOT FUND. Deterministic key used only with the expired authorization
+        // returned by `sample_authorization`.
+        let key = b256!("00000000000000000000000000000000000000000000000000000000000000a1");
         Ok(PrivateKeySigner::from_bytes(&key)?)
     }
 
@@ -298,7 +666,7 @@ mod tests {
             to: address!("0x2222222222222222222222222222222222222222"),
             value: U256::from(1_000_000_u64),
             valid_after: U256::ZERO,
-            valid_before: U256::from(4_000_000_000_u64),
+            valid_before: U256::from(1_u64),
             nonce: b256!("00000000000000000000000000000000000000000000000000000000000000aa"),
         }
     }
@@ -397,52 +765,278 @@ mod tests {
         Ok(())
     }
 
+    fn expected_submission(
+        prepared: &EvmPrepared,
+        signer: Address,
+        authorization: Erc3009Authorization,
+        fees: EvmFeeEnvelope,
+        domain: Eip712Domain,
+    ) -> ExpectedEvmSubmission {
+        ExpectedEvmSubmission {
+            transaction_hash: prepared.tx_hash,
+            facilitator_signer: signer,
+            chain_id: 84_532,
+            account_nonce: prepared.account_nonce,
+            token: ASSET,
+            gas_limit: fees.gas_limit,
+            max_fee_per_gas: fees.max_fee_per_gas,
+            payer: authorization.from,
+            payee: authorization.to,
+            value: authorization.value,
+            valid_after: authorization.valid_after,
+            valid_before: authorization.valid_before,
+            authorization_nonce: authorization.nonce,
+            payment_hash: eip712_transfer_hash(&authorization, &domain),
+            domain,
+        }
+    }
+
+    fn sample_fees() -> EvmFeeEnvelope {
+        EvmFeeEnvelope {
+            gas_limit: 120_000,
+            max_fee_per_gas: 2_000_000_000,
+            max_priority_fee_per_gas: 1_000_000_000,
+        }
+    }
+
     #[test]
-    fn validate_accepts_our_signed_tx_and_rejects_tampering()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn validator_accepts_both_supported_erc3009_overloads() -> Result<(), Box<dyn std::error::Error>>
+    {
         let signer = test_signer()?;
         let head = EvmSignerHead {
             chain_id: 84_532,
             account_nonce: 3,
         };
-        let fees = EvmFeeEnvelope {
-            gas_limit: 120_000,
-            max_fee_per_gas: 2_000_000_000,
-            max_priority_fee_per_gas: 1_000_000_000,
+        let fees = sample_fees();
+        let authorization = sample_authorization();
+        let domain = build_transfer_domain("USD Coin", "2", head.chain_id, ASSET);
+        let bytes_calldata = transfer_with_authorization_bytes_calldata(
+            &authorization,
+            Bytes::from(vec![0xef_u8; 80]),
+        );
+        let bytes_prepared =
+            sign_settlement_transaction(&signer, head, fees, ASSET, bytes_calldata)?;
+        let bytes_expected = expected_submission(
+            &bytes_prepared,
+            signer.address(),
+            authorization,
+            fees,
+            domain.clone(),
+        );
+        assert_eq!(
+            validate_signed_transaction(bytes_prepared.signed_tx_rlp(), &bytes_expected)?
+                .signature_kind,
+            Erc3009SignatureKind::Eip1271
+        );
+
+        let payer = test_payer()?;
+        let vrs_authorization = Erc3009Authorization {
+            from: payer.address(),
+            ..authorization
         };
+        let vrs_hash = eip712_transfer_hash(&vrs_authorization, &domain);
+        let payer_signature = payer.sign_hash_sync(&vrs_hash)?;
+        let vrs_calldata = transfer_with_authorization_vrs_calldata(
+            &vrs_authorization,
+            payer_signature.v_legacy(),
+            payer_signature.r_bytes(),
+            payer_signature.s_bytes(),
+        );
+        let vrs_prepared = sign_settlement_transaction(&signer, head, fees, ASSET, vrs_calldata)?;
+        let vrs_expected = expected_submission(
+            &vrs_prepared,
+            signer.address(),
+            vrs_authorization,
+            fees,
+            domain,
+        );
+        assert_eq!(
+            validate_signed_transaction(vrs_prepared.signed_tx_rlp(), &vrs_expected)?
+                .signature_kind,
+            Erc3009SignatureKind::Eoa
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn validator_rejects_cross_row_swap_and_wrong_identity_fields()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let signer = test_signer()?;
+        let head = EvmSignerHead {
+            chain_id: 84_532,
+            account_nonce: 9,
+        };
+        let fees = sample_fees();
+        let authorization = sample_authorization();
+        let domain = build_transfer_domain("USD Coin", "2", head.chain_id, ASSET);
         let calldata = transfer_with_authorization_bytes_calldata(
-            &sample_authorization(),
-            Bytes::from(vec![0xef_u8; 65]),
+            &authorization,
+            Bytes::from(vec![0xa5_u8; 96]),
         );
         let prepared = sign_settlement_transaction(&signer, head, fees, ASSET, calldata)?;
-        let hash = prepared.tx_hash.to_string();
-        let address = signer.address().to_string();
+        let expected =
+            expected_submission(&prepared, signer.address(), authorization, fees, domain);
 
-        // Accepts the exact journaled bytes.
-        assert!(validate_signed_transaction(prepared.signed_tx_rlp(), &hash, &address).is_ok());
-        // Rejects a mismatched hash and a mismatched signer.
-        assert!(
-            validate_signed_transaction(
-                prepared.signed_tx_rlp(),
-                &B256::ZERO.to_string(),
-                &address
-            )
-            .is_err()
+        let mut wrong = expected.clone();
+        wrong.account_nonce += 1;
+        assert_eq!(
+            validate_signed_transaction(prepared.signed_tx_rlp(), &wrong),
+            Err(StoredTransactionError::AccountNonceMismatch)
         );
-        assert!(
-            validate_signed_transaction(
-                prepared.signed_tx_rlp(),
-                &hash,
-                "0x1111111111111111111111111111111111111111",
-            )
-            .is_err()
+        wrong = expected.clone();
+        wrong.chain_id = 8_453;
+        assert_eq!(
+            validate_signed_transaction(prepared.signed_tx_rlp(), &wrong),
+            Err(StoredTransactionError::ChainIdMismatch)
         );
-        // Rejects tampered bytes.
+        wrong = expected.clone();
+        wrong.token = address!("0x3333333333333333333333333333333333333333");
+        assert_eq!(
+            validate_signed_transaction(prepared.signed_tx_rlp(), &wrong),
+            Err(StoredTransactionError::TokenMismatch)
+        );
+        wrong = expected.clone();
+        wrong.payee = address!("0x4444444444444444444444444444444444444444");
+        assert_eq!(
+            validate_signed_transaction(prepared.signed_tx_rlp(), &wrong),
+            Err(StoredTransactionError::AuthorizationMismatch)
+        );
+        wrong = expected.clone();
+        wrong.authorization_nonce = B256::repeat_byte(0x99);
+        assert_eq!(
+            validate_signed_transaction(prepared.signed_tx_rlp(), &wrong),
+            Err(StoredTransactionError::AuthorizationMismatch)
+        );
+        wrong = expected.clone();
+        wrong.payment_hash = B256::ZERO;
+        assert_eq!(
+            validate_signed_transaction(prepared.signed_tx_rlp(), &wrong),
+            Err(StoredTransactionError::PaymentHashMismatch)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn validator_rejects_trailing_bytes_fee_cap_and_bad_calldata()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let signer = test_signer()?;
+        let head = EvmSignerHead {
+            chain_id: 84_532,
+            account_nonce: 11,
+        };
+        let fees = sample_fees();
+        let authorization = sample_authorization();
+        let domain = build_transfer_domain("USD Coin", "2", head.chain_id, ASSET);
+        let calldata = transfer_with_authorization_bytes_calldata(
+            &authorization,
+            Bytes::from(vec![0x7b_u8; 72]),
+        );
+        let prepared = sign_settlement_transaction(&signer, head, fees, ASSET, calldata)?;
+        let expected = expected_submission(
+            &prepared,
+            signer.address(),
+            authorization,
+            fees,
+            domain.clone(),
+        );
+
+        let mut trailing = prepared.signed_tx_rlp().to_vec();
+        trailing.push(0);
+        assert_eq!(
+            validate_signed_transaction(&trailing, &expected),
+            Err(StoredTransactionError::TrailingBytes)
+        );
         let mut tampered = prepared.signed_tx_rlp().to_vec();
-        if let Some(byte) = tampered.get_mut(12) {
-            *byte ^= 0xff;
+        let Some(last) = tampered.last_mut() else {
+            return Err("signed transaction unexpectedly empty".into());
+        };
+        *last ^= 0x01;
+        assert!(validate_signed_transaction(&tampered, &expected).is_err());
+        let mut low_cap = expected.clone();
+        low_cap.max_fee_per_gas = fees.max_fee_per_gas - 1;
+        assert_eq!(
+            validate_signed_transaction(prepared.signed_tx_rlp(), &low_cap),
+            Err(StoredTransactionError::FeeCapExceeded)
+        );
+
+        let malformed =
+            sign_settlement_transaction(&signer, head, fees, ASSET, Bytes::from(vec![0; 64]))?;
+        let malformed_expected =
+            expected_submission(&malformed, signer.address(), authorization, fees, domain);
+        assert_eq!(
+            validate_signed_transaction(malformed.signed_tx_rlp(), &malformed_expected),
+            Err(StoredTransactionError::InvalidCalldata)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn debug_output_redacts_authorization_and_submission_sentinels()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let facilitator = test_signer()?;
+        let authorization = Erc3009Authorization {
+            from: address!("0x1212121212121212121212121212121212121212"),
+            to: address!("0x3434343434343434343434343434343434343434"),
+            value: U256::from(987_654_321_012_345_678_u64),
+            valid_after: U256::from(3_456_789_012_u64),
+            valid_before: U256::from(4_567_890_123_u64),
+            nonce: B256::repeat_byte(0x77),
+        };
+        let identity = EvmAuthorizationIdentity {
+            nonce: authorization.nonce,
+            valid_after: authorization.valid_after,
+            valid_before: authorization.valid_before,
+        };
+        let head = EvmSignerHead {
+            chain_id: 84_532,
+            account_nonce: 6_543_219,
+        };
+        let fees = EvmFeeEnvelope {
+            gas_limit: 121_337,
+            max_fee_per_gas: 2_345_678_901,
+            max_priority_fee_per_gas: 123_456_789,
+        };
+        let domain = build_transfer_domain("USD Coin", "2", head.chain_id, ASSET);
+        let calldata = transfer_with_authorization_bytes_calldata(
+            &authorization,
+            Bytes::from(vec![0xa5_u8; 80]),
+        );
+        let prepared = sign_settlement_transaction(&facilitator, head, fees, ASSET, calldata)?;
+        let expected = expected_submission(
+            &prepared,
+            facilitator.address(),
+            authorization,
+            fees,
+            domain,
+        );
+        let decoded = validate_signed_transaction(prepared.signed_tx_rlp(), &expected)?;
+        let outputs = [
+            format!("{authorization:?}"),
+            format!("{identity:?}"),
+            format!("{prepared:?}"),
+            format!("{expected:?}"),
+            format!("{decoded:?}"),
+        ];
+        let sentinels = [
+            authorization.from.to_string(),
+            authorization.to.to_string(),
+            authorization.value.to_string(),
+            authorization.valid_after.to_string(),
+            authorization.valid_before.to_string(),
+            authorization.nonce.to_string(),
+            prepared.tx_hash.to_string(),
+            facilitator.address().to_string(),
+            head.account_nonce.to_string(),
+            expected.payment_hash.to_string(),
+        ];
+        for output in outputs {
+            for sentinel in &sentinels {
+                assert!(
+                    !output.contains(sentinel),
+                    "Debug output exposed a sensitive sentinel"
+                );
+            }
         }
-        assert!(validate_signed_transaction(&tampered, &hash, &address).is_err());
         Ok(())
     }
 }

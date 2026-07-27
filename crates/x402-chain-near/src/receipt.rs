@@ -1,4 +1,7 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    fmt,
+};
 
 use near_primitives::{
     hash::CryptoHash,
@@ -9,21 +12,31 @@ use near_primitives::{
     },
 };
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct SuccessfulTransferReceipt {
     pub receipt_id: CryptoHash,
     pub value: Vec<u8>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+impl fmt::Debug for SuccessfulTransferReceipt {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SuccessfulTransferReceipt")
+            .field("receipt_id", &"<redacted>")
+            .field("value", &"<redacted>")
+            .finish()
+    }
+}
+
+#[derive(Clone, Eq, PartialEq, thiserror::Error)]
 pub enum ReceiptValidationError {
     #[error("final execution has not started")]
     NotStarted,
     #[error("final execution is still pending")]
     Pending,
-    #[error("final execution failed: {0}")]
+    #[error("final execution failed")]
     FinalFailure(String),
-    #[error("transaction outcome failed: {0}")]
+    #[error("transaction outcome failed")]
     TransactionFailure(String),
     #[error("outer transaction did not create exactly one delegate receipt")]
     InvalidDelegateReceiptCount,
@@ -31,7 +44,7 @@ pub enum ReceiptValidationError {
     MissingDelegateReceipt,
     #[error("delegate receipt executed on an unexpected account")]
     InvalidDelegateExecutor,
-    #[error("delegate receipt failed: {0}")]
+    #[error("delegate receipt failed")]
     DelegateFailure(String),
     #[error("receipt graph contains a missing outcome")]
     IncompleteReceiptGraph,
@@ -39,13 +52,13 @@ pub enum ReceiptValidationError {
     DuplicateReceiptOutcome,
     #[error("receipt graph contains a cycle")]
     CyclicReceiptGraph,
-    #[error("reachable receipt failed: {0}")]
+    #[error("reachable receipt failed")]
     ReachableReceiptFailure(String),
     #[error("delegate receipt did not create exactly one token-contract receipt")]
     InvalidTokenReceiptCount,
     #[error("token receipt was not successful")]
     TokenReceiptNotSuccessful,
-    #[error("token receipt failed: {0}")]
+    #[error("token receipt failed")]
     TokenReceiptFailure(String),
     #[error("final outcome transaction hash does not match the submitted transaction")]
     TransactionHashMismatch,
@@ -57,6 +70,34 @@ pub enum ReceiptValidationError {
     InvalidTransactionExecutor,
     #[error("final outcome transaction receiver does not match the payer")]
     TransactionReceiverMismatch,
+}
+
+impl fmt::Debug for ReceiptValidationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let label = match self {
+            Self::NotStarted => "NotStarted",
+            Self::Pending => "Pending",
+            Self::FinalFailure(_) => "FinalFailure(<redacted>)",
+            Self::TransactionFailure(_) => "TransactionFailure(<redacted>)",
+            Self::InvalidDelegateReceiptCount => "InvalidDelegateReceiptCount",
+            Self::MissingDelegateReceipt => "MissingDelegateReceipt",
+            Self::InvalidDelegateExecutor => "InvalidDelegateExecutor",
+            Self::DelegateFailure(_) => "DelegateFailure(<redacted>)",
+            Self::IncompleteReceiptGraph => "IncompleteReceiptGraph",
+            Self::DuplicateReceiptOutcome => "DuplicateReceiptOutcome",
+            Self::CyclicReceiptGraph => "CyclicReceiptGraph",
+            Self::ReachableReceiptFailure(_) => "ReachableReceiptFailure(<redacted>)",
+            Self::InvalidTokenReceiptCount => "InvalidTokenReceiptCount",
+            Self::TokenReceiptNotSuccessful => "TokenReceiptNotSuccessful",
+            Self::TokenReceiptFailure(_) => "TokenReceiptFailure(<redacted>)",
+            Self::TransactionHashMismatch => "TransactionHashMismatch",
+            Self::TransactionOutcomeIdMismatch => "TransactionOutcomeIdMismatch",
+            Self::TransactionSignerMismatch => "TransactionSignerMismatch",
+            Self::InvalidTransactionExecutor => "InvalidTransactionExecutor",
+            Self::TransactionReceiverMismatch => "TransactionReceiverMismatch",
+        };
+        formatter.write_str(label)
+    }
 }
 
 impl ReceiptValidationError {

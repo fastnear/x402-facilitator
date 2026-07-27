@@ -1,128 +1,109 @@
 # x402 facilitator for NEAR and Base
 
 A production Rust facilitator for x402 `exact` payments in Circle USDC. One
-durable, chain-neutral settlement engine — PostgreSQL journal, exactly-once
-claims, sponsorship budgets, crash reconciliation — settles through per-chain
-providers:
+durable settlement engine provides authenticated verification, exactly-once
+claims, sponsorship budgets, PostgreSQL journaling, crash recovery, and
+chain-specific terminality for:
 
-- **NEAR** (`near:testnet`, `near:mainnet`) — the flagship integration and, to
-  our knowledge, the first production x402 facilitator for NEAR (the first
-  NEAR entry in the x402 Foundation facilitators table). The payer signs a
-  classic NEP-366 delegate action; the facilitator sponsors the outer
-  transaction through a dedicated relayer and reports success only after the
-  inner NEP-141 `ft_transfer` receipt succeeds.
-- **Base / EVM** (`eip155:8453`; `eip155:84532` Base Sepolia as the drill
-  tier) — the payer signs an ERC-3009 `transferWithAuthorization` (EIP-712);
-  the facilitator submits it with sponsored gas and reports success only after
-  the transaction holds a configured confirmation depth, with mined-then-
-  missing transactions re-evaluated rather than assumed final.
+- **NEAR** — `near:testnet` and `near:mainnet`, using classic NEP-366 delegate
+  actions that carry one NEP-141 `ft_transfer`;
+- **Base / EVM** — `eip155:84532` and `eip155:8453`, using ERC-3009
+  `transferWithAuthorization` and a configured confirmation depth.
 
-Both x402 wire dialects are spoken. **v2 is canonical everywhere.** eip155
-instances may additionally enable `accept_v1` to serve legacy v1 (0.x SDK)
-clients: v1 requests are strictly translated to canonical v2 at the parse
-boundary — one settlement identity per payment regardless of dialect — and
-`/supported` then advertises both kinds.
+x402 v2 is canonical. Every internal value, journal fingerprint, and test uses
+v2. An EVM instance may additionally enable the off-by-default `accept_v1`
+compatibility gate; legacy v1 requests are strictly translated to canonical v2
+at the HTTP boundary and share the same settlement identity.
 
-> **Status: live (2026-07-26).** Three production facilitators run on the
-> launch host — NEAR mainnet `x402.mikedotexe.com` and testnet
-> `test.x402.mikedotexe.com` (v0.3.0), and Base mainnet
-> `base.x402.mikedotexe.com` (v0.4.0 with `accept_v1`) — with real paid
-> traffic through the public demo workloads, including a third-party client
-> settling USDC on Base end to end. Dated proof lives in
-> [docs/evidence/](docs/evidence/) (start with the
-> [go-lives](docs/evidence/2026-07-23-mainnet-golive.md) and the
-> [multi-chain + legacy-v1 entry](docs/evidence/2026-07-26-legacy-v1-compat-and-base-e2e.md));
-> the gate-by-gate record is in [the launch checklist](docs/launch-checklist.md).
+> **Historical name:** the repository, service binary, admin binary, systemd
+> units, and Rust package names retain `x402-near-facilitator` because the
+> project launched on NEAR before the shared engine gained EVM support. The
+> name is a compatibility identifier, not a statement that the engine is
+> NEAR-only.
 
-## Deployment profile
+## Project status
 
-| Instance | Network | URL | Wire dialects |
-| --- | --- | --- | --- |
-| NEAR mainnet | `near:mainnet` | `https://x402.mikedotexe.com` | v2 |
-| NEAR testnet | `near:testnet` | `https://test.x402.mikedotexe.com` | v2 |
-| Base mainnet | `eip155:8453` | `https://base.x402.mikedotexe.com` | v2 + legacy v1 (`accept_v1`) |
-| Base Sepolia | `eip155:84532` | scaffolded, not currently deployed | v2 (+ v1 capable) |
+The software supports NEAR and Base mainnet and testnet profiles. Dated
+paid-flow evidence exists for NEAR mainnet/testnet and Base mainnet; Base
+Sepolia is a configured rollout target and is not claimed as a live public
+deployment. This repository deliberately separates software release state from
+deployment state: a GitHub release does not imply that any public instance has
+been promoted. Dated launch and end-to-end records live in
+[`docs/evidence/`](docs/evidence/); the
+[2026-07-26 multi-chain entry](docs/evidence/2026-07-26-legacy-v1-compat-and-base-e2e.md)
+is the best starting point. Public reference endpoints have no availability
+SLA.
 
-Each instance is one process pinned to one network and one Circle USDC
-contract, with its own Unix user, PostgreSQL database, credentials, port, and
-hostname. Public demo resource servers front each live instance
-(`x402-demo.mikedotexe.com`, `x402-demo-test.mikedotexe.com`,
-`x402-demo-base.mikedotexe.com`).
+| Network | Reference facilitator status | Wire dialects supported by the software |
+| --- | --- | --- |
+| `near:mainnet` | `https://x402.mikedotexe.com` | v2 |
+| `near:testnet` | `https://test.x402.mikedotexe.com` | v2 |
+| `eip155:8453` | `https://base.x402.mikedotexe.com` | v2; gated legacy v1 |
+| `eip155:84532` | configured target: `base-test.x402.mikedotexe.com` (not claimed live) | v2; gated legacy v1 |
 
-The service is intentionally narrow:
+## Deliberate scope
 
-- Scheme `exact` only, one configured Circle USDC contract per process.
-- NEAR: classic NEP-366 delegate actions (ED25519 and SECP256K1), NEP-141
-  `ft_transfer` receipts as the success authority.
-- eip155: ERC-3009 `transferWithAuthorization` bound to the chain's canonical
-  Circle USDC, terminal only at the configured confirmation depth.
-- API-key authentication on `/verify` and `/settle`; exact per-client
-  network, asset, and payee allowlists.
-- PostgreSQL-backed settlement deduplication, sponsorship budgets, and
-  restart reconciliation; chain-enforced single-use anchors (the delegate
-  hash on NEAR, the ERC-3009 authorization nonce on eip155).
-- Optional `payment-identifier` idempotency, advertised by `/supported`.
-- Legacy v1 wire only behind `accept_v1`, only on eip155 (config validation
-  rejects it for NEAR, whose networks v1 never covered).
+- Scheme `exact` only; one pinned network and one canonical Circle USDC
+  contract per process.
+- API-key authentication on `/verify` and `/settle`, with exact per-client
+  network, asset, and payee policy rows.
+- A chain-enforced single-use anchor for every payment: the domain-prefixed
+  signed-delegate hash on NEAR and the ERC-3009 authorization nonce on EVM.
+- Exact signed submission bytes and hash persisted before broadcast; ambiguous
+  submission is reconciled by the stored hash and is never replaced.
+- NEAR succeeds only when the unique inner token receipt reaches
+  `SuccessValue`.
+- EVM succeeds only at the configured confirmation depth and re-evaluates a
+  mined transaction that disappears before terminality.
 
-Native NEAR payments, arbitrary NEP-141 assets, non-Base EVM chains,
-anonymous settlement, wildcard payees, gas-key relayers, and DelegateV2
-remain out of scope.
+Native NEAR, arbitrary NEP-141 assets, non-Base EVM networks, wildcard payees,
+anonymous settlement, gas-key relayers, and runtime-loaded third-party chain
+plugins are out of scope.
 
 ## Architecture
 
-The workspace builds two binaries and two chain crates around a deliberate
-seam: the settlement engine speaks **neutral value types** and dispatches
-through a `ChainProvider` enum (`crates/x402-near-facilitator/src/chain.rs`)
-— enum dispatch rather than trait objects, chosen so provider contracts can
-keep rich typed results for a closed chain set (rationale in
-[EVM design](docs/evm-v2-design.md)). Adding a chain means implementing a
-provider against the neutral contract and adding an enum arm; the durable
-journal, recovery, HTTP, and policy layers do not change.
+The workspace contains a production service and two mechanism/provider crates:
 
-- `x402-near-facilitator` — the authenticated Axum HTTP boundary, the
-  chain-neutral durable engine, and the legacy-v1 wire translation
-  (`src/v1_compat.rs`, gated by `accept_v1`).
-- `x402-chain-near` — the reusable NEAR mechanism: NEP-366 verification,
-  block-pinned RPC preflight, outer-transaction signing, and final
-  receipt-graph validation, built on the extension traits from
-  [`x402-rs`](https://github.com/x402-rs/x402-rs).
-- `x402-chain-eip155-provider` — the EVM provider: upstream
-  `x402-chain-eip155` verification reused wholesale, plus our durable
-  submit, confirmation-depth terminality, and reorg-aware reconciliation.
-- `x402-near-admin` — migrations and administrative operations without
-  exposing secrets through the public service.
+- `x402-near-facilitator` — Axum HTTP and policy boundary, durable engine,
+  PostgreSQL store, leadership, recovery, telemetry, and admin CLI;
+- `x402-chain-near` — reusable NEAR verification, preflight, signing, RPC, and
+  receipt-graph validation;
+- `x402-chain-eip155-provider` — upstream EVM verification plus durable
+  transaction preparation, submission, confirmation, and reorg reconciliation.
 
-The upstream x402 v2 specifications (core, `exact` NEAR, `exact` EVM) and the
-official TypeScript packages are the protocol authority; the legacy v1 wire
-format follows the upstream v1 transport specification. See
-[architecture](docs/architecture.md) for boundaries and flows,
-[EVM design](docs/evm-v2-design.md) for the multi-chain design record, and
-[threat model](docs/threat-model.md) for trust and failure analysis.
+The engine dispatches through a closed `ChainProvider` enum so providers retain
+rich typed results. A new chain is an audited in-tree addition, not a runtime
+plugin: it requires a provider crate and enum arm **plus** configuration,
+canonical parsing, durable schema/store projection, recovery behavior,
+fixtures, operational checks, and documentation. See
+[architecture](docs/architecture.md) and the decision-complete
+[adding-a-chain guide](docs/adding-a-chain.md).
 
-## HTTP interface
+## HTTP API
 
 | Method | Path | Authentication | Purpose |
 | --- | --- | --- | --- |
-| `GET` | `/supported` | Public | Advertise this instance's network(s), scheme, wire dialects, signer, and extensions |
-| `GET` | `/healthz` | Public | Process liveness and version |
-| `GET` | `/readyz` | Public | Sanitized database, leadership, reconciliation, RPC, and relayer readiness |
+| `GET` | `/` | Public | Identify the project and link capabilities, access onboarding, source, and security policy |
+| `GET` | `/supported` | Public | Advertise this instance's network, scheme, dialects, signer, and extensions |
+| `GET` | `/healthz` | Public | Process liveness and build version |
+| `GET` | `/readyz` | Public | Sanitized database, leadership, recovery, RPC, and signer readiness |
 | `POST` | `/verify` | API key | Verify without broadcasting |
-| `POST` | `/settle` | API key | Claim, reverify, submit once, and wait for the chain's terminal proof |
+| `POST` | `/settle` | API key | Claim, reverify, submit once, and wait for terminal proof |
 
-The primary credential header is `X-API-Key`; `Authorization: Bearer` is also
-accepted. A request may send both forms only when they contain the identical
-key; conflicting values are rejected with 401. Expected payment rejection is
-an HTTP 200 x402 response. Authentication, malformed input, policy limits,
-idempotency conflicts, and unavailable or indeterminate infrastructure use
-HTTP errors. On `accept_v1` instances, `/verify` and `/settle` also accept the
-legacy v1 request shape and echo `network` as the legacy alias (`base`,
-`base-sepolia`) in protocol responses. The normative wire contract is in
-[OpenAPI](docs/openapi.yaml).
+`X-API-Key` is primary; `Authorization: Bearer` is also accepted. If both are
+present they must contain the same key. Expected payment rejection is an HTTP
+200 x402 response. Authentication, malformed input, policy, quota,
+idempotency conflict, and indeterminate infrastructure use HTTP errors.
 
-## Development
+The normative wire contract is [OpenAPI 3.1](docs/openapi.yaml). It documents
+the canonical v2 NEAR/EVM payload union and the gated EVM-only v1 transport.
+Reference instances are manually allowlisted; their
+[access-request process](docs/reference-access.md) is separate from the
+self-hosting instructions below.
 
-Rust 1.93 is pinned by `rust-toolchain.toml`.
+## Build and test
+
+The required Rust toolchain is pinned by `rust-toolchain.toml`.
 
 ```sh
 cargo fmt --all --check
@@ -130,73 +111,55 @@ cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo test --workspace --all-features --locked
 ```
 
-With `cargo-deny` and `cargo-audit` installed, the complete local check is:
+Those are fast checks: PostgreSQL integration tests and the official Node
+client conformance check skip unless their explicit local prerequisites are
+present. For the strongest single local gate, which supplies isolated
+PostgreSQL and requires official Node client conformance, follow
+[CONTRIBUTING.md](CONTRIBUTING.md) and run:
 
 ```sh
-./scripts/check.sh
+./scripts/check-full.sh
 ```
 
-Parser fuzz targets cover standard-base64/Borsh delegate decoding, strict
-NEP-141 transfer JSON, and the canonical HTTP request boundary in both wire
-dialects:
+CI remains authoritative for packaging, deployment, OpenAPI, and
+dependency-policy jobs. No funded account is needed for development or the
+full local gate.
 
-```sh
-cargo install cargo-fuzz --version 0.13.2 --locked
-rustup toolchain install nightly-2026-07-01 --profile minimal
-cargo +nightly-2026-07-01 fuzz run decode_signed_delegate
-cargo +nightly-2026-07-01 fuzz run decode_ft_transfer_args
-cargo +nightly-2026-07-01 fuzz run parse_http_request
-```
+## Run your own instance
 
-For local-only configuration, use `.env.example` as a variable inventory and
-export file paths explicitly; the binary does not implicitly load `.env`.
-Use unfunded or testnet credentials. Production uses JSON configuration and
-systemd credentials, never an environment file. The complete configuration
-contract and non-secret examples are in
-[configuration](docs/configuration.md) and `deploy/config/`.
+1. Choose exactly one supported network and copy its non-secret JSON example
+   from `deploy/config/`.
+2. Provision a PostgreSQL database, run forward-only migrations with
+   `x402-near-admin migrate`, and give the service a DML-only database role.
+3. Put the database URLs, dedicated relayer/signer key, and API-key pepper in
+   mode-0600 files; pass only their file paths to the process.
+4. Create an API client and an exact network/asset/payee policy with
+   `x402-near-admin`.
+5. Start the service on a loopback address, then require `/readyz` before
+   exposing it through a TLS reverse proxy.
 
-The [runnable Express reference resource server](examples/resource-server/)
-serves every live demo from one codebase: it registers the official NEAR or
-EVM server scheme by network, dual-emits the 402 (canonical v2
-`PAYMENT-REQUIRED` header everywhere, plus a legacy v1 JSON body on eip155
-and an informational hint body on NEAR), accepts legacy v1 `X-PAYMENT`
-payments on eip155 by translating them to v2 before the official middleware,
-treats `payment-identifier` as optional, and independently deduplicates paid
-work delivery.
+The full configuration contract is in
+[docs/configuration.md](docs/configuration.md). The portable
+[operations runbook](docs/runbook.md) covers provisioning, readiness,
+incidents, upgrades, and rollback; dated reference-deployment details remain
+separate historical records rather than defaults.
 
-## Operations
+The [Express reference resource server](examples/resource-server/) demonstrates
+NEAR and EVM payment requirements, canonical v2 middleware, gated legacy v1
+translation on EVM, retry behavior, and independent delivery idempotency.
 
-Production runs as hardened per-instance systemd services
-(`x402-near-facilitator@{mainnet,testnet,base}`) behind Nginx on a single
-personal host. Releases are installed under
-`/opt/x402-near-facilitator/releases/<version>` and selected through atomic
-per-instance `current-<instance>` symlinks, so each instance is promoted or
-rolled back independently — the NEAR fleet runs v0.3.0 while Base runs
-v0.4.0. Installation never changes a pointer: the packaged promotion tool
-first runs an on-host `--version` ABI smoke check, then promotes one named
-instance. An OCI image is published as a portable artifact, but it is not the
-production runtime. Because the launch policy requires a loopback bind, run
-the image with host networking or an equivalent loopback-only network
-boundary; it deliberately exposes no bridge-network port.
+## Documentation and contributing
 
-Start with:
+Start with the [documentation index](docs/README.md). It separates user,
+operator, contributor, design, research, and dated-evidence material.
 
-1. [API key administration](docs/api-keys.md)
-2. [Operations runbook](docs/runbook.md)
-3. [Configuration contract](docs/configuration.md)
-4. [Launch checklist](docs/launch-checklist.md)
-
-Publishing a GitHub release does not deploy it. The drill tier (NEAR testnet,
-Base Sepolia) must pass funded, restart, and fault-injection acceptance before
-a mainnet promote. Every funded launch or provisioning broadcast, including
-testnet, requires an immediate human confirmation of the network, asset,
-amount, payer, recipient, relayer/signer, and maximum sponsored gas. Account
-and access-key changes follow the same fresh-preview gate; see the runbook.
+Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md), open a
+chain proposal before implementing another chain family, and report
+vulnerabilities through the private process in [SECURITY.md](SECURITY.md).
 
 ## License and attribution
 
 Licensed under Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE). This
-repository depends on and follows the modular shape of x402-rs; it does not
-claim affiliation with or endorsement by x402-rs, Circle, or the x402
-Foundation. Report vulnerabilities through the private process in
-[SECURITY.md](SECURITY.md).
+project interoperates with x402-rs, the x402 specifications and official
+packages, Circle USDC, NEAR, and Base; those projects and names remain owned by
+their respective maintainers. No affiliation or endorsement is implied.

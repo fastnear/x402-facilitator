@@ -1,0 +1,821 @@
+# Reference deployment operations runbook snapshot
+
+> Archived on 2026-07-26 as a historical planning and operating snapshot for
+> the reference deployment. It is not go-live or funded-acceptance evidence:
+> some targets described below may never have been promoted. Its people,
+> domains, accounts, cloud services, paths, balances, and version-specific
+> rollback notes are not portable defaults or the current software contract.
+> Self-hosters should use the current [operations runbook](../runbook.md) and
+> [configuration contract](../configuration.md).
+
+Owner: Mike Purvis, operating solo. Record a second incident contact before
+mainnet launch. Commands below are examples for an operator who has already obtained
+the necessary authorization; they do not authorize external changes.
+
+## Mandatory mutation gate
+
+This gate applies to testnet and mainnet. Immediately before every local
+service-key generation or rotation, NEAR account creation, access-key
+addition/removal, and funded transaction, show a fresh preview and receive an
+explicit human confirmation. Execute the previewed action once. A changed
+command, key, amount, account, or signed payload invalidates the confirmation;
+an indeterminate result must be reconciled before any retry.
+
+For a local key operation, preview the environment, target account, ED25519
+algorithm, create-new mode-0600 output path, and whether private material can
+appear in output. For an account or access-key operation, preview the network,
+operation, signer, target account, public key, permission, and attached
+funding. For every funded broadcast, including testnet, preview:
+
+```text
+network:
+asset contract or native NEAR:
+atomic amount:
+payer:
+recipient:
+relayer (or "none" for a direct transaction):
+expected maximum sponsored NEAR:
+```
+
+For an eip155 (Base) funded settlement the same gate applies with chain-native
+fields; the sponsored resource is ETH gas, not NEAR:
+
+```text
+network:
+asset contract (ERC-20 USDC) or native ETH:
+atomic amount:
+payer:
+recipient:
+relayer signer address (or "none" for a direct transaction):
+expected maximum sponsored gas (ETH):
+```
+
+Keep only the confirmation and public transaction evidence. Never record a
+private key, API key, or raw signed delegate in the change ticket.
+
+## Known launch topology
+
+- The launch host is the dedicated AWS EC2 instance `x402-facilitator`
+  (`i-0537770b34b04b820`, t3.small, us-west-2a) at Elastic IP
+  `100.23.147.163`: Ubuntu 24.04 LTS x86-64, glibc 2.39, systemd 255,
+  encrypted gp3 root, IMDSv2 required, no IAM role. Ports 80/443 are
+  public; SSH is limited to the operator workstation address in security
+  group `sg-015857c4ae084d397`.
+- Production runs native binaries. Docker and Podman are not installed on the
+  host; the OCI image is a release artifact, not the deployment mechanism.
+- `x402.mikedotexe.com` and `test.x402.mikedotexe.com` resolve to the
+  launch host, but neither name is live until TLS issuance and the
+  remaining launch checklist gates complete.
+- Mainnet and testnet run on the known main host as separate service users,
+  ports, keys, configs, and databases.
+
+## One-time prerequisites
+
+### Relayer accounts
+
+Create dedicated service-key files locally without printing private material,
+then show only each public key during account creation:
+
+- `x402-relayer.mike.testnet`, funded with 10 testnet NEAR;
+- `x402-relayer.mike.near`, funded with 5 mainnet NEAR.
+
+Generate each service credential into a new mode-0600 file:
+
+```sh
+x402-near-admin key generate-relayer --output /secure/path/relayer-key
+```
+
+The command prints only the public key. Refuse an existing output path rather
+than overwriting or rotating implicitly. Apply the mandatory mutation gate
+immediately before each invocation.
+
+Use `near --help` for the installed CLI's exact account-creation syntax. Do not
+place a key in a command-line argument. Add the corresponding Mike account's
+public key as a separate FullAccess recovery key. Only the dedicated service
+key may sign facilitator transactions; operators must never use it manually.
+Preview and confirm each account creation, key addition/removal, and funding
+broadcast separately unless the CLI presents one atomic transaction containing
+the exact combined actions.
+
+Immediately before initial funding, the funded previews are:
+
+| Field | Testnet | Mainnet |
+| --- | --- | --- |
+| Network | `near:testnet` | `near:mainnet` |
+| Asset | Native NEAR | Native NEAR |
+| Amount | 10 NEAR (`10000000000000000000000000` yoctoNEAR) | 5 NEAR (`5000000000000000000000000` yoctoNEAR) |
+| Payer | `mike.testnet` | `mike.near` |
+| Recipient | `x402-relayer.mike.testnet` | `x402-relayer.mike.near` |
+| Relayer | None; direct account funding | None; direct account funding |
+| Maximum sponsored NEAR | 0 | 0 |
+
+The CLI's own maximum transaction-fee preview is additional to these fields.
+Pause for an environment-specific confirmation immediately before each
+broadcast.
+
+Before using `mike.near`, make its two known local credential copies mode 0600:
+
+```sh
+chmod 600 \
+  "$HOME/.near-credentials/mainnet/mike.near.json" \
+  "$HOME/.near-credentials/mike.near.json"
+```
+
+Confirm ownership and whether the workstation was ever multi-user. If exposure
+is plausible, stop and rotate the root key instead of merely changing its mode.
+Never install a Mike credential on the service host.
+
+### Databases
+
+Install PostgreSQL from distribution packages on the launch host, bound to
+loopback only. Create separate mainnet and testnet databases with separate
+migration and service roles. Save credentials directly into the operator's
+secret manager. Do not share the cluster with any other service.
+
+Schedule a nightly `pg_dump` of each database to a location off the host and
+test a restore before mainnet launch; there is no managed-provider backup or
+PITR behind this cluster.
+
+Apply forward-only migrations before a binary first uses the schema:
+
+```sh
+x402-near-admin migrate --database-url-file /secure/path/migration-database-url
+```
+
+The application URL uses the least-privileged service role. Confirm that it
+cannot create/alter schema or roles and that leadership uses a session-pinned
+direct connection when required.
+
+For operational triage, provision a separate read-only observer login with
+column-level access only to settlement state/timestamps/reason and global
+sponsorship totals. It must not be able to select API-key digests, payment or
+transaction hashes, account IDs, policies, terminal response bytes, or signed
+transaction bytes. Do not give an operator the service DML role merely to
+inspect readiness.
+
+### Observability
+
+Telemetry export is disabled at launch: install no OTLP endpoint or header
+credential. Sanitized journald output and the external 60-second `/readyz`
+monitor on both hostnames are the alerting surface; relayer balance and
+sponsorship budgets are checked in the daily review rather than by trigger
+automation.
+
+If an OTLP backend is adopted later, provision its authorization header as a
+systemd credential, configure `service.name`, `service.version`, and
+`deployment.environment.name` resource attributes, send a sanitized test
+event, and verify it contains no account ID, payment identifier,
+transaction/delegate hash label, API key, raw payload, database URL, or
+private key before enabling it in production.
+
+### TLS and DNS
+
+Both public names live in the personal Route 53 `mikedotexe.com` hosted zone
+(`ZEBBWSGTKUUP6`), managed with the operator workstation's `aws` CLI and its
+dedicated DNS IAM user. That credential can edit every record in the zone:
+treat it as a deployment secret, never install it on the service host, and
+apply the mandatory mutation gate to DNS changes by previewing the exact
+change batch before `aws route53 change-resource-record-sets`.
+
+Create or repoint (`UPSERT`) A and, if the host has IPv6, AAAA records so
+`x402.mikedotexe.com` and `test.x402.mikedotexe.com` target the launch host
+directly. There is no proxy or CDN tier: the origin is publicly reachable, and
+the deny-by-default Nginx configuration plus API-key authentication form the
+public boundary. Records may exist before the vhosts are enabled; unknown
+hostnames and bare-IP probes receive connection refusal from the packaged
+configuration.
+
+After DNS resolves to the host, issue one publicly trusted Let's Encrypt
+certificate covering exactly both names. First issuance needs a temporary
+minimal port-80 server for both names whose only location serves
+`/var/www/x402-near-acme`, because the packaged site cannot be enabled
+before the certificate lineage exists:
+
+```sh
+sudo install -d -m 0755 /var/www/x402-near-acme
+sudo certbot certonly --webroot -w /var/www/x402-near-acme \
+  -d x402.mikedotexe.com -d test.x402.mikedotexe.com \
+  --deploy-hook 'systemctl reload nginx'
+```
+
+Remove the bootstrap server after issuance; the packaged port-80 virtual
+hosts keep serving the ACME webroot for unattended renewals. Verify the
+certbot renewal timer is active; a failed renewal run raises an SNS alert
+through the `certbot.service` `OnFailure=` drop-in, and certificate expiry
+is tracked by the `CertDaysRemaining` metric and its 21-day alarm (see
+`deploy/monitoring/README.md`). DNS-01 through
+the certbot Route 53 plugin is acceptable only with a separate IAM
+credential restricted to the two `_acme-challenge` TXT names; the broad
+zone credential never belongs on the host.
+
+Before cutover, verify from an external network that both hostnames serve
+only the packaged endpoints over TLS 1.2+, that plain HTTP redirects to
+HTTPS, and that a request for any other hostname or the bare IP is refused.
+
+## Install a release
+
+The attested release archive contains both binaries, migrations, license
+notices, an embedded SBOM, and the reviewed `docs/` and `deploy/` trees. The
+archive checksum and a second copy of the SBOM are sibling release artifacts;
+provenance and the SBOM attestation cover the archive as a whole, including its
+deployment tools and documentation. On an operator machine:
+
+```sh
+gh release download vX.Y.Z \
+  --repo fastnear/x402-near-facilitator \
+  --pattern 'x402-near-facilitator-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz*'
+sha256sum --check \
+  x402-near-facilitator-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz.sha256
+gh attestation verify \
+  x402-near-facilitator-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz \
+  --repo fastnear/x402-near-facilitator
+```
+
+Inspect the archive member list and extract
+`deploy/install-release.sh` from that verified archive. Copy the archive,
+checksum, and extracted installer to the host. As root, copy the packaged
+installer into a root-owned mode-0700 staging path before executing it; do not
+run an installer from a Git checkout or a user-writable path. The installer
+copies the archive and checksum exactly once into its own root-only staging
+directory before parsing, hashing, inspecting, or extracting them. It refuses
+an existing version.
+
+```sh
+sudo install -o root -g root -m 0700 \
+  /path/to/packaged-install-release.sh \
+  /root/x402-near-install-release-vX.Y.Z
+sudo /root/x402-near-install-release-vX.Y.Z \
+  /path/to/archive.tar.gz \
+  /path/to/archive.tar.gz.sha256
+(cd /opt/x402-near-facilitator/releases/vX.Y.Z && \
+  sha256sum --check deploy-assets.sha256 && \
+  sha256sum --check docs-assets.sha256)
+```
+
+Installation creates only
+`/opt/x402-near-facilitator/releases/vX.Y.Z`. It does not change
+`current-mainnet` or `current-testnet`, and it does not restart either
+environment. Promotion is a separate, environment-specific step after host
+compatibility and configuration checks.
+
+## Configure the host
+
+Before installing service files or changing a deployment pointer, record the
+host baseline and compare it with the release build baseline:
+
+```sh
+uname -m
+getconf GNU_LIBC_VERSION
+systemd --version
+nginx -v
+/opt/x402-near-facilitator/releases/vX.Y.Z/x402-near-admin --version
+```
+
+Require x86-64, a compatible glibc ABI, and systemd support for every sandbox
+and credential directive in the packaged unit. Reject the release if the
+admin binary cannot execute. The packaged promotion tool separately executes
+the service binary with `--version` before it changes an environment pointer;
+that on-host ABI smoke check is a mandatory promotion gate.
+
+Create system users once. The same-named primary groups are required by the
+packaged `Group=x402-near-%i` directive:
+
+```sh
+sudo useradd --system --user-group \
+  --home-dir /nonexistent --shell /usr/sbin/nologin \
+  x402-near-mainnet
+sudo useradd --system --user-group \
+  --home-dir /nonexistent --shell /usr/sbin/nologin \
+  x402-near-testnet
+test "$(id -gn x402-near-mainnet)" = x402-near-mainnet
+test "$(id -gn x402-near-testnet)" = x402-near-testnet
+sudo install -d -m 0755 /etc/x402-near-facilitator
+sudo install -d -m 0700 \
+  /etc/x402-near-facilitator/credentials/mainnet \
+  /etc/x402-near-facilitator/credentials/testnet
+```
+
+Install reviewed JSON config files as root:service-group mode 0640. Install
+pooled database URL, direct database URL, relayer key, HMAC pepper, and OTLP
+header files as root:root mode 0600 under the matching credentials directory.
+Validate that no credential is a symlink and none is reused by the other
+environment.
+
+Install and validate service and Nginx configuration:
+
+```sh
+release=/opt/x402-near-facilitator/releases/vX.Y.Z
+sudo install -m 0644 \
+  "$release/deploy/systemd/x402-near-facilitator@.service" \
+  /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo install -d -m 0755 /etc/nginx/snippets
+sudo install -m 0644 "$release/deploy/nginx/x402-near-proxy.conf" \
+  /etc/nginx/snippets/x402-near-proxy.conf
+sudo install -m 0644 "$release/deploy/nginx/x402-near-facilitator.conf" \
+  /etc/nginx/sites-available/x402-near-facilitator
+sudo install -m 0644 \
+  "$release/deploy/logrotate/x402-near-facilitator" \
+  /etc/logrotate.d/x402-near-facilitator
+sudo ln -s /etc/nginx/sites-available/x402-near-facilitator \
+  /etc/nginx/sites-enabled/x402-near-facilitator
+sudo systemd-analyze verify \
+  /etc/systemd/system/x402-near-facilitator@.service
+sudo logrotate --debug /etc/logrotate.d/x402-near-facilitator
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+If the site symlink already exists, inspect it rather than replacing it.
+Before enabling the site on a shared host, inspect `sudo nginx -T` and stop if
+another explicit IPv4 or IPv6 `default_server` would conflict with the
+deny-by-default server blocks. The dedicated Nginx logs retain the current day
+plus 13 daily rotations, bounded by `maxage 14`; verify the host's daily
+logrotate timer before cutover.
+
+Verify core dumps are disabled and that the settings resolve as expected after
+each instance has been loaded:
+
+```sh
+systemctl show x402-near-facilitator@mainnet -p LimitCORE
+systemctl show x402-near-facilitator@testnet -p LimitCORE
+coredumpctl list x402-near-facilitator
+```
+
+Both `LimitCORE` values must be zero. Investigate and remove any credential
+exposure risk before continuing if a service core exists; never attach a core
+file to an issue.
+
+## Testnet deployment
+
+1. Confirm the config says `near:testnet`, port 8403, the test Circle asset,
+   and `x402-relayer.mike.testnet`.
+2. Confirm migrations, credential modes, RPC network identity, relayer public
+   key, balance, and exact merchant policy.
+3. Promote only testnet. The tool runs the native service binary's `--version`
+   smoke check before atomically changing `current-testnet`; it does not touch
+   `current-mainnet` or restart a service:
+
+   ```sh
+   sudo /opt/x402-near-facilitator/releases/vX.Y.Z/deploy/promote-release.sh \
+     testnet vX.Y.Z
+   readlink -f /opt/x402-near-facilitator/current-testnet
+   ```
+
+4. Start and inspect:
+
+   ```sh
+   sudo systemctl start x402-near-facilitator@testnet
+   sudo systemctl status x402-near-facilitator@testnet --no-pager
+   curl --fail --silent http://127.0.0.1:8403/healthz
+   curl --fail --silent http://127.0.0.1:8403/readyz
+   curl --fail --silent http://127.0.0.1:8403/supported
+   ```
+
+5. Run `scripts/verify-deployment.sh` from the matching source or release
+   tooling against the public testnet URL.
+6. Complete fixture, authentication, funded transfer, duplicate, restart,
+   accepted-response-dropped, RPC failover, and log-sanitization gates.
+7. Enable at boot only after those checks:
+
+   ```sh
+   sudo systemctl enable x402-near-facilitator@testnet
+   ```
+
+### Testnet funded acceptance
+
+This sequence needs two separate, immediate confirmations.
+
+For the direct transfer into `mike.testnet`, preview:
+
+```text
+network: near:testnet
+asset: 3e2210e1184b45b64c8a434c0a7e7b23cc04ea7eb7a6c3c32520d03d4afcb8af
+amount: 1000 atomic USDC
+payer: merchant.mike.testnet
+recipient: mike.testnet
+relayer: none (direct transaction)
+maximum sponsored reservation: 0 NEAR
+```
+
+After confirmation, broadcast once and record the transaction and exact
+recipient balance delta. Do not treat that confirmation as approval for the
+facilitated return payment.
+
+Construct the signed delegate that returns the funds, then immediately before
+the facilitator can broadcast it preview:
+
+```text
+network: near:testnet
+asset: 3e2210e1184b45b64c8a434c0a7e7b23cc04ea7eb7a6c3c32520d03d4afcb8af
+amount: 1000 atomic USDC
+payer: mike.testnet
+recipient: merchant.mike.testnet
+relayer: x402-relayer.mike.testnet
+maximum sponsored reservation: 0.01 NEAR
+```
+
+After a fresh confirmation, submit that exact signed delegate once. Any change
+to its bytes invalidates the confirmation. Require final success of the inner
+token receipt, the exact recipient balance delta, the terminal journal result,
+budget reconciliation, and sanitized log evidence. Replay the identical
+request and prove that no second transfer was created.
+
+## Mainnet deployment
+
+Mainnet remains stopped until every testnet gate and mainnet preflight gate has
+dated evidence. Repeat config and credential checks, then promote only
+mainnet. Promotion performs the on-host service-binary smoke check and leaves
+the testnet pointer unchanged:
+
+```sh
+sudo /opt/x402-near-facilitator/releases/vX.Y.Z/deploy/promote-release.sh \
+  mainnet vX.Y.Z
+readlink -f /opt/x402-near-facilitator/current-mainnet
+```
+
+Start without enabling:
+
+```sh
+sudo systemctl start x402-near-facilitator@mainnet
+sudo systemctl status x402-near-facilitator@mainnet --no-pager
+curl --fail --silent http://127.0.0.1:8402/readyz
+```
+
+Before the 1,000-atomic-USDC acceptance payment, display and explicitly confirm:
+
+```text
+network: near:mainnet
+asset: 17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1
+amount: 1000 atomic USDC ($0.001)
+payer: mike.near
+recipient: count.mike.near
+relayer: x402-relayer.mike.near
+maximum sponsored reservation: 0.01 NEAR
+```
+
+That confirmation must occur immediately before submission, applies to one
+exact delegate, and expires if any field or signed bytes change. An
+indeterminate result is reconciled by its stored hash and exact bytes; never
+sign a retry. Verify final token receipt, recipient balance delta, journal
+terminal response, sponsorship reconciliation, and sanitized log evidence.
+Then test replay without another broadcast. Only after evidence review:
+
+```sh
+sudo systemctl enable x402-near-facilitator@mainnet
+```
+
+## EVM (Base Sepolia) instance
+
+The first eip155 instance is Base Sepolia (`eip155:84532`): a separate service
+user, port, key, config, and database on the same host, exactly like the NEAR
+instances. It rides the same durable journal; only the chain provider differs.
+Testnet-first — prove it here before Base mainnet.
+
+### Signer key
+
+The EVM signer is a secp256k1 key generated into a create-new mode-0600 file
+with the same no-print contract as the NEAR relayer key. Apply the mandatory
+mutation gate immediately before generating it:
+
+```sh
+x402-near-admin key generate-evm-relayer \
+  --output /secure/path/base-sepolia-relayer-key
+```
+
+The command prints only the `0x` address. Put that address in the config's
+`relayer_account_id`; the service refuses to start unless the loaded key
+derives it. Never reuse the NEAR ED25519 key, and never place a key in a
+command-line argument.
+
+### Fund the signer
+
+Base Sepolia gas is free test ETH from a faucet — not a purchased or bridged
+asset — so this is not a funded mainnet broadcast and does not use the
+funded-broadcast preview. Fund the signer `0x` address to at least the 0.01 ETH
+hard stop (0.06 ETH clears the low-balance alarm with headroom) from a Base
+Sepolia faucet. Base **mainnet** later needs real ETH and is gated by the
+funded-broadcast preview; testnet is not.
+
+### Database
+
+Create a dedicated `x402_base_sepolia` database and roles in the loopback
+cluster, exactly as for a NEAR environment, and apply migrations before the
+binary first uses the schema:
+
+```sh
+x402-near-admin migrate \
+  --database-url-file /secure/path/base-sepolia-migration-url
+```
+
+Migration `0002` is the multi-chain schema the eip155 instance requires.
+
+### Client policy
+
+`/readyz` requires every active client to have an exact payee for the
+instance's network and asset, so provision at least one before expecting a
+green database gate. The client environment is tier-based: a Base Sepolia
+(testnet-tier) client is created with `--environment testnet`, and its payee is
+added on the eip155 network:
+
+```sh
+x402-near-admin client create \
+  --database-url-file /secure/path/base-sepolia-app-url \
+  --pepper-file /secure/path/base-sepolia-pepper \
+  --environment testnet --name <merchant-name>
+x402-near-admin client allow-payee \
+  --database-url-file /secure/path/base-sepolia-app-url \
+  --client-id <uuid> \
+  --network eip155:84532 \
+  --asset 0x036CbD53842c5426634e7929541eC2318f3dCF7e \
+  --pay-to 0x<merchant-address>
+```
+
+`client create` prints the API key once; capture it into the client's secret
+store, never into a ticket or transcript.
+
+### Host wiring
+
+Create the system user and credentials directory alongside the NEAR ones:
+
+```sh
+sudo useradd --system --user-group \
+  --home-dir /nonexistent --shell /usr/sbin/nologin \
+  x402-near-base-sepolia
+test "$(id -gn x402-near-base-sepolia)" = x402-near-base-sepolia
+sudo install -d -m 0700 /etc/x402-near-facilitator/credentials/base-sepolia
+```
+
+Install `base-sepolia.json` (root:service-group 0640) and the pooled URL,
+direct URL, secp256k1 relayer key, and HMAC pepper credentials (root:root 0600)
+under that directory. The packaged `x402-near-facilitator@.service` template
+already covers the instance: `@base-sepolia` reads
+`/etc/x402-near-facilitator/base-sepolia.json` and its own credentials.
+
+Add `base-test.x402.mikedotexe.com` to the existing certificate lineage rather
+than issuing a new one:
+
+```sh
+# UPSERT A/AAAA base-test.x402.mikedotexe.com -> launch host (Route 53).
+sudo certbot certonly --webroot -w /var/www/x402-near-acme \
+  -d x402.mikedotexe.com -d test.x402.mikedotexe.com \
+  -d base-test.x402.mikedotexe.com \
+  --deploy-hook 'systemctl reload nginx'
+```
+
+Install the EVM virtual host next to the NEAR site; it adds only the
+`base-test` name and its `:8404` upstream and relies on the NEAR site's
+deny-by-default catch-all, so both must stay enabled together:
+
+```sh
+release=/opt/x402-near-facilitator/releases/vX.Y.Z
+sudo install -m 0644 "$release/deploy/nginx/x402-base-sepolia.conf" \
+  /etc/nginx/sites-available/x402-base-sepolia
+sudo ln -s /etc/nginx/sites-available/x402-base-sepolia \
+  /etc/nginx/sites-enabled/x402-base-sepolia
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+### Promote and start
+
+Promotion runs the binary's on-host `--version` ABI smoke check before flipping
+`current-base-sepolia`, and touches no other instance:
+
+```sh
+sudo /opt/x402-near-facilitator/releases/vX.Y.Z/deploy/promote-release.sh \
+  base-sepolia vX.Y.Z
+sudo systemctl start x402-near-facilitator@base-sepolia
+sudo systemctl status x402-near-facilitator@base-sepolia --no-pager
+curl --fail --silent http://127.0.0.1:8404/healthz
+curl --fail --silent http://127.0.0.1:8404/readyz
+curl --fail --silent http://127.0.0.1:8404/supported
+```
+
+`/readyz` requires the signer balance above the hard stop, so it stays 503
+until the faucet funds land; `/supported` advertises `eip155:84532` and the
+signer address immediately. Enable at boot only after the acceptance gates:
+
+```sh
+sudo systemctl enable x402-near-facilitator@base-sepolia
+```
+
+### Signer-balance alarm
+
+The metrics timer publishes `SignerBalanceEth{Network=base-sepolia}` every five
+minutes (see `deploy/monitoring/README.md`). Create its CloudWatch alarm;
+`TreatMissingData: breaching` makes it a dead-man switch:
+
+```sh
+aws cloudwatch put-metric-alarm \
+  --region us-east-1 \
+  --alarm-name x402-base-sepolia-signer-balance-low \
+  --namespace x402near \
+  --metric-name SignerBalanceEth \
+  --dimensions Name=Network,Value=base-sepolia \
+  --statistic Minimum \
+  --period 300 --evaluation-periods 3 --threshold 0.06 \
+  --comparison-operator LessThanThreshold \
+  --treat-missing-data breaching \
+  --alarm-actions arn:aws:sns:us-east-1:341982967115:x402-facilitator-alerts \
+  --ok-actions arn:aws:sns:us-east-1:341982967115:x402-facilitator-alerts
+```
+
+### Funded acceptance
+
+Run `scripts/verify-deployment.sh` against the public URL, then the funded
+settlement drill: a paid `/verify`, then a funded `/settle` carrying an
+ERC-3009 `transferWithAuthorization`. Immediately before the facilitator
+broadcasts, show the eip155 funded-broadcast preview from the mutation gate and
+obtain a fresh confirmation. Require the on-chain receipt, the exact recipient
+USDC delta, the terminal journal result at `required_confirmations`, budget
+reconciliation, and sanitized log evidence; then replay the identical request
+and prove no second transfer was created. Finally kill the service after
+broadcast and confirm `reconcile` terminalizes by stored hash and confirmations
+without re-signing.
+
+## Routine checks
+
+- Public `/readyz` is checked continuously by the external Route 53
+  monitor. The host additionally pushes relayer balances, certificate
+  expiry, and a nightly backup-success signal to CloudWatch every five
+  minutes, with alarms that treat missing data as breaching and unit
+  `OnFailure=` hooks that publish to the SNS alert topic (see
+  `deploy/monitoring/README.md` for assets, thresholds, and the
+  failure-path coverage map).
+- Review daily sponsorship use; relayer refills are manual, prompted by
+  the low-balance alarm before the service's own warning threshold.
+- Review API clients, exact payee policy, and owner contacts monthly.
+- The `x402-near-backup.timer` systemd timer dumps both databases nightly to
+  `/var/backups/x402-near/` (root-only, 14-day retention). Confirm the timer
+  is active, ship the dumps off-host, and perform a sanitized restore drill
+  (stream a dump through root into a scratch database) quarterly.
+- For sanitized state triage use the environment observer login at
+  `/root/x402-near-migration/<env>-observer-url`, which can read only
+  settlement state/timestamps/reason and global sponsorship totals.
+- Patch the OS and rotate API, database, and DNS credentials under
+  documented maintenance windows.
+- Confirm the recorded glibc/systemd baseline after host upgrades and rerun
+  both binary `--version` smoke checks before the next promotion.
+- Confirm `LimitCORE=0` remains effective and review `coredumpctl` after every
+  crash or fault-injection exercise.
+- Keep terminal journal detail online for at least 90 days and sanitized
+  journald data for no more than 14 days. Settlement identity and delegate-hash
+  rows must remain durable after any later archival so an old authorization
+  can never become payable again. Never delete nonterminal rows. Configure and
+  verify the host's `systemd-journald` `MaxRetentionSec=14day` policy before
+  launch; this host-wide setting requires review alongside its other services.
+
+Useful commands:
+
+```sh
+systemctl status 'x402-near-facilitator@*' --no-pager
+journalctl -u x402-near-facilitator@mainnet --since '30 minutes ago'
+journalctl -u x402-near-facilitator@testnet --since '30 minutes ago'
+curl --fail --silent https://x402.mikedotexe.com/readyz
+curl --fail --silent https://test.x402.mikedotexe.com/readyz
+```
+
+Do not paste full journal output into issues until it has been reviewed for
+sensitive data.
+
+### Sanitized journal triage
+
+`x402-near-admin` deliberately has no journal dump or status command. Use its
+documented `reconcile` command for recovery. For routine state counts, connect
+with the observer login through a libpq service entry or another secret-file
+mechanism that keeps credentials out of arguments, then run only the
+column-level query that role is allowed to execute:
+
+```sql
+SELECT
+    state,
+    count(*) AS rows,
+    max(extract(epoch FROM (now() - created_at)))::bigint
+        AS oldest_age_seconds,
+    max(reconciliation_attempts) AS max_reconciliation_attempts,
+    max(last_reconciled_at) AS last_reconciled_at
+FROM settlements
+GROUP BY state
+ORDER BY state;
+```
+
+For global financial triage, the observer may also read only
+`usage_date`, `reserved_yocto_near`, `spent_yocto_near`, and `updated_at` from
+`daily_global_sponsorship`. Do not broaden that login to raw settlement rows,
+`api_keys`, or client/account identity fields. Store only the aggregate output
+in an incident ticket.
+
+## Incidents
+
+### Readiness fails
+
+Stop routing settlement if the failure is leadership, reconciliation,
+quarantine, database, RPC disagreement, or low relayer balance. `/healthz`
+remaining green does not make settlement safe. Inspect sanitized service logs
+and the aggregate state query above; do not force readiness or invent an admin
+inspection command.
+
+### Settlement is indeterminate
+
+Do not sign another transaction and do not use `near` CLI with the service
+relayer key. Stop the service instance, preserve the database, and run the
+existing `x402-near-admin reconcile --config <environment-config>` command
+with that environment's systemd credential files while it alone can acquire
+leadership. Before invoking an operator-directed reconciliation that may
+rebroadcast, preview the original journaled network, asset, amount, payer,
+recipient, relayer, and maximum sponsorship reservation and obtain a fresh
+confirmation. Reconciliation performs these decisions:
+
+1. validate that the stored bytes, hash, relayer, delegate, and journal row
+   agree before trusting an RPC result;
+2. query the exact stored hash on primary and independent backup RPCs;
+3. accept a final outcome only when its transaction identity matches the
+   stored transaction;
+4. terminalize only a proven inner success, a typed on-chain failure, an
+   authoritative transaction rejection, or an expired delegate whose hash is
+   unknown on both RPCs while both relayer nonces remain unchanged;
+5. keep pending, missing, structurally ambiguous, identity-mismatched, or
+   RPC-ambiguous evidence nonterminal and readiness false;
+6. quarantine when a relayer nonce advanced but the stored transaction remains
+   unknown;
+7. rebroadcast only the exact stored bytes, only while the delegate remains
+   valid, and only after the dual-RPC nonce checks remain stable.
+
+Restart the service only after the admin command releases leadership. Keep the
+resource response unavailable until a terminal result is authoritative.
+
+### Relayer key is suspected compromised
+
+Disable settlement for that environment, revoke or quarantine the service key
+using the separately held recovery key, retain journal/database evidence, and
+fund no replacement until the incident boundary is understood. Create a new
+service key and reconcile every nonterminal row before restoring readiness.
+
+### API key is suspected compromised
+
+Revoke the client immediately, disable its remaining sponsorship budget,
+review its recent request and settlement records, notify its owner, and rotate.
+Do not rotate the global pepper unless its secrecy is also in doubt; a pepper
+rotation requires a controlled reissue of every client key.
+
+### Database unavailable or restored
+
+Settlement fails closed. Do not serve from an empty or stale replacement.
+Restore to an isolated database, validate schema and settlement uniqueness,
+reconcile all nonterminal transactions against both RPCs, then acquire
+leadership before reopening readiness.
+
+### RPC disagreement
+
+Stop settlement and preserve both sanitized responses. A definitive final
+transaction on either trusted provider is evidence; absence on one is not
+proof of absence. Do not change provider or re-sign until the stored
+transaction and relayer nonce are reconciled.
+
+## Rollback
+
+The rollback target must be a release that actually runs on this host.
+`v0.1.1` does **not**: it predates the systemd credentials-directory fix in
+`v0.1.2` and fails to load credentials on this systemd version. `v0.1.2` is
+the earliest viable target and was validated by the 2026-07-23 testnet
+rollback drill (4 s stop-to-ready each way). Verify any other candidate on
+the host before relying on it.
+
+1. Stop the affected systemd instance.
+2. Confirm the preceding release supports the current schema.
+3. Run that installed release's packaged promotion tool for only the affected
+   environment. It executes the prior service binary's on-host ABI smoke test
+   before atomically changing `current-mainnet` or `current-testnet`:
+
+   ```sh
+   sudo /opt/x402-near-facilitator/releases/vPREVIOUS/deploy/promote-release.sh \
+     testnet vPREVIOUS
+   ```
+
+   Substitute `mainnet` only when mainnet is the affected instance. Confirm
+   the other environment's pointer did not change.
+4. Start the instance and require startup reconciliation plus `/readyz`.
+5. Run public smoke checks and one non-broadcast `/verify`.
+
+Never roll back migrations destructively. If the prior binary is not compatible
+with the current schema, roll forward with a fixed binary instead.
+
+### v0.3.0 multi-chain schema (migration 0002)
+
+`v0.3.0` adds migration `0002` (multi-chain settlement columns; the settlements
+non-terminal CHECK becomes chain-conditional). Per environment, testnet first:
+
+1. `install-release.sh` the v0.3.0 archive.
+2. `x402-near-admin migrate --database-url-file <migration-url>` — applies `0002`
+   (additive nullable columns + a chain-conditional CHECK). It was drilled
+   against a populated table with every settlement state (5/5 existing rows
+   preserved, `chain_kind` defaults to `near`). Run this **before** promoting the
+   binary: the v0.3.0 service refuses to start until `0002` is present
+   (`schema_compatible`).
+3. `promote-release.sh <env> v0.3.0`, restart, require startup reconciliation
+   plus `/readyz`.
+
+Rollback to `v0.1.3` is schema-safe on the `0002` schema: its `schema_compatible`
+checks only migration `1`, and its NEAR inserts satisfy the new conditional
+CHECKs. No migration is rolled back.

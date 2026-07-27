@@ -68,12 +68,19 @@ jobs:
             cargo install cargo-deny --version 0.20.2 --locked
           command -v cargo-audit >/dev/null || \
             cargo install cargo-audit --version 0.22.2 --locked
-          command -v cargo-sqlx >/dev/null || \
-            cargo install sqlx-cli --version 0.8.6 --no-default-features \
-              --features rustls,postgres --locked
 
-      - name: Apply migrations to ephemeral PostgreSQL
-        run: cargo sqlx migrate run --source migrations
+      - name: Apply migrations and physical scrub to ephemeral PostgreSQL
+        shell: bash
+        run: |
+          set -euo pipefail
+          database_url_file="$(mktemp)"
+          trap 'rm -f "$database_url_file"' EXIT
+          chmod 600 "$database_url_file"
+          printf '%s\n' "$DATABASE_URL" >"$database_url_file"
+          cargo run --locked --quiet \
+            --package x402-near-facilitator \
+            --bin x402-near-admin -- \
+            migrate --database-url-file "$database_url_file"
 
       - name: Install official HTTP client conformance dependency
         run: npm --prefix conformance/http-client ci
@@ -104,6 +111,8 @@ jobs:
           mkdir -p "$work/conf.d" "$work/snippets" \
             "$work/letsencrypt/live/x402.mikedotexe.com"
           cp deploy/nginx/x402-near-facilitator.conf "$work/conf.d/default.conf"
+          cp deploy/nginx/x402-base.conf "$work/conf.d/base.conf"
+          cp deploy/nginx/x402-base-sepolia.conf "$work/conf.d/base-sepolia.conf"
           cp deploy/nginx/x402-near-proxy.conf "$work/snippets/"
           openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
             -subj /CN=x402.mikedotexe.com \

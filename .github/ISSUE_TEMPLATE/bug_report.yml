@@ -1,0 +1,101 @@
+name: Bug report
+description: Report a reproducible facilitator, provider, documentation, or tooling defect
+title: "bug: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not use this form for a suspected vulnerability. Report security
+        issues privately through the repository Security tab. Never include a
+        real API key, funded key, database credential, signed payment
+        authorization, or unredacted bearer instrument.
+
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: This is not a suspected security vulnerability.
+          required: true
+        - label: I removed live credentials, signed payments, transaction bytes, and private account data.
+          required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: Release tag, container digest, or full commit SHA.
+      placeholder: vX.Y.Z or 0123456789abcdef...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - HTTP / canonical protocol
+        - NEAR provider
+        - EVM provider
+        - PostgreSQL journal / recovery
+        - Configuration / admin CLI
+        - Deployment / monitoring
+        - Documentation / examples
+        - Build / CI / release
+    validations:
+      required: true
+
+  - type: dropdown
+    id: network
+    attributes:
+      label: Network profile
+      options:
+        - Not chain-specific
+        - near:testnet
+        - near:mainnet
+        - eip155:84532 (Base Sepolia)
+        - eip155:8453 (Base)
+    validations:
+      required: true
+
+  - type: textarea
+    id: observed
+    attributes:
+      label: What happened?
+      description: Include the sanitized error code and request ID if useful. Do not paste request bodies or signed authorizations.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What should have happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Safe reproduction
+      description: Use mocks, deterministic unfunded keys, redacted configuration, and loopback services.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Additional sanitized evidence
+      description: Logs, readiness checks, or traces with identities, hashes, and secrets removed.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks performed
+      options:
+        - label: I searched existing issues and the changelog.
+          required: true
+        - label: I can reproduce this without broadcasting funds.
+          required: false

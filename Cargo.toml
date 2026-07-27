@@ -8,14 +8,14 @@ members = [
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "0.4.1"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.93.0"
 license = "Apache-2.0"
 repository = "https://github.com/fastnear/x402-near-facilitator"
-homepage = "https://x402.mikedotexe.com"
+homepage = "https://github.com/fastnear/x402-near-facilitator"
 authors = ["Mike Purvis"]
-keywords = ["near", "payments", "stablecoin", "x402"]
+keywords = ["x402", "payments", "stablecoin", "near", "ethereum"]
 categories = ["cryptography::cryptocurrencies", "finance", "network-programming"]
 
 [workspace.dependencies]
