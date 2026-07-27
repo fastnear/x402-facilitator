@@ -1,0 +1,14 @@
+[Unit]
+Description=x402 host EBS snapshot
+After=network-online.target
+Wants=network-online.target
+OnFailure=x402-near-alert@%n.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/x402-ebs-snapshot.sh
+Environment=HOME=/tmp
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes

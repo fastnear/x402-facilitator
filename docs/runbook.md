@@ -191,6 +191,39 @@ readiness, and verify that no nonterminal state lacks a recovery path. Record
 the reason, source revision, schema version, observations, and outcome in
 dated evidence.
 
+## Full host rebuild
+
+Recovery order when the host itself is lost. Image-level recovery (an EBS
+snapshot of the root volume, when one is recent enough) is fastest; the
+from-scratch path below is authoritative and doubles as the periodic drill.
+
+1. **Provision** a fresh instance per [Provision an instance]
+   (Ubuntu LTS, nginx, PostgreSQL, Node.js LTS for the demo, AWS CLI with
+   the backup instance role). Reattach the elastic/static IPs before DNS
+   changes; the zone's records then keep working unchanged.
+2. **Secrets** come only from the operator's credential backup (relayer and
+   signer keys, API-key pepper, per-instance database URLs). None of them
+   are recoverable from this repository, the release artifacts, or S3
+   database dumps. If any key is unrecoverable, treat it as compromised:
+   create and fund a fresh relayer or signer, and re-issue client keys.
+3. **Databases**: create the per-instance databases, then restore the most
+   recent nightly dumps from the backup bucket. Dumps taken before a
+   forward-only migration must be upgraded by the current binary's
+   migration on first start — never start a binary older than the dump's
+   schema comment allows.
+4. **Service**: install the current attested release with
+   `deploy/install-release.sh`, point the per-instance `current-<instance>`
+   symlinks with `deploy/promote-release.sh`, install configs and systemd
+   units, and start instance by instance behind readiness.
+5. **Edge**: install the nginx vhosts, re-issue certificates through the
+   shared ACME webroot, and re-enable HTTP.
+6. **Demo + monitoring**: follow `deploy/demo/README.md` and install the
+   monitoring assets and timers from `deploy/monitoring/`, including the
+   canary fixtures described there.
+7. **Verify** with the deployment verification script and the demo
+   verification list, confirm metrics and canaries publish, and record the
+   rebuild as dated evidence.
+
 ## Evidence record
 
 An operational evidence entry should state:

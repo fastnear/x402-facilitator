@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>x402 Work Demo — NEAR mainnet</title>
+  <meta name="description" content="Paid SHA-256 work endpoint on NEAR mainnet: POST any payload, pay $0.001 USDC via x402, get a deterministic digest with delivery deduplication.">
+  <link rel="icon" href="/favicon.ico">
+  <link rel="service-desc" href="/openapi.json">
+  <style>
+    :root { color-scheme: light dark;
+      --bg: #ffffff; --fg: #1a1f24; --muted: #57606a; --line: #d8dee4;
+      --accent: #00a469; --code-bg: #f6f8fa; }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg: #0d1117; --fg: #e6edf3; --muted: #9aa4af; --line: #30363d;
+        --accent: #00ec97; --code-bg: #161b22; } }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--fg);
+      font: 16px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif; }
+    main { max-width: 44rem; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
+    h2 { font-size: 1.15rem; margin: 2rem 0 .5rem; }
+    .net { display: inline-block; font-size: .8rem; font-weight: 600; color: var(--accent);
+      border: 1px solid var(--accent); border-radius: 999px; padding: .1rem .6rem;
+      vertical-align: middle; margin-left: .4rem; }
+    p.lead { color: var(--muted); margin-top: .35rem; }
+    pre { background: var(--code-bg); border: 1px solid var(--line); border-radius: 8px;
+      padding: .8rem 1rem; overflow-x: auto; font-size: .85rem; }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em;
+      word-break: break-all; }
+    table { border-collapse: collapse; width: 100%; font-size: .9rem; }
+    th, td { text-align: left; padding: .4rem .6rem; border-bottom: 1px solid var(--line);
+      vertical-align: top; }
+    th { white-space: nowrap; color: var(--muted); font-weight: 500; }
+    a { color: var(--accent); }
+    ol { padding-left: 1.3rem; }
+    footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--line);
+      color: var(--muted); font-size: .85rem; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>x402 Work Demo <span class="net">NEAR mainnet</span></h1>
+  <p class="lead">A minimal paid API: <code>POST /work</code> with any JSON payload, pay
+  <strong>$0.001 USDC</strong> per call via the <a href="https://www.x402.org/">x402 payment
+  protocol</a>, and receive the payload's SHA-256 digest with delivery deduplication.
+  It is the reference workload of the open-source
+  <a href="https://github.com/fastnear/x402-near-facilitator">NEAR x402 Facilitator</a>,
+  which settles USDC on NEAR and Base.</p>
+
+  <h2>Try it</h2>
+  <pre><code>curl -i -X POST https://x402-demo.mikedotexe.com/work \
+  -H 'Content-Type: application/json' \
+  -d '{"hello":"x402"}'</code></pre>
+  <ol>
+    <li>The unpaid call above returns <code>402 Payment Required</code> with a
+      <code>PAYMENT-REQUIRED</code> header (base64 JSON) describing the accepted payment.</li>
+    <li>An x402 client signs the payment and retries with a
+      <code>PAYMENT-SIGNATURE</code> header.</li>
+    <li>The server settles through the facilitator and returns the digest plus a
+      <code>PAYMENT-RESPONSE</code> header with the on-chain transaction.</li>
+  </ol>
+  <p>NEAR demos return an informational hint body alongside the v2 header.</p>
+
+  <h2>Payment details</h2>
+  <table>
+    <tbody>
+        <tr><th>Price</th><td><code>1000</code> atomic units = $0.001 USDC per call</td></tr>
+        <tr><th>Scheme</th><td><code>exact</code> (x402 v2)</td></tr>
+        <tr><th>Network</th><td><code>near:mainnet</code></td></tr>
+        <tr><th>Asset</th><td><code>17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1</code><br>Circle USDC (NEP-141)</td></tr>
+        <tr><th>Pay to</th><td><code>count.mike.near</code></td></tr>
+        
+    </tbody>
+  </table>
+
+  <h2>For agents &amp; machines</h2>
+  <table>
+    <tbody>
+        <tr><th>OpenAPI</th><td><a href="/openapi.json"><code>/openapi.json</code></a> — includes <code>x-payment-info</code> and <code>x-guidance</code></td></tr>
+        <tr><th>Discovery</th><td><a href="/.well-known/x402"><code>/.well-known/x402</code></a></td></tr>
+        <tr><th>Paid endpoint</th><td><code>POST /work</code> (only unpaid calls are free — they return 402)</td></tr>
+        <tr><th>Facilitator</th><td><a href="https://x402.mikedotexe.com"><code>https://x402.mikedotexe.com</code></a> — see <a href="https://x402.mikedotexe.com/supported"><code>/supported</code></a></td></tr>
+    </tbody>
+  </table>
+
+  <footer>
+    <p>Part of the <a href="https://x402.mikedotexe.com/">NEAR x402 Facilitator</a> reference
+    deployment · <a href="https://x402-demo-base.mikedotexe.com">Base mainnet demo</a> · <a href="https://x402-demo-test.mikedotexe.com">NEAR testnet demo</a> ·
+    <a href="https://github.com/fastnear/x402-near-facilitator">Source on GitHub</a></p>
+  </footer>
+</main>
+</body>
+</html>

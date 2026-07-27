@@ -53,6 +53,12 @@ facilitator's own settlement idempotency is unaffected.
    on each demo hostname; each paid operation declares
    `x-payment-info` (protocol + fixed USD price), a `402` response, and
    the request-body input schema agents need.
+10. **Landing pages**: install the files from `landing/` to
+    `/var/www/x402-demo/<env>/index.html` (root-owned 0644). Nginx serves
+    each at `GET /` — a static, no-JavaScript page that explains the paid
+    endpoint to humans and points agents at `/openapi.json`,
+    `/.well-known/x402`, and the facilitator's `/supported`. Registry
+    reviewers hit the bare hostname, which previously returned 404.
 
 ## Verification
 
@@ -64,5 +70,6 @@ facilitator's own settlement idempotency is unaffected.
 - Replaying the identical request returns the cached result with no second
   settlement (facilitator returns `duplicate_settlement`).
 - The same payment identifier with a different payload returns `409`.
+- `GET /` on each demo hostname returns the landing page with `200`.
 - All other paths/methods on the demo hostnames return `404`/`405`; every
   funded broadcast follows the runbook mutation gate.
