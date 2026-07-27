@@ -3,6 +3,20 @@
 These instructions apply recursively to the entire repository. Do not add
 nested `AGENTS.md` files.
 
+## Repository identity
+
+The GitHub repository is **`fastnear/x402-facilitator`**
+(`git@github.com:fastnear/x402-facilitator.git`), renamed from
+`x402-near-facilitator` on 2026-07-27 because the engine settles on NEAR and
+Base/EVM. GitHub redirects the old slug, but always use the new name for
+remotes, `gh -R` targets, links, and container/package coordinates
+(GHCR does **not** redirect: images publish to
+`ghcr.io/fastnear/x402-facilitator`). Only the GitHub slug changed — crate
+names, binaries (`x402-near-facilitator`, `x402-near-admin`), systemd units,
+`/etc` paths, database names, and the local checkout directory
+(`~/near/fn/x402-near-facilitator`) are unchanged. Dated evidence documents
+keep the old URL as historical record.
+
 ## Purpose
 
 Build and operate a production Rust facilitator for x402 `exact` Circle USDC

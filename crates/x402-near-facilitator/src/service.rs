@@ -86,9 +86,9 @@ const LANDING_PAGE: &str = concat!(
     the asset is Circle USDC, the facilitator fee is zero, and sponsored gas
     is bounded by per-client policy.</p>
     <ul>
-      <li><a href="https://github.com/fastnear/x402-near-facilitator">Source and documentation</a></li>
-      <li><a href="https://github.com/fastnear/x402-near-facilitator/blob/main/docs/reference-access.md">Request reference-instance access</a></li>
-      <li><a href="https://github.com/fastnear/x402-near-facilitator/security/policy">Security policy</a></li>
+      <li><a href="https://github.com/fastnear/x402-facilitator">Source and documentation</a></li>
+      <li><a href="https://github.com/fastnear/x402-facilitator/blob/main/docs/reference-access.md">Request reference-instance access</a></li>
+      <li><a href="https://github.com/fastnear/x402-facilitator/security/policy">Security policy</a></li>
     </ul>
     <p>Service version <code>"#,
     env!("CARGO_PKG_VERSION"),

@@ -27,7 +27,7 @@ info:
     identifier: Apache-2.0
   contact:
     name: FastNEAR x402 facilitator maintainers
-    url: https://github.com/fastnear/x402-near-facilitator
+    url: https://github.com/fastnear/x402-facilitator
 servers:
   - url: https://{host}
     description: Replace the reserved default with one facilitator instance

@@ -16,7 +16,7 @@ import release_guard
 
 COMMIT = "1" * 40
 TAG_OBJECT = "2" * 40
-REPOSITORY = "fastnear/x402-near-facilitator"
+REPOSITORY = "fastnear/x402-facilitator"
 REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
 IMAGE = f"ghcr.io/{REPOSITORY}"
 IMAGE_DIGEST = f"sha256:{'4' * 64}"
