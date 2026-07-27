@@ -5,7 +5,7 @@ Status (2026-07-26): the x402 Foundation facilitators-table entry **merged**
 and the x402scan NEAR feature request remains open as #1040. Base mainnet is
 now live with authentic settlement activity, which makes x402-list actionable
 and creates a future x402scan facilitator path. Do not submit updated
-multi-chain claims until v0.5.0 is deployed and its public landing page and
+multi-chain claims until v0.5.1 is deployed and its public landing page and
 Base `payment-identifier` advertisement are visible.
 
 ## Readiness facts registries key off
@@ -13,7 +13,7 @@ Base `payment-identifier` advertisement are visible.
 - The reference deployment has live NEAR mainnet, NEAR testnet, and Base
   mainnet facilitator instances. Base Sepolia remains a configured rollout
   target and must not be presented as live.
-- v0.5.0 `/supported` is canonical x402 v2 with `kinds`,
+- v0.5.1 `/supported` is canonical x402 v2 with `kinds`,
   `extensions: ["payment-identifier"]`, and per-network `signers`; the gated
   legacy v1 kind is advertised only by an EVM instance that enables it.
 - The public demo resource server returns a valid 402 with a base64
@@ -113,7 +113,7 @@ publish a made-up `/.well-known` facilitator format.
   `| [NEAR x402 Facilitator](https://x402.mikedotexe.com/supported) |
   Independent facilitator for NEAR mainnet and testnet; NEP-141 USDC
   settled through NEP-366 signed delegates with relayer-sponsored gas |`
-- After v0.5.0 and the Base promotion are publicly evidenced, update this
+- After v0.5.1 and the Base promotion are publicly evidenced, update this
   existing row in a small follow-up PR to say NEAR and Base and link the
   human-facing root page. Do not create a second Base-only listing.
 
@@ -132,7 +132,7 @@ publish a made-up `/.well-known` facilitator format.
 - Staged branch:
   <https://github.com/mikedotexe/awesome-agentic-commerce/tree/x402-near-facilitator-listing>
 - **PR opened 2026-07-23:** <https://github.com/Merit-Systems/awesome-agentic-commerce/pull/510>
-- The open entry still describes NEAR only. After v0.5.0 is deployed, amend
+- The open entry still describes NEAR only. After v0.5.1 is deployed, amend
   that PR to the reusable NEAR-and-Base description before it merges.
 
 ### 5. x402.watch / @swader/x402facilitators — facilitator directory (PR)
@@ -200,7 +200,7 @@ publish a made-up `/.well-known` facilitator format.
   NEAR paid-flow evidence because the authenticated endpoints cannot be probed
   without a key; arrange a narrowly scoped reviewer credential out of band if
   the maintainer requests a live verification.
-- Submit after v0.5.0 is live so the homepage and `/supported` agree with the
+- Submit after v0.5.1 is live so the homepage and `/supported` agree with the
   multi-chain description.
 
 ### 11. x402dev monitor — skip until its gated-facilitator model is fixed

@@ -13,6 +13,15 @@ Patch releases remain backward compatible within the current minor line.
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-07-26
+
+### Fixed
+
+- Aligned the OCI image description and its release guard on the canonical
+  x402 v2 NEAR-and-Base product identity, with regression coverage that catches
+  future Dockerfile/guard drift before a tag is created. There are no runtime,
+  wire-contract, configuration, or migration changes from `0.5.0`.
+
 ## [0.5.0] - 2026-07-26
 
 This release makes the shared NEAR/Base engine ready for broader reuse and
@@ -230,7 +239,8 @@ store, leadership, HTTP) at every step.
 Initial hardened NEAR-only release lineage (durable journal, dual-RPC
 reconciliation, leadership failover, sponsorship budgets). See git history.
 
-[Unreleased]: https://github.com/fastnear/x402-near-facilitator/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/fastnear/x402-near-facilitator/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/fastnear/x402-near-facilitator/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/fastnear/x402-near-facilitator/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/fastnear/x402-near-facilitator/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/fastnear/x402-near-facilitator/compare/v0.3.0...v0.4.0
