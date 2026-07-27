@@ -32,7 +32,10 @@ landing pages and Base `payment-identifier` advertisement are visible in the
   Circle USDC on NEAR and Base, with sponsored gas and durable settlement
   recovery.”
 - Website: <https://x402.mikedotexe.com/>.
-- Source/docs: <https://github.com/fastnear/x402-near-facilitator>.
+- Source/docs: <https://github.com/fastnear/x402-facilitator> (repository
+  renamed from `x402-near-facilitator` on 2026-07-27; GitHub redirects cover
+  every previously submitted link, so already-filed registry entries need no
+  amendment).
 - Logo: `docs/assets/near-x402-facilitator.svg`; color `#00ec97`.
 - Access: gated; `X-API-Key`; use the
   [reference-access process](reference-access.md).

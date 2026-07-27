@@ -34,14 +34,14 @@ Each base URL exposes:
 - `GET /readyz` for sanitized operational readiness.
 
 The implementation is Apache-2.0 licensed. See the
-[source and API documentation](https://github.com/fastnear/x402-near-facilitator),
-[security policy](https://github.com/fastnear/x402-near-facilitator/security/policy),
+[source and API documentation](https://github.com/fastnear/x402-facilitator),
+[security policy](https://github.com/fastnear/x402-facilitator/security/policy),
 and [dated paid-flow evidence](evidence/).
 
 ## Request access
 
 Open a
-[reference-access request](https://github.com/fastnear/x402-near-facilitator/issues/new?template=access_request.yml)
+[reference-access request](https://github.com/fastnear/x402-facilitator/issues/new?template=access_request.yml)
 with:
 
 - the NEAR or Base network and environment;

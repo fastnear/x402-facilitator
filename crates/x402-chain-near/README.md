@@ -31,7 +31,7 @@ replay protection and reconciliation.
 The workspace publishes provider crates on one lockstep version. Before 1.0, a
 minor release may intentionally change the public Rust API; such changes are
 listed in the workspace
-[changelog](https://github.com/fastnear/x402-near-facilitator/blob/main/CHANGELOG.md).
+[changelog](https://github.com/fastnear/x402-facilitator/blob/main/CHANGELOG.md).
 Patch releases remain backward compatible.
 
 The minimum supported Rust version is declared in the workspace manifest and

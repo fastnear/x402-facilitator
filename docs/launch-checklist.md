@@ -50,7 +50,7 @@ or conversation alone is not launch evidence.
 
 ## Repository and supply chain
 
-- [x] Public `fastnear/x402-near-facilitator` repository exists with Apache-2.0
+- [x] Public `fastnear/x402-facilitator` repository (renamed from `x402-near-facilitator` 2026-07-27) exists with Apache-2.0
       license, branch protection, security contact, and no secrets in history.
       — 2026-07-24: public repo, Apache-2.0 (`LICENSE`), protected `main`,
       `SECURITY.md` security contact.

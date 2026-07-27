@@ -1,5 +1,5 @@
 blank_issues_enabled: false
 contact_links:
   - name: Report a vulnerability privately
-    url: https://github.com/fastnear/x402-near-facilitator/security/advisories/new
+    url: https://github.com/fastnear/x402-facilitator/security/advisories/new
     about: Do not disclose suspected vulnerabilities or bearer instruments in a public issue.
