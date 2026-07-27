@@ -19,15 +19,14 @@ pub enum Environment {
 
 /// The settlement chain family an instance serves. It selects the provider and
 /// the chain-specific validation/parsing. NEAR is the default so existing
-/// configs parse unchanged; `eip155` (EVM) is recognized here and gains its
-/// provider + validation in a later release.
+/// configs parse unchanged; `eip155` selects the Base/EVM provider and policy.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum ChainKind {
     /// NEAR (NEP-366 signed-delegate settlement).
     #[default]
     Near,
-    /// EVM / eip155 (EIP-3009 `transferWithAuthorization`); implemented later.
+    /// EVM / eip155 (ERC-3009 `transferWithAuthorization`).
     Eip155,
 }
 
@@ -116,6 +115,9 @@ pub struct Eip155Config {
     pub required_confirmations: u64,
     /// Gas limit for the ERC-3009 `transferWithAuthorization` submission.
     pub gas_limit: u64,
+    /// Hard EIP-1559 fee ceiling, in wei per gas. Dynamic fee estimates above
+    /// this value are never signed.
+    pub max_fee_per_gas_wei: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -348,6 +350,7 @@ impl ServiceConfig {
         // testnet deploy can never point at mainnet USDC (or vice versa).
         const BASE_MAINNET_USDC: &str = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913";
         const BASE_SEPOLIA_USDC: &str = "0x036cbd53842c5426634e7929541ec2318f3dcf7e";
+        const MAX_JOURNALED_CONFIRMATIONS: u64 = 2_147_483_647;
         let (expected_chain_id, expected_usdc) = match self.environment {
             Environment::Mainnet => (8453_u64, BASE_MAINNET_USDC),
             Environment::Testnet => (84532_u64, BASE_SEPOLIA_USDC),
@@ -393,6 +396,11 @@ impl ServiceConfig {
                 "eip155.required_confirmations must be at least 1".to_owned(),
             ));
         }
+        if eip155.required_confirmations > MAX_JOURNALED_CONFIRMATIONS {
+            return Err(ConfigError::Invalid(
+                "eip155.required_confirmations must fit a signed 32-bit journal field".to_owned(),
+            ));
+        }
         // A transferWithAuthorization settlement is ~60k–100k gas; bound the limit
         // to a sane band so a typo cannot under-fund or wildly over-reserve.
         if !(21_000..=1_000_000).contains(&eip155.gas_limit) {
@@ -400,13 +408,47 @@ impl ServiceConfig {
                 "eip155.gas_limit must be between 21000 and 1000000".to_owned(),
             ));
         }
+        validate_unsigned_decimal("eip155.max_fee_per_gas_wei", &eip155.max_fee_per_gas_wei)?;
+        let max_fee_per_gas = eip155.max_fee_per_gas_wei.parse::<u128>().map_err(|_| {
+            ConfigError::Invalid(
+                "eip155.max_fee_per_gas_wei must fit an unsigned 128-bit integer".to_owned(),
+            )
+        })?;
+        if max_fee_per_gas == 0 {
+            return Err(ConfigError::Invalid(
+                "eip155.max_fee_per_gas_wei must be positive".to_owned(),
+            ));
+        }
+        let maximum_l2_fee = u128::from(eip155.gas_limit)
+            .checked_mul(max_fee_per_gas)
+            .ok_or_else(|| {
+                ConfigError::Invalid(
+                    "eip155 gas limit multiplied by max fee per gas overflows".to_owned(),
+                )
+            })?;
+        let reservation = self
+            .sponsorship
+            .reservation_yocto_near
+            .parse::<u128>()
+            .map_err(|_| {
+                ConfigError::Invalid(
+                    "eip155 sponsorship reservation must fit an unsigned 128-bit integer"
+                        .to_owned(),
+                )
+            })?;
+        if reservation <= maximum_l2_fee {
+            return Err(ConfigError::Invalid(
+                "eip155 sponsorship reservation must exceed gas_limit × \
+                 max_fee_per_gas_wei so L1 data fees remain reserved"
+                    .to_owned(),
+            ));
+        }
         Ok(())
     }
 
     /// NEAR-specific configuration policy: network identity, the canonical USDC
     /// contract, NEAR account-id shapes, and the sponsored-gas ceiling. The EVM
-    /// counterpart (`validate_eip155`) slots in alongside this in a later
-    /// release, selected by [`ChainKind`] in [`Self::validate`].
+    /// counterpart (`validate_eip155`) enforces the matching Base policy.
     fn validate_near(&self) -> Result<(), ConfigError> {
         const MAX_INNER_GAS: u64 = 30_000_000_000_000;
         const MAINNET_USDC: &str =
@@ -447,12 +489,22 @@ impl ServiceConfig {
     }
 
     pub fn policy_snapshot(&self) -> serde_json::Value {
+        let eip155 = self.eip155.as_ref().map(|config| {
+            serde_json::json!({
+                "chainId": config.chain_id,
+                "requiredConfirmations": config.required_confirmations,
+                "gasLimit": config.gas_limit,
+                "maxFeePerGasWei": config.max_fee_per_gas_wei,
+            })
+        });
         serde_json::json!({
+            "chainKind": self.chain_kind.as_str(),
             "network": self.network,
             "asset": self.asset,
             "minimumAmount": self.minimum_amount,
             "maxInnerGas": self.max_inner_gas,
             "reservationYoctoNear": self.sponsorship.reservation_yocto_near,
+            "eip155": eip155,
         })
     }
 }
@@ -730,6 +782,7 @@ mod tests {
                 chain_id: 84532,
                 required_confirmations: 2,
                 gas_limit: 120_000,
+                max_fee_per_gas_wei: "1000000000".to_owned(),
             }),
         }
     }
@@ -788,6 +841,7 @@ mod tests {
             chain_id: 8453,
             required_confirmations: 2,
             gas_limit: 120_000,
+            max_fee_per_gas_wei: "1000000000".to_owned(),
         });
         assert!(wrong_chain.validate().is_err());
 
@@ -816,16 +870,38 @@ mod tests {
             chain_id: 84532,
             required_confirmations: 0,
             gas_limit: 120_000,
+            max_fee_per_gas_wei: "1000000000".to_owned(),
         });
         assert!(zero_confirmations.validate().is_err());
+
+        let mut excessive_confirmations = valid_base_sepolia_config();
+        excessive_confirmations
+            .eip155
+            .as_mut()
+            .unwrap_or_else(|| std::process::abort())
+            .required_confirmations = 2_147_483_648;
+        assert!(excessive_confirmations.validate().is_err());
 
         let mut tiny_gas = valid_base_sepolia_config();
         tiny_gas.eip155 = Some(Eip155Config {
             chain_id: 84532,
             required_confirmations: 2,
             gas_limit: 5,
+            max_fee_per_gas_wei: "1000000000".to_owned(),
         });
         assert!(tiny_gas.validate().is_err());
+
+        let mut uncapped = valid_base_sepolia_config();
+        uncapped
+            .eip155
+            .as_mut()
+            .unwrap_or_else(|| std::process::abort())
+            .max_fee_per_gas_wei = "0".to_owned();
+        assert!(uncapped.validate().is_err());
+
+        let mut under_reserved = valid_base_sepolia_config();
+        under_reserved.sponsorship.reservation_yocto_near = "120000000000000".to_owned();
+        assert!(under_reserved.validate().is_err());
     }
 
     #[test]

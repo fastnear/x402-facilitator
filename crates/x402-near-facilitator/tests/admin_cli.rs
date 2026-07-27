@@ -264,13 +264,21 @@ async fn admin_cli_migrates_and_enforces_the_full_client_lifecycle() -> TestResu
         let migration = run_admin(database.args(&["migrate"]))?;
         require_success(&migration)?;
         assert!(migration.stdout.is_empty());
+        let scrub_marker: Option<String> =
+            sqlx::query_scalar("SELECT obj_description('settlements'::regclass, 'pg_class')")
+                .fetch_one(&database.scoped)
+                .await?;
+        assert_eq!(
+            scrub_marker.as_deref(),
+            Some("x402-maintenance:0003-authorization-scrub:complete")
+        );
     }
     let migration_count: i64 =
         sqlx::query_scalar("SELECT count(*) FROM _sqlx_migrations WHERE success = true")
             .fetch_one(&database.scoped)
             .await?;
-    // 0001_initial + 0002_multichain.
-    assert_eq!(migration_count, 2);
+    // 0001_initial + 0002_multichain + 0003_retry_anchors.
+    assert_eq!(migration_count, 3);
 
     let short_pepper = database.directory.write_secret("short-pepper", "short")?;
     let mut short_pepper_args = database.args(&["client", "create"]);

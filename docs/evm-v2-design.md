@@ -1,10 +1,15 @@
 # EVM v2 engineering design — the provider seam
 
-> **Status: implemented and shipped.** Phase 0 landed as v0.2.0, the EVM
-> provider and Base instances as v0.3.0, and the gated legacy-v1 wire as
+> **Status: implemented and shipped.** Phase 0 landed as v0.2.0, EVM/Base
+> support as v0.3.0, and the gated legacy-v1 wire as
 > v0.4.0. This document is the design record; current behavior is described
 > in [architecture.md](architecture.md) and the dated entries under
 > [evidence/](evidence/).
+>
+> The v0.5 hardening subsequently separated the EIP-712 payment hash from the
+> scoped ERC-3009 nonce anchor, minimized pre-prepare authorization storage,
+> and added independent durable readers and a fee ceiling. Phase descriptions
+> below are historical rationale, not the current journal contract.
 
 Executable design for Phase 0 of the EVM-support plan (see the approved plan
 and `docs/near-intents-adoption-gates.md` for scope). This turns "introduce a

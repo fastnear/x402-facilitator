@@ -1,11 +1,13 @@
 [package]
 name = "x402-near-facilitator"
-description = "Production NEAR x402 facilitator service"
+description = "Production multi-chain x402 facilitator service for NEAR and Base"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+publish = false
 
 [lib]
 name = "x402_near_facilitator"
@@ -49,8 +51,8 @@ tracing-opentelemetry = "0.33"
 tracing-subscriber.workspace = true
 url.workspace = true
 uuid.workspace = true
-x402-chain-eip155-provider = { version = "=0.4.1", path = "../x402-chain-eip155-provider" }
-x402-chain-near = { version = "=0.4.1", path = "../x402-chain-near" }
+x402-chain-eip155-provider = { version = "=0.5.0", path = "../x402-chain-eip155-provider" }
+x402-chain-near = { version = "=0.5.0", path = "../x402-chain-near" }
 x402-facilitator-local.workspace = true
 x402-types.workspace = true
 zeroize.workspace = true

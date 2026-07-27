@@ -51,7 +51,7 @@ def expected_image_labels(
         "org.opencontainers.image.revision": commit,
         "org.opencontainers.image.source": f"https://github.com/{repository}",
         "org.opencontainers.image.title": (
-            "FastNEAR x402 facilitator for NEAR"
+            "FastNEAR x402 facilitator for NEAR and Base"
         ),
         "org.opencontainers.image.version": version,
     }

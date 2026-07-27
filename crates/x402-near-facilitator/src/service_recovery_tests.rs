@@ -33,9 +33,12 @@ use x402_facilitator_local::FacilitatorLocal;
 use x402_types::chain::{ChainIdPattern, ChainProviderOps, ChainRegistry};
 use x402_types::scheme::{SchemeBlueprints, SchemeConfig, SchemeRegistry};
 
-use super::{AppState, reconcile, run_new_settlement};
+use super::{
+    AppState, finalize_reconciled_terminal, reconcile, require_evm_recovery_balance,
+    run_new_settlement, signer_is_funded,
+};
 use crate::auth::ApiKeyAuthenticator;
-use crate::chain::ChainProvider;
+use crate::chain::{ChainProvider, TerminalOutcome};
 use crate::config::{
     ChainKind, Environment, PaymentIdentifierConfig, RequestLimits, ServiceConfig,
     SponsorshipConfig,
@@ -43,8 +46,8 @@ use crate::config::{
 use crate::leadership::ReadinessState;
 use crate::protocol::{ParsedRequest, parse_request, request_fingerprint};
 use crate::store::{
-    ApiClient, ClaimOutcome, NewSettlement, PgStore, PreparedJournalEntry, SettlementRecord,
-    SettlementState,
+    ApiClient, ClaimOutcome, EvmAuthorizationMetadata, EvmPreparedJournalEntry, NewSettlement,
+    PgStore, PreparedJournalEntry, SettlementRecord, SettlementState,
 };
 use crate::telemetry::Metrics;
 
@@ -645,6 +648,8 @@ async fn reserve_payment(
             payment_identifier: Some(identifier.to_owned()),
             payment_hash: *payment.payment_hash(),
             request_fingerprint: fingerprint,
+            anchor_scope: "near".to_owned(),
+            anchor_value: *payment.payment_hash(),
             x402_version: 2,
             scheme: "exact".to_owned(),
             network: "near:testnet".to_owned(),
@@ -656,7 +661,7 @@ async fn reserve_payment(
             delegate_public_key: Some(payment.payer_public_key.to_string()),
             delegate_nonce: Some(payment.delegate_nonce.to_string()),
             delegate_max_block_height: Some(payment.max_block_height.to_string()),
-            evm_authorization: None,
+            authorization_metadata: None,
             signer_address: None,
             policy_snapshot: json!({"test": "recovery-regression"}),
             reservation_yocto_near: "100".to_owned(),
@@ -954,6 +959,7 @@ async fn both_unknown_with_advanced_backup_nonce_quarantines_relayer() -> TestRe
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn crash_restart_matrix_recovers_each_durable_transition_exactly_once() -> TestResult {
     let Some(database) =
         TestDatabase::from_explicit_environment("crash_restart_transition_matrix").await?
@@ -968,15 +974,17 @@ async fn crash_restart_matrix_recovers_each_durable_transition_exactly_once() ->
         make_ready(&restarted);
         reconcile(&restarted).await?;
         let reserved_record = settlement_record(&restarted, reserved.id).await?;
-        assert_eq!(reserved_record.state, SettlementState::Failed);
+        assert_eq!(reserved_record.state, SettlementState::AwaitingRetry);
         assert!(reserved_record.outer_transaction_bytes.is_none());
+        assert!(reserved_record.terminal_response_bytes.is_none());
+        assert_eq!(reserved_record.reserved_yocto_near, "0");
         assert_eq!(
-            terminal_json(&reserved_record)?["error"]["code"],
-            "recovered_before_prepare"
+            reserved_record.retry_code.as_deref(),
+            Some("recovered_before_prepare")
         );
         assert_eq!(
             settlement_states(&database.pool, reserved.id).await?,
-            vec!["reserved", "failed"]
+            vec!["reserved", "awaiting_retry"]
         );
 
         let prepared = reserve_payment(&context, 2, 1_050, "crash_after_prepared_00001").await?;
@@ -1195,13 +1203,11 @@ async fn hard_balance_stop_prevents_preparation_and_broadcast() -> TestResult {
         .await;
 
         let record = settlement_record(&context.state, reserved.id).await?;
-        assert_eq!(record.state, SettlementState::Failed);
-        assert_eq!(record.terminal_http_status, Some(503));
+        assert_eq!(record.state, SettlementState::AwaitingRetry);
+        assert!(record.terminal_http_status.is_none());
         assert!(record.outer_transaction_bytes.is_none());
-        assert_eq!(
-            terminal_json(&record)?["error"]["code"],
-            "relayer_unavailable"
-        );
+        assert_eq!(record.retry_code.as_deref(), Some("relayer_unavailable"));
+        assert_eq!(record.reserved_yocto_near, "0");
         assert!(!context.state.readiness.snapshot().relayer);
         assert_eq!(context.rpc.sends(), 0);
         Ok::<(), Box<dyn Error + Send + Sync>>(())
@@ -1252,13 +1258,11 @@ async fn quarantined_relayer_policy_prevents_preparation_and_broadcast() -> Test
             .settlement(reserved.id)
             .await?
             .ok_or_else(|| std::io::Error::other("settlement disappeared"))?;
-        assert_eq!(record.state, SettlementState::Failed);
-        assert_eq!(record.terminal_http_status, Some(503));
+        assert_eq!(record.state, SettlementState::AwaitingRetry);
+        assert!(record.terminal_http_status.is_none());
         assert!(record.outer_transaction_bytes.is_none());
-        assert_eq!(
-            terminal_json(&record)?["error"]["code"],
-            "relayer_unavailable"
-        );
+        assert_eq!(record.retry_code.as_deref(), Some("relayer_unavailable"));
+        assert_eq!(record.reserved_yocto_near, "0");
         assert!(!context.state.readiness.snapshot().relayer);
         assert_eq!(context.rpc.sends(), 0);
         Ok::<(), Box<dyn Error + Send + Sync>>(())
@@ -1372,6 +1376,263 @@ async fn reconciliation_stops_before_later_nonce_after_pending_row() -> TestResu
         );
         assert!(!context.state.readiness.snapshot().reconciliation);
         assert_eq!(context.rpc.sends(), 0);
+        Ok::<(), Box<dyn Error + Send + Sync>>(())
+    }
+    .await;
+    database.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+async fn pending_prepared_row_does_not_strand_later_reserved_budget() -> TestResult {
+    let Some(database) =
+        TestDatabase::from_explicit_environment("pending_before_reserved_release").await?
+    else {
+        return Ok(());
+    };
+    let result = async {
+        let context = build_context(&database).await?;
+        let first = reserve_payment(&context, 1, 1_050, "recovery_pending_then_reserved_1").await?;
+        let first = prepare_payment(&context, &first, 0, true).await?;
+        let reserved =
+            reserve_payment(&context, 2, 1_050, "recovery_pending_then_reserved_2").await?;
+        context
+            .rpc
+            .set_lookup(first.transaction_hash, LookupPlan::Pending);
+        make_ready(&context.state);
+
+        reconcile(&context.state).await?;
+
+        let first_record = settlement_record(&context.state, first.record.id).await?;
+        assert_eq!(first_record.state, SettlementState::Submitted);
+        let released = settlement_record(&context.state, reserved.id).await?;
+        assert_eq!(released.state, SettlementState::AwaitingRetry);
+        assert_eq!(released.reserved_yocto_near, "0");
+        assert_eq!(
+            released.retry_code.as_deref(),
+            Some("recovered_before_prepare")
+        );
+        assert_eq!(
+            settlement_states(&database.pool, reserved.id).await?,
+            vec!["reserved", "awaiting_retry"]
+        );
+        let usage = context.state.store.global_sponsorship_usage_today().await?;
+        assert_eq!(usage.reserved_yocto_near, "100");
+        assert_eq!(usage.spent_yocto_near, "0");
+        assert!(!context.state.readiness.snapshot().reconciliation);
+        assert_eq!(context.rpc.sends(), 0);
+        Ok::<(), Box<dyn Error + Send + Sync>>(())
+    }
+    .await;
+    database.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+async fn evm_recovery_uses_durable_reservation_after_config_downgrade() -> TestResult {
+    let Some(database) =
+        TestDatabase::from_explicit_environment("evm_durable_recovery_reservation").await?
+    else {
+        return Ok(());
+    };
+    let result = async {
+        let mut context = build_context(&database).await?;
+        let config = Arc::get_mut(&mut context.state.config)
+            .ok_or_else(|| std::io::Error::other("test config is unexpectedly shared"))?;
+        config.chain_kind = ChainKind::Eip155;
+        config.sponsorship.reservation_yocto_near = "100".to_owned();
+
+        let settlement_id = Uuid::new_v4();
+        let claim = context
+            .state
+            .store
+            .claim_settlement(&NewSettlement {
+                id: settlement_id,
+                api_client_id: context.client_id,
+                payment_identifier: Some("evm_durable_recovery_reservation_01".to_owned()),
+                payment_hash: [0x71; 32],
+                request_fingerprint: [0x72; 32],
+                anchor_scope: concat!(
+                    "eip155:84532:",
+                    "0x036cbd53842c5426634e7929541ec2318f3dcf7e:",
+                    "0x11efa374c489d106f9b6ac1b9b73a7a54c237c6d"
+                )
+                .to_owned(),
+                anchor_value: [0x73; 32],
+                x402_version: 2,
+                scheme: "exact".to_owned(),
+                network: "eip155:84532".to_owned(),
+                asset: "0x036cbd53842c5426634e7929541ec2318f3dcf7e".to_owned(),
+                pay_to: "0xa2acb5d3ac1c35999532624188470ec6228039dc".to_owned(),
+                amount: "1000".to_owned(),
+                payer: "0x11efa374c489d106f9b6ac1b9b73a7a54c237c6d".to_owned(),
+                chain_kind: ChainKind::Eip155,
+                delegate_public_key: None,
+                delegate_nonce: None,
+                delegate_max_block_height: None,
+                authorization_metadata: Some(EvmAuthorizationMetadata {
+                    version: 2,
+                    valid_after: "0".to_owned(),
+                    valid_before: "9999999999".to_owned(),
+                }),
+                signer_address: Some(TEST_RELAYER.to_owned()),
+                policy_snapshot: json!({"test": "durable-recovery-reservation"}),
+                reservation_yocto_near: "1000".to_owned(),
+                global_daily_budget_yocto_near: "1000000".to_owned(),
+                client_daily_budget_yocto_near: "100000".to_owned(),
+            })
+            .await?;
+        assert!(matches!(claim, ClaimOutcome::New(_)));
+        context
+            .state
+            .store
+            .mark_prepared_evm(&EvmPreparedJournalEntry {
+                settlement_id,
+                signer_account_nonce: "1".to_owned(),
+                submitted_tx_rlp: vec![0x02, 0x01],
+                submitted_tx_hash: "0xdurable".to_owned(),
+                required_confirmations: 2,
+            })
+            .await?;
+        let record = settlement_record(&context.state, settlement_id).await?;
+        assert_eq!(record.state, SettlementState::Prepared);
+        assert_eq!(record.reserved_yocto_near, "1000");
+
+        // A restart with the lower current reservation would admit a new
+        // settlement at this balance, but recovery must honor the larger amount
+        // already reserved by this durable row.
+        assert!(signer_is_funded(&context.state.config, 500));
+        make_ready(&context.state);
+        assert!(require_evm_recovery_balance(&context.state, &record, 500).is_err());
+        let readiness = context.state.readiness.snapshot();
+        assert!(!readiness.relayer);
+        assert!(!readiness.reconciliation);
+
+        make_ready(&context.state);
+        require_evm_recovery_balance(&context.state, &record, 1_100)?;
+        assert!(context.state.readiness.can_settle());
+
+        let mut overflow = record;
+        overflow.reserved_yocto_near = u128::MAX.to_string();
+        make_ready(&context.state);
+        assert!(require_evm_recovery_balance(&context.state, &overflow, u128::MAX).is_err());
+        let readiness = context.state.readiness.snapshot();
+        assert!(!readiness.relayer);
+        assert!(!readiness.reconciliation);
+        Ok::<(), Box<dyn Error + Send + Sync>>(())
+    }
+    .await;
+    database.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn base_fee_overrun_quarantine_failure_leaves_submission_nonterminal() -> TestResult {
+    let Some(database) =
+        TestDatabase::from_explicit_environment("base_overrun_quarantine_order").await?
+    else {
+        return Ok(());
+    };
+    let result = async {
+        let context = build_context(&database).await?;
+        let settlement_id = Uuid::new_v4();
+        let claim = context
+            .state
+            .store
+            .claim_settlement(&NewSettlement {
+                id: settlement_id,
+                api_client_id: context.client_id,
+                payment_identifier: Some("base_overrun_quarantine_order_01".to_owned()),
+                payment_hash: [0x81; 32],
+                request_fingerprint: [0x82; 32],
+                anchor_scope: concat!(
+                    "eip155:84532:",
+                    "0x036cbd53842c5426634e7929541ec2318f3dcf7e:",
+                    "0x11efa374c489d106f9b6ac1b9b73a7a54c237c6d"
+                )
+                .to_owned(),
+                anchor_value: [0x83; 32],
+                x402_version: 2,
+                scheme: "exact".to_owned(),
+                network: "eip155:84532".to_owned(),
+                asset: "0x036cbd53842c5426634e7929541ec2318f3dcf7e".to_owned(),
+                pay_to: "0xa2acb5d3ac1c35999532624188470ec6228039dc".to_owned(),
+                amount: "1000".to_owned(),
+                payer: "0x11efa374c489d106f9b6ac1b9b73a7a54c237c6d".to_owned(),
+                chain_kind: ChainKind::Eip155,
+                delegate_public_key: None,
+                delegate_nonce: None,
+                delegate_max_block_height: None,
+                authorization_metadata: Some(EvmAuthorizationMetadata {
+                    version: 2,
+                    valid_after: "0".to_owned(),
+                    valid_before: "9999999999".to_owned(),
+                }),
+                signer_address: Some(TEST_RELAYER.to_owned()),
+                policy_snapshot: json!({"test": "base-overrun-order"}),
+                reservation_yocto_near: "100".to_owned(),
+                global_daily_budget_yocto_near: "1000000".to_owned(),
+                client_daily_budget_yocto_near: "100000".to_owned(),
+            })
+            .await?;
+        assert!(matches!(claim, ClaimOutcome::New(_)));
+        context
+            .state
+            .store
+            .mark_prepared_evm(&EvmPreparedJournalEntry {
+                settlement_id,
+                signer_account_nonce: "1".to_owned(),
+                submitted_tx_rlp: vec![0x02, 0x01],
+                submitted_tx_hash: "0xoverrun".to_owned(),
+                required_confirmations: 2,
+            })
+            .await?;
+        context.state.store.mark_submitted(settlement_id).await?;
+        sqlx::raw_sql(
+            "CREATE FUNCTION reject_test_quarantine() RETURNS trigger LANGUAGE plpgsql AS $$ \
+                 BEGIN \
+                     IF NEW.status = 'quarantined' THEN \
+                         RAISE EXCEPTION 'injected quarantine failure'; \
+                     END IF; \
+                     RETURN NEW; \
+                 END \
+             $$; \
+             CREATE TRIGGER reject_test_quarantine \
+             BEFORE INSERT OR UPDATE ON relayers \
+             FOR EACH ROW EXECUTE FUNCTION reject_test_quarantine();",
+        )
+        .execute(&database.pool)
+        .await?;
+        make_ready(&context.state);
+        let record = settlement_record(&context.state, settlement_id).await?;
+
+        let result = finalize_reconciled_terminal(
+            &context.state,
+            &record,
+            TerminalOutcome {
+                success: true,
+                tx_hash: "0xoverrun".to_owned(),
+                recipient_delta_atomic: Some(1000),
+                fee_atomic: 101,
+                gas_units: 1,
+                failure_detail: None,
+                mined_block_number: Some(100),
+                mined_block_hash: Some("0xblock".to_owned()),
+                confirmations: Some(2),
+            },
+        )
+        .await;
+        assert!(result.is_err());
+
+        let retained = settlement_record(&context.state, settlement_id).await?;
+        assert_eq!(retained.state, SettlementState::Submitted);
+        assert!(retained.terminal_response_bytes.is_none());
+        assert_eq!(retained.reserved_yocto_near, "100");
+        let usage = context.state.store.global_sponsorship_usage_today().await?;
+        assert_eq!(usage.reserved_yocto_near, "100");
+        assert!(!context.state.readiness.snapshot().relayer);
+        assert!(!context.state.readiness.snapshot().reconciliation);
         Ok::<(), Box<dyn Error + Send + Sync>>(())
     }
     .await;

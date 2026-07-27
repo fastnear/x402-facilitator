@@ -74,6 +74,10 @@ pub async fn build_chain_provider(
                 config.primary_rpc_url.clone(),
                 config.backup_rpc_url.clone(),
             ];
+            let max_fee_per_gas = eip155
+                .max_fee_per_gas_wei
+                .parse::<u128>()
+                .context("parse validated EVM max fee per gas")?;
             let provider = EvmChainProvider::connect_from_config(
                 eip155.chain_id,
                 &rpc_urls,
@@ -81,6 +85,7 @@ pub async fn build_chain_provider(
                 &config.asset,
                 eip155.required_confirmations,
                 eip155.gas_limit,
+                max_fee_per_gas,
             )
             .await
             .context("connect EVM settlement provider")?;
@@ -89,9 +94,7 @@ pub async fn build_chain_provider(
             // would fail readiness silently, so fail fast instead.
             let signer_address = provider.signer_address().to_string();
             ensure!(
-                config
-                    .relayer_account_id
-                    .eq_ignore_ascii_case(&signer_address),
+                signer_identity_matches(&config.relayer_account_id, &signer_address),
                 "config relayer_account_id {} does not match the EVM signer address {} \
                  derived from the key file",
                 config.relayer_account_id,
@@ -115,4 +118,25 @@ fn build_facilitator(provider: NearChainProvider) -> FacilitatorLocal<SchemeRegi
         config: None,
     }];
     FacilitatorLocal::new(SchemeRegistry::build(chains, blueprints, &schemes))
+}
+
+fn signer_identity_matches(configured: &str, derived: &str) -> bool {
+    configured.eq_ignore_ascii_case(derived)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::signer_identity_matches;
+
+    #[test]
+    fn evm_signer_identity_accepts_checksum_case_only() {
+        assert!(signer_identity_matches(
+            "0x51F2DbE5C2e1F3F0D9A5B6c7E8F9A0B1c2D3e4F5",
+            "0x51f2dbe5c2e1f3f0d9a5b6c7e8f9a0b1c2d3e4f5",
+        ));
+        assert!(!signer_identity_matches(
+            "0x51f2dbe5c2e1f3f0d9a5b6c7e8f9a0b1c2d3e4f5",
+            "0x61f2dbe5c2e1f3f0d9a5b6c7e8f9a0b1c2d3e4f5",
+        ));
+    }
 }

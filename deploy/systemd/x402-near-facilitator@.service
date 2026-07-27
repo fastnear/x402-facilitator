@@ -1,5 +1,5 @@
 [Unit]
-Description=FastNEAR x402 facilitator for NEAR (%i)
+Description=FastNEAR x402 facilitator for NEAR and Base (%i)
 Documentation=https://github.com/fastnear/x402-near-facilitator
 Wants=network-online.target
 After=network-online.target

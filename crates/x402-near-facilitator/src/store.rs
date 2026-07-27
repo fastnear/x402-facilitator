@@ -1,13 +1,17 @@
 use std::time::Duration;
-use std::{borrow::Cow, str::FromStr};
+use std::{borrow::Cow, fmt, str::FromStr};
 
 use chrono::{DateTime, NaiveDate, Utc};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgRow};
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
 use crate::config::ChainKind;
+
+const AUTHORIZATION_SCRUB_PENDING: &str = "x402-maintenance:0003-authorization-scrub:pending";
+const AUTHORIZATION_SCRUB_COMPLETE: &str = "x402-maintenance:0003-authorization-scrub:complete";
 
 fn embedded_migrator() -> sqlx::migrate::Migrator {
     let initial = sqlx::migrate::Migration::new(
@@ -24,8 +28,15 @@ fn embedded_migrator() -> sqlx::migrate::Migrator {
         Cow::Borrowed(include_str!("../../../migrations/0002_multichain.sql")),
         false,
     );
+    let retry_anchors = sqlx::migrate::Migration::new(
+        3,
+        Cow::Borrowed("durable retry and settlement anchors"),
+        sqlx::migrate::MigrationType::Simple,
+        Cow::Borrowed(include_str!("../../../migrations/0003_retry_anchors.sql")),
+        false,
+    );
     sqlx::migrate::Migrator {
-        migrations: Cow::Owned(vec![initial, multichain]),
+        migrations: Cow::Owned(vec![initial, multichain, retry_anchors]),
         ..sqlx::migrate::Migrator::DEFAULT
     }
 }
@@ -55,6 +66,7 @@ pub struct ApiKeyCandidate {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SettlementState {
     Reserved,
+    AwaitingRetry,
     Prepared,
     Submitted,
     Succeeded,
@@ -65,6 +77,7 @@ impl SettlementState {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Reserved => "reserved",
+            Self::AwaitingRetry => "awaiting_retry",
             Self::Prepared => "prepared",
             Self::Submitted => "submitted",
             Self::Succeeded => "succeeded",
@@ -83,6 +96,7 @@ impl FromStr for SettlementState {
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
             "reserved" => Ok(Self::Reserved),
+            "awaiting_retry" => Ok(Self::AwaitingRetry),
             "prepared" => Ok(Self::Prepared),
             "submitted" => Ok(Self::Submitted),
             "succeeded" => Ok(Self::Succeeded),
@@ -94,19 +108,57 @@ impl FromStr for SettlementState {
     }
 }
 
-#[derive(Clone, Debug)]
+/// Non-sensitive ERC-3009 audit data retained after the full signed
+/// authorization is scrubbed from the journal.
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct EvmAuthorizationMetadata {
+    /// Canonical internal x402 wire version (always v2).
+    pub version: u8,
+    /// Inclusive ERC-3009 lower time bound as an exact decimal integer.
+    pub valid_after: String,
+    /// Exclusive ERC-3009 upper time bound as an exact decimal integer.
+    pub valid_before: String,
+}
+
+impl fmt::Debug for EvmAuthorizationMetadata {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EvmAuthorizationMetadata")
+            .field("version", &self.version)
+            .field("validity_window", &"<redacted>")
+            .finish_non_exhaustive()
+    }
+}
+
+impl EvmAuthorizationMetadata {
+    fn to_json(&self) -> Value {
+        serde_json::json!({
+            "version": self.version,
+            "validAfter": self.valid_after,
+            "validBefore": self.valid_before,
+        })
+    }
+}
+
+#[derive(Clone)]
 pub struct SettlementRecord {
     pub id: Uuid,
     pub api_client_id: Uuid,
     pub payment_identifier: Option<String>,
     pub payment_hash: [u8; 32],
     pub request_fingerprint: [u8; 32],
+    pub anchor_scope: String,
+    pub anchor_value: [u8; 32],
     pub state: SettlementState,
+    pub chain_kind: ChainKind,
     pub network: String,
     pub asset: String,
     pub pay_to: String,
     pub amount: String,
     pub payer: String,
+    pub authorization_metadata: Option<EvmAuthorizationMetadata>,
+    pub policy_snapshot: Value,
     pub delegate_public_key: String,
     pub delegate_nonce: String,
     pub delegate_max_block_height: String,
@@ -122,11 +174,30 @@ pub struct SettlementRecord {
     // per instance means every row shares the instance's chain, so the provider
     // kind — not this per-row set — selects the reconcile path.
     pub signer_address: Option<String>,
+    pub signer_account_nonce: Option<String>,
     pub submitted_tx_rlp: Option<Vec<u8>>,
     pub submitted_tx_hash: Option<String>,
+    pub confirmations: Option<i32>,
+    pub required_confirmations: Option<i32>,
+    pub attempt_count: u32,
+    pub retry_code: Option<String>,
     pub terminal_http_status: Option<u16>,
     pub terminal_response_bytes: Option<Vec<u8>>,
     pub created_at: DateTime<Utc>,
+}
+
+impl fmt::Debug for SettlementRecord {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SettlementRecord")
+            .field("state", &self.state)
+            .field("chain_kind", &self.chain_kind)
+            .field("network", &self.network)
+            .field("payment", &"<redacted>")
+            .field("submission", &"<redacted>")
+            .field("attempt_count", &self.attempt_count)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -143,13 +214,17 @@ pub struct SponsorshipUsage {
     pub spent_yocto_near: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct NewSettlement {
     pub id: Uuid,
     pub api_client_id: Uuid,
     pub payment_identifier: Option<String>,
     pub payment_hash: [u8; 32],
     pub request_fingerprint: [u8; 32],
+    /// Domain for the chain-enforced replay anchor.
+    pub anchor_scope: String,
+    /// Exact 32-byte NEAR delegate hash or ERC-3009 authorization nonce.
+    pub anchor_value: [u8; 32],
     pub x402_version: u8,
     pub scheme: String,
     pub network: String,
@@ -164,10 +239,9 @@ pub struct NewSettlement {
     pub delegate_public_key: Option<String>,
     pub delegate_nonce: Option<String>,
     pub delegate_max_block_height: Option<String>,
-    // EVM authorization identity: `Some` for EVM, `None` for NEAR. The CHECK
-    // requires both for an eip155 row; the signed RLP is journaled later at
-    // prepare (`mark_prepared_evm`).
-    pub evm_authorization: Option<Value>,
+    // Only the non-sensitive EVM authorization validity window remains in the
+    // journal. The signed RLP is persisted later at prepare.
+    pub authorization_metadata: Option<EvmAuthorizationMetadata>,
     pub signer_address: Option<String>,
     pub policy_snapshot: Value,
     pub reservation_yocto_near: String,
@@ -175,7 +249,31 @@ pub struct NewSettlement {
     pub client_daily_budget_yocto_near: String,
 }
 
+impl fmt::Debug for NewSettlement {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NewSettlement")
+            .field("chain_kind", &self.chain_kind)
+            .field("network", &self.network)
+            .field("x402_version", &self.x402_version)
+            .field("payment", &"<redacted>")
+            .field("authorization", &"<redacted>")
+            .field("policy", &"<redacted>")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Current policy and budget inputs used to reacquire a dormant settlement.
 #[derive(Clone, Debug)]
+pub struct RetryReservation {
+    pub settlement_id: Uuid,
+    pub policy_snapshot: Value,
+    pub reservation_yocto_near: String,
+    pub global_daily_budget_yocto_near: String,
+    pub client_daily_budget_yocto_near: String,
+}
+
+#[derive(Clone)]
 pub struct PreparedJournalEntry {
     pub settlement_id: Uuid,
     pub relayer_account_id: String,
@@ -185,11 +283,22 @@ pub struct PreparedJournalEntry {
     pub transaction_hash: String,
 }
 
+impl fmt::Debug for PreparedJournalEntry {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PreparedJournalEntry")
+            .field("settlement", &"<redacted>")
+            .field("relayer", &"<redacted>")
+            .field("submission", &"<redacted>")
+            .finish_non_exhaustive()
+    }
+}
+
 /// The durable EVM submission journal written at prepare: the signed ERC-3009
 /// transaction (RLP + hash), the account nonce it burns, and the confirmation
-/// depth it must reach to be terminal. `signer_address` and `evm_authorization`
+/// depth it must reach to be terminal. `signer_address` and authorization metadata
 /// were written at reservation; this completes the eip155 non-terminal CHECK.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct EvmPreparedJournalEntry {
     pub settlement_id: Uuid,
     pub signer_account_nonce: String,
@@ -198,7 +307,18 @@ pub struct EvmPreparedJournalEntry {
     pub required_confirmations: i32,
 }
 
-#[derive(Clone, Debug)]
+impl fmt::Debug for EvmPreparedJournalEntry {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EvmPreparedJournalEntry")
+            .field("settlement", &"<redacted>")
+            .field("submission", &"<redacted>")
+            .field("required_confirmations", &self.required_confirmations)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone)]
 pub struct TerminalJournalEntry {
     pub settlement_id: Uuid,
     pub state: SettlementState,
@@ -217,12 +337,32 @@ pub struct TerminalJournalEntry {
     pub confirmations: Option<i32>,
 }
 
+impl fmt::Debug for TerminalJournalEntry {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TerminalJournalEntry")
+            .field("state", &self.state)
+            .field("http_status", &self.http_status)
+            .field("result", &"<redacted>")
+            .field("confirmations", &self.confirmations)
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum ClaimOutcome {
     New(SettlementRecord),
     Existing(SettlementRecord),
     IdentifierConflict,
     DuplicateSettlement,
+    SettlementBusy,
+    BudgetExceeded,
+}
+
+#[derive(Clone, Debug)]
+pub enum RetryOutcome {
+    Resumed(Box<SettlementRecord>),
+    SettlementBusy,
     BudgetExceeded,
 }
 
@@ -236,6 +376,8 @@ pub enum StoreError {
     Corrupt(String),
     #[error("invalid database configuration: {0}")]
     Configuration(String),
+    #[error("invalid journal input: {0}")]
+    InvalidInput(String),
     #[error("invalid state transition from {from} to {to}")]
     Transition { from: String, to: String },
 }
@@ -284,7 +426,8 @@ impl PgStore {
         embedded_migrator()
             .run(&self.pool)
             .await
-            .map_err(StoreError::Migration)
+            .map_err(StoreError::Migration)?;
+        self.complete_authorization_scrub().await
     }
 
     pub async fn ping(&self) -> Result<(), StoreError> {
@@ -305,7 +448,49 @@ impl PgStore {
                 return Ok(false);
             }
         }
-        Ok(true)
+        Ok(self.authorization_scrub_marker().await?.as_deref()
+            == Some(AUTHORIZATION_SCRUB_COMPLETE))
+    }
+
+    async fn authorization_scrub_marker(&self) -> Result<Option<String>, StoreError> {
+        sqlx::query_scalar("SELECT obj_description('settlements'::regclass, 'pg_class')")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(StoreError::Database)
+    }
+
+    async fn complete_authorization_scrub(&self) -> Result<(), StoreError> {
+        match self.authorization_scrub_marker().await?.as_deref() {
+            Some(AUTHORIZATION_SCRUB_COMPLETE) => return Ok(()),
+            Some(AUTHORIZATION_SCRUB_PENDING) => {}
+            _ => {
+                return Err(StoreError::Corrupt(
+                    "authorization-scrub maintenance marker is missing or invalid".to_owned(),
+                ));
+            }
+        }
+
+        // VACUUM cannot run in a transaction. Use one dedicated pooled
+        // connection with no statement timeout, close it afterward so the
+        // service's normal timeout is restored on the replacement connection,
+        // and only then mark the rewrite complete. A crash before the comment
+        // update safely repeats the rewrite on the next admin invocation.
+        let mut connection = self.pool.acquire().await?;
+        sqlx::query("SET statement_timeout = 0")
+            .execute(&mut *connection)
+            .await?;
+        let rewrite = sqlx::query("VACUUM (FULL, ANALYZE) settlements")
+            .execute(&mut *connection)
+            .await;
+        connection.close().await?;
+        rewrite?;
+        sqlx::query(
+            "COMMENT ON TABLE settlements IS \
+             'x402-maintenance:0003-authorization-scrub:complete'",
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     pub async fn active_clients_have_payee_policy(
@@ -313,7 +498,23 @@ impl PgStore {
         network: &str,
         asset: &str,
     ) -> Result<bool, StoreError> {
-        sqlx::query_scalar(
+        let query = if is_eip155_network(network) {
+            "SELECT \
+                EXISTS ( \
+                    SELECT 1 FROM api_clients c \
+                    WHERE c.status = 'active' \
+                ) \
+                AND NOT EXISTS ( \
+                    SELECT 1 FROM api_clients c \
+                    WHERE c.status = 'active' \
+                      AND NOT EXISTS ( \
+                        SELECT 1 FROM api_client_payees p \
+                        WHERE p.client_id = c.id \
+                          AND p.network = $1 \
+                          AND lower(p.asset) = lower($2) \
+                      ) \
+                )"
+        } else {
             "SELECT \
                 EXISTS ( \
                     SELECT 1 FROM api_clients c \
@@ -328,13 +529,14 @@ impl PgStore {
                           AND p.network = $1 \
                           AND p.asset = $2 \
                       ) \
-                )",
-        )
-        .bind(network)
-        .bind(asset)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(StoreError::Database)
+                )"
+        };
+        sqlx::query_scalar(query)
+            .bind(network)
+            .bind(asset)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(StoreError::Database)
     }
 
     pub async fn operationally_ready(
@@ -387,23 +589,40 @@ impl PgStore {
         asset: &str,
         pay_to: &str,
     ) -> Result<bool, StoreError> {
-        let allowed: bool = sqlx::query_scalar(
+        let query = if is_eip155_network(network) {
+            "SELECT EXISTS( \
+                SELECT 1 FROM api_client_payees \
+                WHERE client_id = $1 AND network = $2 \
+                  AND lower(asset) = lower($3) AND lower(pay_to) = lower($4) \
+             )"
+        } else {
             "SELECT EXISTS( \
                 SELECT 1 FROM api_client_payees \
                 WHERE client_id = $1 AND network = $2 AND asset = $3 AND pay_to = $4 \
-             )",
-        )
-        .bind(client_id)
-        .bind(network)
-        .bind(asset)
-        .bind(pay_to)
-        .fetch_one(&self.pool)
-        .await?;
+             )"
+        };
+        let allowed: bool = sqlx::query_scalar(query)
+            .bind(client_id)
+            .bind(network)
+            .bind(asset)
+            .bind(pay_to)
+            .fetch_one(&self.pool)
+            .await?;
         Ok(allowed)
     }
 
     #[allow(clippy::too_many_lines)]
     pub async fn claim_settlement(&self, new: &NewSettlement) -> Result<ClaimOutcome, StoreError> {
+        if new.chain_kind == ChainKind::Eip155
+            && new
+                .authorization_metadata
+                .as_ref()
+                .is_none_or(|metadata| metadata.version != 2)
+        {
+            return Err(StoreError::InvalidInput(
+                "EVM authorization metadata must use canonical x402 version 2".to_owned(),
+            ));
+        }
         if let Some(existing) = self
             .find_existing_settlement(
                 new.api_client_id,
@@ -415,9 +634,125 @@ impl PgStore {
         {
             return Ok(existing);
         }
+        if self
+            .anchor_is_claimed(&new.anchor_scope, &new.anchor_value)
+            .await?
+        {
+            if let Some(existing) = self
+                .find_existing_settlement(
+                    new.api_client_id,
+                    new.payment_identifier.as_deref(),
+                    &new.payment_hash,
+                    &new.request_fingerprint,
+                )
+                .await?
+            {
+                return Ok(existing);
+            }
+            return Ok(ClaimOutcome::DuplicateSettlement);
+        }
+        if self
+            .active_evm_signer_exists(new.chain_kind, &new.network, new.signer_address.as_deref())
+            .await?
+        {
+            if let Some(existing) = self
+                .find_existing_settlement(
+                    new.api_client_id,
+                    new.payment_identifier.as_deref(),
+                    &new.payment_hash,
+                    &new.request_fingerprint,
+                )
+                .await?
+            {
+                return Ok(existing);
+            }
+            return Ok(ClaimOutcome::SettlementBusy);
+        }
 
         let usage_date = Utc::now().date_naive();
+        let authorization_metadata = new
+            .authorization_metadata
+            .as_ref()
+            .map(EvmAuthorizationMetadata::to_json);
         let mut transaction = self.pool.begin().await?;
+        // Insert first so an EVM claim acquires the partial-unique signer slot
+        // before locking sponsorship ledgers. Dormant retries use the same
+        // signer-slot→budget order; any later denial rolls this row back.
+        let inserted = sqlx::query(
+            "INSERT INTO settlements ( \
+                id, api_client_id, payment_identifier, payment_hash, request_fingerprint, \
+                state, x402_version, scheme, network, asset, pay_to, amount, payer, \
+                chain_kind, anchor_scope, anchor_value, \
+                delegate_public_key, delegate_nonce, delegate_max_block_height, \
+                authorization_metadata, signer_address, \
+                policy_snapshot, reservation_date, reserved_yocto_near \
+             ) VALUES ( \
+                $1, $2, $3, $4, $5, 'reserved', $6, $7, $8, $9, $10, $11::numeric, $12, \
+                $13, $14, $15, $16, $17::numeric, $18::numeric, $19, $20, \
+                $21, $22, $23::numeric \
+             ) \
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(new.id)
+        .bind(new.api_client_id)
+        .bind(&new.payment_identifier)
+        .bind(new.payment_hash.as_slice())
+        .bind(new.request_fingerprint.as_slice())
+        .bind(i16::from(new.x402_version))
+        .bind(&new.scheme)
+        .bind(&new.network)
+        .bind(&new.asset)
+        .bind(&new.pay_to)
+        .bind(&new.amount)
+        .bind(&new.payer)
+        .bind(new.chain_kind.as_str())
+        .bind(&new.anchor_scope)
+        .bind(new.anchor_value.as_slice())
+        .bind(&new.delegate_public_key)
+        .bind(&new.delegate_nonce)
+        .bind(&new.delegate_max_block_height)
+        .bind(&authorization_metadata)
+        .bind(&new.signer_address)
+        .bind(&new.policy_snapshot)
+        .bind(usage_date)
+        .bind(&new.reservation_yocto_near)
+        .execute(&mut *transaction)
+        .await?;
+
+        if inserted.rows_affected() == 0 {
+            transaction.rollback().await?;
+            if let Some(existing) = self
+                .find_existing_settlement(
+                    new.api_client_id,
+                    new.payment_identifier.as_deref(),
+                    &new.payment_hash,
+                    &new.request_fingerprint,
+                )
+                .await?
+            {
+                return Ok(existing);
+            }
+            if self
+                .anchor_is_claimed(&new.anchor_scope, &new.anchor_value)
+                .await?
+            {
+                return Ok(ClaimOutcome::DuplicateSettlement);
+            }
+            if self
+                .active_evm_signer_exists(
+                    new.chain_kind,
+                    &new.network,
+                    new.signer_address.as_deref(),
+                )
+                .await?
+            {
+                return Ok(ClaimOutcome::SettlementBusy);
+            }
+            return Err(StoreError::Corrupt(
+                "settlement insert conflicted but conflicting row was not visible".to_owned(),
+            ));
+        }
+
         if !reserve_global_budget(
             &mut transaction,
             usage_date,
@@ -440,62 +775,6 @@ impl PgStore {
         {
             transaction.rollback().await?;
             return Ok(ClaimOutcome::BudgetExceeded);
-        }
-
-        let inserted = sqlx::query(
-            "INSERT INTO settlements ( \
-                id, api_client_id, payment_identifier, payment_hash, request_fingerprint, \
-                state, x402_version, scheme, network, asset, pay_to, amount, payer, \
-                chain_kind, delegate_public_key, delegate_nonce, delegate_max_block_height, \
-                evm_authorization, signer_address, \
-                policy_snapshot, reservation_date, reserved_yocto_near \
-             ) VALUES ( \
-                $1, $2, $3, $4, $5, 'reserved', $6, $7, $8, $9, $10, $11::numeric, $12, \
-                $13, $14, $15::numeric, $16::numeric, $17, $18, \
-                $19, $20, $21::numeric \
-             ) \
-             ON CONFLICT DO NOTHING",
-        )
-        .bind(new.id)
-        .bind(new.api_client_id)
-        .bind(&new.payment_identifier)
-        .bind(new.payment_hash.as_slice())
-        .bind(new.request_fingerprint.as_slice())
-        .bind(i16::from(new.x402_version))
-        .bind(&new.scheme)
-        .bind(&new.network)
-        .bind(&new.asset)
-        .bind(&new.pay_to)
-        .bind(&new.amount)
-        .bind(&new.payer)
-        .bind(new.chain_kind.as_str())
-        .bind(&new.delegate_public_key)
-        .bind(&new.delegate_nonce)
-        .bind(&new.delegate_max_block_height)
-        .bind(&new.evm_authorization)
-        .bind(&new.signer_address)
-        .bind(&new.policy_snapshot)
-        .bind(usage_date)
-        .bind(&new.reservation_yocto_near)
-        .execute(&mut *transaction)
-        .await?;
-
-        if inserted.rows_affected() == 0 {
-            transaction.rollback().await?;
-            return self
-                .find_existing_settlement(
-                    new.api_client_id,
-                    new.payment_identifier.as_deref(),
-                    &new.payment_hash,
-                    &new.request_fingerprint,
-                )
-                .await?
-                .ok_or_else(|| {
-                    StoreError::Corrupt(
-                        "settlement insert conflicted but conflicting row was not visible"
-                            .to_owned(),
-                    )
-                });
         }
 
         insert_event(
@@ -574,6 +853,222 @@ impl PgStore {
         })
     }
 
+    /// Relinquish a pre-broadcast settlement claim and its sponsorship budget.
+    ///
+    /// The state change and both budget-ledger updates commit atomically. The
+    /// row keeps its payment anchor for exactly-once replay protection, but no
+    /// longer owns an EVM signer slot and is excluded from startup recovery.
+    pub async fn mark_awaiting_retry(&self, id: Uuid, retry_code: &str) -> Result<(), StoreError> {
+        if retry_code.is_empty() {
+            return Err(StoreError::InvalidInput(
+                "retry code must not be empty".to_owned(),
+            ));
+        }
+        let mut transaction = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT state, reservation_date, api_client_id, \
+                    reserved_yocto_near::text AS reserved \
+             FROM settlements WHERE id = $1 FOR UPDATE",
+        )
+        .bind(id)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or_else(|| StoreError::Corrupt("retry settlement not found".to_owned()))?;
+        let from: String = row.try_get("state")?;
+        let from_state = SettlementState::from_str(&from)?;
+        if from_state != SettlementState::Reserved {
+            transaction.rollback().await?;
+            return Err(StoreError::Transition {
+                from,
+                to: SettlementState::AwaitingRetry.as_str().to_owned(),
+            });
+        }
+        let usage_date: NaiveDate = row.try_get("reservation_date")?;
+        let client_id: Uuid = row.try_get("api_client_id")?;
+        let reserved: String = row.try_get("reserved")?;
+        release_budget(&mut transaction, usage_date, client_id, &reserved, "0").await?;
+
+        let result = sqlx::query(
+            "UPDATE settlements SET \
+                state = 'awaiting_retry', reserved_yocto_near = 0, retry_code = $2, \
+                updated_at = now() \
+             WHERE id = $1 AND state = 'reserved'",
+        )
+        .bind(id)
+        .bind(retry_code)
+        .execute(&mut *transaction)
+        .await?;
+        if result.rows_affected() != 1 {
+            return Err(StoreError::Transition {
+                from,
+                to: SettlementState::AwaitingRetry.as_str().to_owned(),
+            });
+        }
+        insert_event(
+            &mut transaction,
+            id,
+            Some(SettlementState::Reserved),
+            SettlementState::AwaitingRetry,
+            Some(retry_code),
+            &serde_json::json!({}),
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    /// Reacquire current sponsorship policy for a dormant retry.
+    ///
+    /// Budget reservation, policy refresh, attempt increment, and state change
+    /// share one transaction. An EVM row can only resume when its configured
+    /// signer is not owned by another active settlement.
+    #[allow(clippy::too_many_lines)]
+    pub async fn resume_awaiting_retry(
+        &self,
+        retry: &RetryReservation,
+    ) -> Result<RetryOutcome, StoreError> {
+        let usage_date = Utc::now().date_naive();
+        let mut transaction = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT state, api_client_id \
+             FROM settlements WHERE id = $1 FOR UPDATE",
+        )
+        .bind(retry.settlement_id)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or_else(|| StoreError::Corrupt("retry settlement not found".to_owned()))?;
+        let from: String = row.try_get("state")?;
+        let from_state = SettlementState::from_str(&from)?;
+        if from_state != SettlementState::AwaitingRetry {
+            transaction.rollback().await?;
+            return Err(StoreError::Transition {
+                from,
+                to: SettlementState::Reserved.as_str().to_owned(),
+            });
+        }
+        let client_id: Uuid = row.try_get("api_client_id")?;
+
+        // Acquire the partial-unique EVM signer slot before locking sponsorship
+        // ledgers. Terminalization/relinquishment locks its settlement row
+        // before those ledgers, so matching that order avoids a row↔budget
+        // deadlock. Any later budget failure rolls this update back.
+        let update = sqlx::query(
+            "UPDATE settlements SET \
+                state = 'reserved', policy_snapshot = $2, reservation_date = $3, \
+                reserved_yocto_near = $4::numeric, attempt_count = attempt_count + 1, \
+                retry_code = NULL, updated_at = now() \
+             WHERE id = $1 AND state = 'awaiting_retry'",
+        )
+        .bind(retry.settlement_id)
+        .bind(&retry.policy_snapshot)
+        .bind(usage_date)
+        .bind(&retry.reservation_yocto_near)
+        .execute(&mut *transaction)
+        .await;
+        let result = match update {
+            Ok(result) => result,
+            Err(error) if constraint_name(&error) == Some("settlements_evm_active_signer_idx") => {
+                transaction.rollback().await?;
+                return Ok(RetryOutcome::SettlementBusy);
+            }
+            Err(error) => {
+                transaction.rollback().await?;
+                return Err(StoreError::Database(error));
+            }
+        };
+        if result.rows_affected() != 1 {
+            return Err(StoreError::Transition {
+                from,
+                to: SettlementState::Reserved.as_str().to_owned(),
+            });
+        }
+
+        if !reserve_global_budget(
+            &mut transaction,
+            usage_date,
+            &retry.reservation_yocto_near,
+            &retry.global_daily_budget_yocto_near,
+        )
+        .await?
+        {
+            transaction.rollback().await?;
+            return Ok(RetryOutcome::BudgetExceeded);
+        }
+        if !reserve_client_budget(
+            &mut transaction,
+            usage_date,
+            client_id,
+            &retry.reservation_yocto_near,
+            &retry.client_daily_budget_yocto_near,
+        )
+        .await?
+        {
+            transaction.rollback().await?;
+            return Ok(RetryOutcome::BudgetExceeded);
+        }
+
+        insert_event(
+            &mut transaction,
+            retry.settlement_id,
+            Some(SettlementState::AwaitingRetry),
+            SettlementState::Reserved,
+            Some("retry_resumed"),
+            &serde_json::json!({}),
+        )
+        .await?;
+        transaction.commit().await?;
+        let record = self
+            .settlement(retry.settlement_id)
+            .await?
+            .ok_or_else(|| StoreError::Corrupt("resumed settlement disappeared".to_owned()))?;
+        Ok(RetryOutcome::Resumed(Box::new(record)))
+    }
+
+    /// Raise an active EVM settlement's terminal confirmation depth.
+    ///
+    /// A lower runtime setting can never weaken the policy already persisted
+    /// with a signed submission.
+    pub async fn raise_required_confirmations(
+        &self,
+        id: Uuid,
+        minimum: i32,
+    ) -> Result<i32, StoreError> {
+        if minimum < 1 {
+            return Err(StoreError::InvalidInput(
+                "required confirmations must be at least 1".to_owned(),
+            ));
+        }
+        let updated: Option<i32> = sqlx::query_scalar(
+            "UPDATE settlements SET \
+                required_confirmations = GREATEST(required_confirmations, $2), \
+                updated_at = now() \
+             WHERE id = $1 AND chain_kind = 'eip155' \
+               AND state IN ('prepared', 'submitted') \
+             RETURNING required_confirmations",
+        )
+        .bind(id)
+        .bind(minimum)
+        .fetch_optional(&self.pool)
+        .await?;
+        if let Some(required) = updated {
+            return Ok(required);
+        }
+        let from: Option<String> =
+            sqlx::query_scalar("SELECT state FROM settlements WHERE id = $1")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await?;
+        match from {
+            Some(from) => Err(StoreError::Transition {
+                from,
+                to: "confirmation_policy_raised".to_owned(),
+            }),
+            None => Err(StoreError::Corrupt(
+                "confirmation settlement not found".to_owned(),
+            )),
+        }
+    }
+
     pub async fn mark_prepared(&self, entry: &PreparedJournalEntry) -> Result<(), StoreError> {
         let mut transaction = self.pool.begin().await?;
         let result = sqlx::query(
@@ -614,7 +1109,7 @@ impl PgStore {
     /// Journal the durable EVM submission at prepare: the signed ERC-3009
     /// transaction (RLP + hash), the account nonce it burns, and the confirmation
     /// depth it must reach to be terminal. `signer_address` and
-    /// `evm_authorization` were written at reservation; together these satisfy the
+    /// authorization metadata were written at reservation; together these satisfy the
     /// eip155 non-terminal CHECK. This never touches the NEAR relayer /
     /// outer-transaction columns, and shares `mark_prepared`'s reserved→prepared
     /// transition guard and lifecycle event.
@@ -622,6 +1117,11 @@ impl PgStore {
         &self,
         entry: &EvmPreparedJournalEntry,
     ) -> Result<(), StoreError> {
+        if entry.required_confirmations < 1 {
+            return Err(StoreError::InvalidInput(
+                "required confirmations must be at least 1".to_owned(),
+            ));
+        }
         let mut transaction = self.pool.begin().await?;
         let result = sqlx::query(
             "UPDATE settlements SET \
@@ -971,6 +1471,11 @@ impl PgStore {
         asset: &str,
         pay_to: &str,
     ) -> Result<(), StoreError> {
+        let (asset, pay_to) = if is_eip155_network(network) {
+            (asset.to_ascii_lowercase(), pay_to.to_ascii_lowercase())
+        } else {
+            (asset.to_owned(), pay_to.to_owned())
+        };
         sqlx::query(
             "INSERT INTO api_client_payees (client_id, network, asset, pay_to) \
              VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
@@ -1040,15 +1545,67 @@ impl PgStore {
             return Ok(None);
         }
         let sql = format!("{SETTLEMENT_SELECT_BASE} WHERE payment_hash = $1");
-        if sqlx::query(&sql)
+        if let Some(row) = sqlx::query(&sql)
             .bind(payment_hash.as_slice())
             .fetch_optional(&self.pool)
             .await?
-            .is_some()
         {
-            return Ok(Some(ClaimOutcome::DuplicateSettlement));
+            let existing = settlement_from_row(&row)?;
+            return if existing.api_client_id == api_client_id
+                && existing.request_fingerprint == *request_fingerprint
+            {
+                Ok(Some(ClaimOutcome::Existing(existing)))
+            } else {
+                Ok(Some(ClaimOutcome::DuplicateSettlement))
+            };
         }
         Ok(None)
+    }
+
+    async fn anchor_is_claimed(
+        &self,
+        anchor_scope: &str,
+        anchor_value: &[u8; 32],
+    ) -> Result<bool, StoreError> {
+        sqlx::query_scalar(
+            "SELECT EXISTS( \
+                SELECT 1 FROM settlements \
+                WHERE anchor_scope = $1 AND anchor_value = $2 \
+             )",
+        )
+        .bind(anchor_scope)
+        .bind(anchor_value.as_slice())
+        .fetch_one(&self.pool)
+        .await
+        .map_err(StoreError::Database)
+    }
+
+    async fn active_evm_signer_exists(
+        &self,
+        chain_kind: ChainKind,
+        network: &str,
+        signer_address: Option<&str>,
+    ) -> Result<bool, StoreError> {
+        if chain_kind != ChainKind::Eip155 {
+            return Ok(false);
+        }
+        let Some(signer_address) = signer_address else {
+            return Ok(false);
+        };
+        sqlx::query_scalar(
+            "SELECT EXISTS( \
+                SELECT 1 FROM settlements \
+                WHERE chain_kind = 'eip155' \
+                  AND state IN ('reserved', 'prepared', 'submitted') \
+                  AND network = $1 \
+                  AND lower(signer_address) = lower($2::text) \
+             )",
+        )
+        .bind(network)
+        .bind(signer_address)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(StoreError::Database)
     }
 }
 
@@ -1058,26 +1615,34 @@ impl PgStore {
 // dedicated EVM submission columns (signer_address / submitted_tx_*) follow the
 // NEAR outer-transaction columns and are NULL on NEAR rows.
 const SETTLEMENT_SELECT_BASE: &str = "SELECT \
-    id, api_client_id, payment_identifier, payment_hash, request_fingerprint, state, \
-    network, asset, pay_to, amount::text AS amount, payer, \
+    id, api_client_id, payment_identifier, payment_hash, request_fingerprint, \
+    anchor_scope, anchor_value, state, chain_kind, \
+    network, asset, pay_to, amount::text AS amount, payer, authorization_metadata, \
+    policy_snapshot, \
     COALESCE(delegate_public_key, '') AS delegate_public_key, \
     COALESCE(delegate_nonce::text, '') AS delegate_nonce, \
     COALESCE(delegate_max_block_height::text, '') AS delegate_max_block_height, \
     reservation_date, reserved_yocto_near::text AS reserved_yocto_near, relayer_account_id, \
     relayer_public_key, relayer_nonce::text AS relayer_nonce, outer_transaction_bytes, \
-    outer_transaction_hash, signer_address, submitted_tx_rlp, submitted_tx_hash, \
+    outer_transaction_hash, signer_address, signer_account_nonce::text AS signer_account_nonce, \
+    submitted_tx_rlp, submitted_tx_hash, confirmations, required_confirmations, \
+    attempt_count, retry_code, \
     terminal_http_status, terminal_response_bytes, created_at \
     FROM settlements";
 
 const SETTLEMENT_SELECT: &str = "SELECT \
-    id, api_client_id, payment_identifier, payment_hash, request_fingerprint, state, \
-    network, asset, pay_to, amount::text AS amount, payer, \
+    id, api_client_id, payment_identifier, payment_hash, request_fingerprint, \
+    anchor_scope, anchor_value, state, chain_kind, \
+    network, asset, pay_to, amount::text AS amount, payer, authorization_metadata, \
+    policy_snapshot, \
     COALESCE(delegate_public_key, '') AS delegate_public_key, \
     COALESCE(delegate_nonce::text, '') AS delegate_nonce, \
     COALESCE(delegate_max_block_height::text, '') AS delegate_max_block_height, \
     reservation_date, reserved_yocto_near::text AS reserved_yocto_near, relayer_account_id, \
     relayer_public_key, relayer_nonce::text AS relayer_nonce, outer_transaction_bytes, \
-    outer_transaction_hash, signer_address, submitted_tx_rlp, submitted_tx_hash, \
+    outer_transaction_hash, signer_address, signer_account_nonce::text AS signer_account_nonce, \
+    submitted_tx_rlp, submitted_tx_hash, confirmations, required_confirmations, \
+    attempt_count, retry_code, \
     terminal_http_status, terminal_response_bytes, created_at \
     FROM settlements WHERE id = $1";
 
@@ -1103,6 +1668,15 @@ fn settlement_from_row(row: &PgRow) -> Result<SettlementRecord, StoreError> {
     let payment_hash = fixed_hash(row.try_get("payment_hash")?, "payment_hash")?;
     let request_fingerprint =
         fixed_hash(row.try_get("request_fingerprint")?, "request_fingerprint")?;
+    let anchor_value = fixed_hash(row.try_get("anchor_value")?, "anchor_value")?;
+    let authorization_metadata: Option<Value> = row.try_get("authorization_metadata")?;
+    let authorization_metadata = authorization_metadata
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|error| {
+            StoreError::Corrupt(format!("authorization_metadata is invalid: {error}"))
+        })?;
+    let attempt_count: i32 = row.try_get("attempt_count")?;
     let terminal_http_status: Option<i16> = row.try_get("terminal_http_status")?;
     Ok(SettlementRecord {
         id: row.try_get("id")?,
@@ -1110,12 +1684,17 @@ fn settlement_from_row(row: &PgRow) -> Result<SettlementRecord, StoreError> {
         payment_identifier: row.try_get("payment_identifier")?,
         payment_hash,
         request_fingerprint,
+        anchor_scope: row.try_get("anchor_scope")?,
+        anchor_value,
         state: SettlementState::from_str(row.try_get("state")?)?,
+        chain_kind: chain_kind_from_str(row.try_get("chain_kind")?)?,
         network: row.try_get("network")?,
         asset: row.try_get("asset")?,
         pay_to: row.try_get("pay_to")?,
         amount: row.try_get("amount")?,
         payer: row.try_get("payer")?,
+        authorization_metadata,
+        policy_snapshot: row.try_get("policy_snapshot")?,
         delegate_public_key: row.try_get("delegate_public_key")?,
         delegate_nonce: row.try_get("delegate_nonce")?,
         delegate_max_block_height: row.try_get("delegate_max_block_height")?,
@@ -1127,8 +1706,14 @@ fn settlement_from_row(row: &PgRow) -> Result<SettlementRecord, StoreError> {
         outer_transaction_bytes: row.try_get("outer_transaction_bytes")?,
         outer_transaction_hash: row.try_get("outer_transaction_hash")?,
         signer_address: row.try_get("signer_address")?,
+        signer_account_nonce: row.try_get("signer_account_nonce")?,
         submitted_tx_rlp: row.try_get("submitted_tx_rlp")?,
         submitted_tx_hash: row.try_get("submitted_tx_hash")?,
+        confirmations: row.try_get("confirmations")?,
+        required_confirmations: row.try_get("required_confirmations")?,
+        attempt_count: u32::try_from(attempt_count)
+            .map_err(|_| StoreError::Corrupt("attempt_count is negative".to_owned()))?,
+        retry_code: row.try_get("retry_code")?,
         terminal_http_status: terminal_http_status
             .map(u16::try_from)
             .transpose()
@@ -1136,6 +1721,22 @@ fn settlement_from_row(row: &PgRow) -> Result<SettlementRecord, StoreError> {
         terminal_response_bytes: row.try_get("terminal_response_bytes")?,
         created_at: row.try_get("created_at")?,
     })
+}
+
+fn chain_kind_from_str(value: &str) -> Result<ChainKind, StoreError> {
+    match value {
+        "near" => Ok(ChainKind::Near),
+        "eip155" => Ok(ChainKind::Eip155),
+        _ => Err(StoreError::Corrupt(format!(
+            "unknown settlement chain kind {value}"
+        ))),
+    }
+}
+
+fn constraint_name(error: &sqlx::Error) -> Option<&str> {
+    error
+        .as_database_error()
+        .and_then(|error| error.constraint())
 }
 
 fn fixed_hash(bytes: Vec<u8>, field: &str) -> Result<[u8; 32], StoreError> {
@@ -1290,6 +1891,10 @@ async fn insert_api_key(
     .execute(&mut **transaction)
     .await?;
     Ok(())
+}
+
+fn is_eip155_network(network: &str) -> bool {
+    network.starts_with("eip155:")
 }
 
 #[cfg(test)]

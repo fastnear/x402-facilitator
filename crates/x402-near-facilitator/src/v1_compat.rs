@@ -266,6 +266,43 @@ mod tests {
     }
 
     #[test]
+    fn v1_and_v2_transport_produce_one_canonical_fingerprint() {
+        let legacy = v1_request();
+        let Ok(canonical) = translate_v1_to_v2(as_object(&legacy)) else {
+            std::process::abort();
+        };
+        let config = crate::config::PaymentIdentifierConfig::default();
+        let Ok(parsed_v1) = crate::protocol::parse_request(
+            &serde_json::to_vec(&legacy).unwrap_or_default(),
+            &config,
+            true,
+        ) else {
+            std::process::abort();
+        };
+        let Ok(parsed_v2) = crate::protocol::parse_request(
+            &serde_json::to_vec(&canonical).unwrap_or_default(),
+            &config,
+            true,
+        ) else {
+            std::process::abort();
+        };
+        let payment_hash = [0x5a; 32];
+        let Ok(v1_fingerprint) =
+            crate::protocol::request_fingerprint(&parsed_v1.value, &payment_hash)
+        else {
+            std::process::abort();
+        };
+        let Ok(v2_fingerprint) =
+            crate::protocol::request_fingerprint(&parsed_v2.value, &payment_hash)
+        else {
+            std::process::abort();
+        };
+
+        assert_eq!(parsed_v1.value, parsed_v2.value);
+        assert_eq!(v1_fingerprint, v2_fingerprint);
+    }
+
+    #[test]
     fn translation_rejects_unknown_keys_at_every_level() {
         let mut unknown_top = v1_request();
         unknown_top["unexpected"] = Value::Bool(true);

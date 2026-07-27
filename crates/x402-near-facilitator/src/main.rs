@@ -16,7 +16,7 @@ use x402_near_facilitator::telemetry::TelemetryGuard;
 #[command(
     name = "x402-near-facilitator",
     version,
-    about = "Durable NEAR x402 facilitator"
+    about = "Durable NEAR and Base x402 facilitator"
 )]
 struct Cli {
     /// Non-secret JSON service configuration.

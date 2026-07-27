@@ -1,51 +1,72 @@
 openapi: 3.1.0
+jsonSchemaDialect: https://json-schema.org/draft/2020-12/schema
 info:
-  title: x402 facilitator for NEAR
-  version: 0.4.0
+  title: x402 exact-payment facilitator for NEAR and Base
+  version: 0.5.0
   description: |
-    API-key-gated x402 v2 exact-payment facilitator for Circle USDC on NEAR.
-    Each deployed server is pinned to one network. Expected payment rejection
-    is returned as an HTTP 200 protocol response; transport, authentication,
-    policy, quota, conflict, and infrastructure errors use HTTP errors.
-    X-API-Key is primary and Bearer is an alternative. If both are sent, they
-    must contain the identical key; conflicting values receive HTTP 401.
+    Authenticated x402 facilitator for exact Circle USDC payments on NEAR and
+    Base. Each process is pinned to one network and one canonical asset.
 
-    Instances configured with `accept_v1` (eip155 networks only) additionally
-    accept legacy x402 v1 wire requests on /verify and /settle: top-level
-    `x402Version: 1`, `paymentPayload` carrying `scheme`/`network` (legacy
-    aliases `base` / `base-sepolia`) instead of an `accepted` echo, and
-    `maxAmountRequired` in place of `amount`. Such requests are translated to
-    the canonical v2 shape internally; their 200 protocol responses echo
-    `network` as the legacy alias, and `/supported` advertises an additional
-    `x402Version: 1` kind. This document specifies the canonical v2 schemas.
+    x402 v2 is canonical. The v2 request is a strict union: NEAR carries a
+    standard-base64 Borsh classic NEP-366 SignedDelegateAction; EVM carries an
+    ERC-3009 authorization and payer signature. Unknown fields are rejected at
+    every parsed level outside the explicitly extensible `extra`, `extensions`,
+    and extension-schema maps.
+
+    An EVM instance may enable the off-by-default `accept_v1` gate. Such an
+    instance also accepts the legacy v1 request branch documented here for
+    network aliases `base` and `base-sepolia`. It translates that branch to
+    canonical v2 before policy, verification, fingerprinting, or settlement.
+    NEAR instances never accept or advertise v1.
+
+    Expected payment rejection is an HTTP 200 protocol response. Malformed
+    transport, authentication, policy quota, identifier conflict, and
+    unavailable or indeterminate infrastructure use HTTP errors.
   license:
     name: Apache-2.0
     identifier: Apache-2.0
   contact:
-    name: Mike Purvis
-    url: https://mikedotexe.com
+    name: FastNEAR x402 facilitator maintainers
+    url: https://github.com/fastnear/x402-near-facilitator
 servers:
-  - url: https://test.x402.mikedotexe.com
-    description: Testnet; not available until the launch checklist is complete
-  - url: https://x402.mikedotexe.com
-    description: Mainnet; not available until the launch checklist is complete
+  - url: https://{host}
+    description: Replace the reserved default with one facilitator instance
+    variables:
+      host:
+        default: facilitator.invalid
+        description: Hostname of a process pinned to one supported network
 tags:
   - name: Discovery
     description: Public facilitator capabilities
   - name: Facilitator
     description: Authenticated payment verification and settlement
   - name: Operations
-    description: Public, sanitized liveness and readiness
+    description: Public sanitized liveness and readiness
 paths:
-  /supported:
+  /:
     get:
       tags: [Discovery]
-      operationId: supported
-      summary: Report the payment kind and extensions supported by this instance
+      operationId: getLandingPage
+      summary: Identify the facilitator and link its public operator surfaces
       security: []
       responses:
         "200":
-          description: Supported x402 capabilities
+          description: Human-readable facilitator landing page
+          content:
+            text/html:
+              schema:
+                type: string
+  /supported:
+    get:
+      tags: [Discovery]
+      operationId: getSupported
+      summary: Report this instance's payment kinds, extensions, and signer
+      security: []
+      responses:
+        "200":
+          description: |
+            A v2-only instance returns one kind. An EVM instance with
+            `accept_v1` returns the canonical v2 kind and its legacy v1 alias.
           content:
             application/json:
               schema:
@@ -55,8 +76,11 @@ paths:
   /verify:
     post:
       tags: [Facilitator]
-      operationId: verify
+      operationId: verifyPayment
       summary: Verify a payment authorization without broadcasting
+      description: |
+        Authentication occurs before body parsing. The legacy request branch is
+        accepted only on an EVM instance whose operator enabled `accept_v1`.
       security:
         - ApiKey: []
         - Bearer: []
@@ -68,7 +92,7 @@ paths:
               $ref: "#/components/schemas/FacilitatorRequest"
       responses:
         "200":
-          description: Canonical valid or invalid x402 verification result
+          description: Definitive valid or invalid x402 verification result
           content:
             application/json:
               schema:
@@ -88,12 +112,15 @@ paths:
   /settle:
     post:
       tags: [Facilitator]
-      operationId: settle
-      summary: Reverify and settle a payment exactly once
+      operationId: settlePayment
+      summary: Claim, reverify, and settle a payment exactly once
       description: |
-        A successful response is returned only after the inner configured
-        NEP-141 token receipt reaches final SuccessValue. The transaction field
-        is always present and is empty when no transaction was broadcast.
+        The service claims the durable settlement, verifies again, persists the
+        exact signed submission bytes and hash, and broadcasts at most that
+        submission. NEAR terminal success requires the unique inner NEP-141
+        receipt to finish with SuccessValue. EVM terminal success requires the
+        configured confirmation depth; a mined-then-missing transaction returns
+        to nonterminal reconciliation.
       security:
         - ApiKey: []
         - Bearer: []
@@ -105,7 +132,7 @@ paths:
               $ref: "#/components/schemas/FacilitatorRequest"
       responses:
         "200":
-          description: Canonical definitive x402 settlement result
+          description: Definitive x402 settlement result in the request's wire dialect
           content:
             application/json:
               schema:
@@ -127,8 +154,8 @@ paths:
   /healthz:
     get:
       tags: [Operations]
-      operationId: health
-      summary: Report process liveness
+      operationId: getHealth
+      summary: Report process liveness and build version
       security: []
       responses:
         "200":
@@ -140,7 +167,7 @@ paths:
   /readyz:
     get:
       tags: [Operations]
-      operationId: readiness
+      operationId: getReadiness
       summary: Report sanitized settlement readiness
       security: []
       responses:
@@ -154,10 +181,7 @@ paths:
           description: Instance is alive but cannot safely settle
           headers:
             Retry-After:
-              schema:
-                type: integer
-                minimum: 1
-              description: Suggested retry delay in seconds
+              $ref: "#/components/headers/RetryAfter"
           content:
             application/json:
               schema:
@@ -168,27 +192,37 @@ components:
       type: apiKey
       in: header
       name: X-API-Key
-      description: Primary resource-server credential; may accompany an identical Bearer value
+      description: |
+        Primary resource-server credential. If a Bearer credential is also
+        present, both values must be identical.
     Bearer:
       type: http
       scheme: bearer
       bearerFormat: x402 API key
-      description: Alternative credential; may accompany an identical X-API-Key value
+      description: |
+        Alternative resource-server credential. If X-API-Key is also present,
+        both values must be identical.
+  headers:
+    RetryAfter:
+      description: Suggested retry delay in seconds
+      schema:
+        type: integer
+        minimum: 1
   responses:
     BadRequest:
-      description: Malformed request or invalid payment-identifier syntax
+      description: Malformed JSON, strict-shape failure, or invalid payment-identifier syntax
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
     Unauthorized:
-      description: Missing, invalid, revoked, or non-identical dual credentials
+      description: Missing, invalid, revoked, or conflicting dual credentials
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
     Conflict:
-      description: The same payment identifier is bound to another fingerprint
+      description: Payment identifier is already bound to another canonical fingerprint
       content:
         application/json:
           schema:
@@ -206,25 +240,21 @@ components:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
     RateOrBudgetLimit:
-      description: API-client request rate or sponsorship budget exhausted
+      description: API-client request rate or sponsorship budget is exhausted
       headers:
         Retry-After:
-          schema:
-            type: integer
-            minimum: 1
-          description: Suggested retry delay in seconds
+          $ref: "#/components/headers/RetryAfter"
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
     Unavailable:
-      description: Database, leadership, reconciliation, RPC, or relayer is unavailable or indeterminate
+      description: |
+        Database, leadership, startup reconciliation, RPC, signer, or
+        indeterminate chain evidence prevents a safe answer
       headers:
         Retry-After:
-          schema:
-            type: integer
-            minimum: 1
-          description: Suggested retry delay in seconds
+          $ref: "#/components/headers/RetryAfter"
       content:
         application/json:
           schema:
@@ -232,9 +262,30 @@ components:
   schemas:
     NearNetwork:
       type: string
-      enum:
-        - near:testnet
-        - near:mainnet
+      enum: [near:testnet, near:mainnet]
+    EvmNetwork:
+      type: string
+      enum: ["eip155:84532", "eip155:8453"]
+    CanonicalNetwork:
+      oneOf:
+        - $ref: "#/components/schemas/NearNetwork"
+        - $ref: "#/components/schemas/EvmNetwork"
+    LegacyEvmNetwork:
+      type: string
+      enum: [base-sepolia, base]
+    DecimalAtomicAmount:
+      type: string
+      pattern: "^[0-9]+$"
+      description: Unsigned base-10 integer in the asset's atomic units
+    EvmAddress:
+      type: string
+      pattern: "^0x[0-9A-Fa-f]{40}$"
+    Bytes32:
+      type: string
+      pattern: "^0x[0-9A-Fa-f]{64}$"
+    HexBytes:
+      type: string
+      pattern: "^0x(?:[0-9A-Fa-f]{2})+$"
     ResourceInfo:
       type: object
       required: [url]
@@ -256,38 +307,6 @@ components:
         iconUrl:
           type: string
           format: uri
-    PaymentRequirements:
-      type: object
-      required:
-        - scheme
-        - network
-        - asset
-        - amount
-        - payTo
-        - maxTimeoutSeconds
-      additionalProperties: false
-      properties:
-        scheme:
-          type: string
-          const: exact
-        network:
-          $ref: "#/components/schemas/NearNetwork"
-        asset:
-          type: string
-          description: Configured Circle NEP-141 contract account ID
-        amount:
-          type: string
-          pattern: "^[0-9]+$"
-          description: Exact atomic USDC amount
-        payTo:
-          type: string
-          description: Exact NEAR recipient account ID
-        maxTimeoutSeconds:
-          type: integer
-          minimum: 1
-        extra:
-          type: object
-          additionalProperties: true
     PaymentIdentifierExtension:
       type: object
       required: [info, schema]
@@ -308,50 +327,242 @@ components:
         schema:
           type: object
           additionalProperties: true
-    PaymentPayload:
+    PaymentExtensions:
+      type: object
+      description: |
+        Extension envelope. `payment-identifier`, when present, is validated
+        strictly; other canonical x402 extension entries are preserved.
+      additionalProperties: true
+      properties:
+        payment-identifier:
+          $ref: "#/components/schemas/PaymentIdentifierExtension"
+    NearPaymentRequirements:
+      type: object
+      required: [scheme, network, asset, amount, payTo, maxTimeoutSeconds]
+      additionalProperties: false
+      properties:
+        scheme:
+          type: string
+          const: exact
+        network:
+          $ref: "#/components/schemas/NearNetwork"
+        asset:
+          type: string
+          minLength: 2
+          description: Configured canonical Circle NEP-141 contract account ID
+        amount:
+          $ref: "#/components/schemas/DecimalAtomicAmount"
+        payTo:
+          type: string
+          minLength: 2
+          description: Exact NEAR recipient account ID
+        maxTimeoutSeconds:
+          type: integer
+          minimum: 1
+        extra:
+          type: object
+          additionalProperties: true
+    Eip712Domain:
+      type: object
+      required: [name, version]
+      additionalProperties: true
+      properties:
+        name:
+          type: string
+          minLength: 1
+          description: Real token EIP-712 domain name; Base mainnet USDC uses USD Coin
+        version:
+          type: string
+          minLength: 1
+          description: Real token EIP-712 domain version; Base USDC uses 2
+    EvmPaymentRequirements:
+      type: object
+      required: [scheme, network, asset, amount, payTo, maxTimeoutSeconds, extra]
+      additionalProperties: false
+      properties:
+        scheme:
+          type: string
+          const: exact
+        network:
+          $ref: "#/components/schemas/EvmNetwork"
+        asset:
+          $ref: "#/components/schemas/EvmAddress"
+        amount:
+          $ref: "#/components/schemas/DecimalAtomicAmount"
+        payTo:
+          $ref: "#/components/schemas/EvmAddress"
+        maxTimeoutSeconds:
+          type: integer
+          minimum: 1
+        extra:
+          $ref: "#/components/schemas/Eip712Domain"
+    NearMechanismPayload:
+      type: object
+      required: [signedDelegateAction]
+      additionalProperties: false
+      properties:
+        signedDelegateAction:
+          type: string
+          minLength: 1
+          contentEncoding: base64
+          description: Standard-base64 Borsh classic NEP-366 SignedDelegateAction
+    Erc3009Authorization:
+      type: object
+      required: [from, to, value, validAfter, validBefore, nonce]
+      additionalProperties: false
+      properties:
+        from:
+          $ref: "#/components/schemas/EvmAddress"
+        to:
+          $ref: "#/components/schemas/EvmAddress"
+        value:
+          $ref: "#/components/schemas/DecimalAtomicAmount"
+        validAfter:
+          $ref: "#/components/schemas/DecimalAtomicAmount"
+        validBefore:
+          $ref: "#/components/schemas/DecimalAtomicAmount"
+        nonce:
+          $ref: "#/components/schemas/Bytes32"
+    EvmMechanismPayload:
+      type: object
+      required: [authorization, signature]
+      additionalProperties: false
+      properties:
+        authorization:
+          $ref: "#/components/schemas/Erc3009Authorization"
+        signature:
+          $ref: "#/components/schemas/HexBytes"
+          description: EOA or supported deployed smart-wallet payer signature
+    NearPaymentPayloadV2:
       type: object
       required: [x402Version, accepted, payload]
       additionalProperties: false
       properties:
         x402Version:
           type: integer
-          minimum: 0
-          maximum: 255
+          const: 2
         resource:
           $ref: "#/components/schemas/ResourceInfo"
         accepted:
-          $ref: "#/components/schemas/PaymentRequirements"
+          $ref: "#/components/schemas/NearPaymentRequirements"
         payload:
-          type: object
-          required: [signedDelegateAction]
-          additionalProperties: false
-          properties:
-            signedDelegateAction:
-              type: string
-              description: Standard-base64 Borsh classic NEP-366 SignedDelegateAction
+          $ref: "#/components/schemas/NearMechanismPayload"
         extensions:
-          type: object
-          additionalProperties: true
-          properties:
-            payment-identifier:
-              $ref: "#/components/schemas/PaymentIdentifierExtension"
-    FacilitatorRequest:
+          $ref: "#/components/schemas/PaymentExtensions"
+    EvmPaymentPayloadV2:
       type: object
-      description: >
-        Canonical v2 request. On `accept_v1` instances a legacy v1 request
-        (x402Version 1, legacy network aliases, maxAmountRequired) is also
-        accepted and translated to this shape before processing.
+      required: [x402Version, accepted, payload]
+      additionalProperties: false
+      properties:
+        x402Version:
+          type: integer
+          const: 2
+        resource:
+          $ref: "#/components/schemas/ResourceInfo"
+        accepted:
+          $ref: "#/components/schemas/EvmPaymentRequirements"
+        payload:
+          $ref: "#/components/schemas/EvmMechanismPayload"
+        extensions:
+          $ref: "#/components/schemas/PaymentExtensions"
+    NearFacilitatorRequestV2:
+      type: object
       required: [x402Version, paymentPayload, paymentRequirements]
       additionalProperties: false
       properties:
         x402Version:
           type: integer
-          minimum: 0
-          maximum: 255
+          const: 2
         paymentPayload:
-          $ref: "#/components/schemas/PaymentPayload"
+          $ref: "#/components/schemas/NearPaymentPayloadV2"
         paymentRequirements:
-          $ref: "#/components/schemas/PaymentRequirements"
+          $ref: "#/components/schemas/NearPaymentRequirements"
+    EvmFacilitatorRequestV2:
+      type: object
+      required: [x402Version, paymentPayload, paymentRequirements]
+      additionalProperties: false
+      properties:
+        x402Version:
+          type: integer
+          const: 2
+        paymentPayload:
+          $ref: "#/components/schemas/EvmPaymentPayloadV2"
+        paymentRequirements:
+          $ref: "#/components/schemas/EvmPaymentRequirements"
+    LegacyEvmPaymentRequirements:
+      type: object
+      required:
+        - scheme
+        - network
+        - maxAmountRequired
+        - payTo
+        - maxTimeoutSeconds
+        - asset
+        - extra
+      additionalProperties: false
+      properties:
+        scheme:
+          type: string
+          const: exact
+        network:
+          $ref: "#/components/schemas/LegacyEvmNetwork"
+        maxAmountRequired:
+          $ref: "#/components/schemas/DecimalAtomicAmount"
+        resource:
+          type: string
+          format: uri
+        description:
+          type: string
+        mimeType:
+          type: string
+        outputSchema: {}
+        payTo:
+          $ref: "#/components/schemas/EvmAddress"
+        maxTimeoutSeconds:
+          type: integer
+          minimum: 1
+        asset:
+          $ref: "#/components/schemas/EvmAddress"
+        extra:
+          $ref: "#/components/schemas/Eip712Domain"
+    LegacyEvmPaymentPayloadV1:
+      type: object
+      required: [x402Version, scheme, network, payload]
+      additionalProperties: false
+      properties:
+        x402Version:
+          type: integer
+          const: 1
+        scheme:
+          type: string
+          const: exact
+        network:
+          $ref: "#/components/schemas/LegacyEvmNetwork"
+        payload:
+          $ref: "#/components/schemas/EvmMechanismPayload"
+    LegacyEvmFacilitatorRequestV1:
+      type: object
+      description: |
+        Accepted only when `accept_v1` is enabled on an EVM instance. The
+        payload and requirements scheme/network values must agree.
+      required: [x402Version, paymentPayload, paymentRequirements]
+      additionalProperties: false
+      properties:
+        x402Version:
+          type: integer
+          const: 1
+        paymentPayload:
+          $ref: "#/components/schemas/LegacyEvmPaymentPayloadV1"
+        paymentRequirements:
+          $ref: "#/components/schemas/LegacyEvmPaymentRequirements"
+    FacilitatorRequestV2:
+      oneOf:
+        - $ref: "#/components/schemas/NearFacilitatorRequestV2"
+        - $ref: "#/components/schemas/EvmFacilitatorRequestV2"
+    FacilitatorRequest:
+      oneOf:
+        - $ref: "#/components/schemas/FacilitatorRequestV2"
+        - $ref: "#/components/schemas/LegacyEvmFacilitatorRequestV1"
     VerifyResponse:
       type: object
       required: [isValid]
@@ -365,10 +576,11 @@ components:
           type: string
         payer:
           type: string
+          description: Present only after authoritative signature verification
         extensions:
           type: object
           additionalProperties: true
-    SettleResponse:
+    SettleResponseV2:
       type: object
       required: [success, transaction, network]
       additionalProperties: false
@@ -383,13 +595,37 @@ components:
           type: string
         transaction:
           type: string
-          description: NEAR transaction hash, or an empty string before broadcast
+          description: Chain transaction hash, or an empty string before broadcast
         network:
-          $ref: "#/components/schemas/NearNetwork"
+          $ref: "#/components/schemas/CanonicalNetwork"
         extensions:
           type: object
           additionalProperties: true
-    SupportedKind:
+    SettleResponseV1:
+      type: object
+      required: [success, transaction, network]
+      additionalProperties: false
+      properties:
+        success:
+          type: boolean
+        errorReason:
+          type: string
+        errorMessage:
+          type: string
+        payer:
+          type: string
+        transaction:
+          type: string
+        network:
+          $ref: "#/components/schemas/LegacyEvmNetwork"
+        extensions:
+          type: object
+          additionalProperties: true
+    SettleResponse:
+      oneOf:
+        - $ref: "#/components/schemas/SettleResponseV2"
+        - $ref: "#/components/schemas/SettleResponseV1"
+    SupportedKindV2:
       type: object
       required: [x402Version, scheme, network]
       additionalProperties: false
@@ -401,7 +637,23 @@ components:
           type: string
           const: exact
         network:
-          $ref: "#/components/schemas/NearNetwork"
+          $ref: "#/components/schemas/CanonicalNetwork"
+        extra:
+          type: object
+          additionalProperties: true
+    SupportedKindV1:
+      type: object
+      required: [x402Version, scheme, network]
+      additionalProperties: false
+      properties:
+        x402Version:
+          type: integer
+          const: 1
+        scheme:
+          type: string
+          const: exact
+        network:
+          $ref: "#/components/schemas/LegacyEvmNetwork"
         extra:
           type: object
           additionalProperties: true
@@ -413,9 +665,11 @@ components:
         kinds:
           type: array
           minItems: 1
-          maxItems: 1
+          maxItems: 2
           items:
-            $ref: "#/components/schemas/SupportedKind"
+            oneOf:
+              - $ref: "#/components/schemas/SupportedKindV2"
+              - $ref: "#/components/schemas/SupportedKindV1"
         extensions:
           type: array
           contains:
@@ -424,9 +678,11 @@ components:
             type: string
         signers:
           type: object
-          description: Exact CAIP-2 network ID to facilitator signer account IDs
+          description: Canonical CAIP-2 network ID to facilitator signer identities
+          minProperties: 1
           additionalProperties:
             type: array
+            minItems: 1
             items:
               type: string
     HealthResponse:
@@ -440,6 +696,7 @@ components:
         service:
           type: string
           const: x402-near-facilitator
+          description: Historical compatibility identifier
         version:
           type: string
     ReadinessCheck:

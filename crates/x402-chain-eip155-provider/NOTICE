@@ -1,0 +1,15 @@
+x402-chain-eip155-provider
+Copyright 2026 FastNEAR contributors
+
+This crate is licensed under the Apache License, Version 2.0.
+
+It builds on the public Apache-2.0 x402-rs EVM implementation:
+https://github.com/x402-rs/x402-rs
+
+The x402 specifications and official interoperability packages are maintained
+by the x402 Foundation:
+https://github.com/x402-foundation/x402
+
+Base, Circle, x402, and other names may be trademarks of their respective
+owners. Their mention identifies interoperability targets and does not imply
+affiliation or endorsement.

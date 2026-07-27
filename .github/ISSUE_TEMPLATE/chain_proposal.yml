@@ -1,0 +1,87 @@
+name: Chain proposal
+description: Propose an audited in-tree x402 exact-payment provider
+title: "chain: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This project uses a closed in-tree `ChainProvider` enum, not runtime
+        plugins. Read `docs/adding-a-chain.md` before proposing implementation.
+        A proposal is exploratory and does not authorize funded broadcasts,
+        account creation, DNS, or deployment.
+
+  - type: input
+    id: chain
+    attributes:
+      label: Chain and CAIP-2 networks
+      placeholder: Example Chain — namespace:reference, testnet namespace:reference
+    validations:
+      required: true
+
+  - type: input
+    id: specification
+    attributes:
+      label: Authoritative x402 exact-scheme specification
+      description: Link to the upstream specification or proposal.
+    validations:
+      required: true
+
+  - type: textarea
+    id: authorization
+    attributes:
+      label: Signed authorization and single-use anchor
+      description: Describe what the payer signs and the chain-enforced replay-prevention value.
+    validations:
+      required: true
+
+  - type: textarea
+    id: terminality
+    attributes:
+      label: Terminal success and reorg/finality model
+      description: Identify the exact receipt, event, state transition, or finality proof that authoritatively proves payment.
+    validations:
+      required: true
+
+  - type: textarea
+    id: signer
+    attributes:
+      label: Facilitator signer and sponsored-gas model
+      description: Key type, nonce/sequence behavior, fee policy, and readiness hard stop.
+    validations:
+      required: true
+
+  - type: textarea
+    id: recovery
+    attributes:
+      label: Ambiguous submission and recovery
+      description: Explain how exact bytes/hash are persisted, queried, rebroadcast, and reconciled without replacement.
+    validations:
+      required: true
+
+  - type: textarea
+    id: oracle
+    attributes:
+      label: Official implementation and fixtures
+      description: Identify the official package/tool that can generate deterministic interoperability vectors.
+    validations:
+      required: true
+
+  - type: textarea
+    id: policy
+    attributes:
+      label: Launch policy
+      description: Canonical USDC assets, exact networks, RPC independence, testnet path, and explicit non-goals.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: acknowledgement
+    attributes:
+      label: Acknowledgements
+      options:
+        - label: I understand this is an in-tree provider requiring schema, recovery, fixtures, operations, and documentation—not only an enum arm.
+          required: true
+        - label: This issue contains no live signed payment, funded key, API key, or credential.
+          required: true

@@ -1,4 +1,4 @@
-//! Durable HTTP service for facilitating x402 payments on NEAR.
+//! Durable HTTP service for facilitating x402 payments on NEAR and Base.
 
 #![forbid(unsafe_code)]
 // This crate is a service implementation shared by its two binaries rather

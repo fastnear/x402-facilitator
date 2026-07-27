@@ -95,7 +95,7 @@ impl Default for VerificationPolicy {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct VerifiedRequirements {
     pub network: NearNetwork,
     pub asset: AccountId,
@@ -103,6 +103,20 @@ pub struct VerifiedRequirements {
     pub amount: u128,
     pub amount_decimal: String,
     pub max_timeout_seconds: u64,
+}
+
+impl fmt::Debug for VerifiedRequirements {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("VerifiedRequirements")
+            .field("network", &self.network)
+            .field("asset", &"<redacted>")
+            .field("pay_to", &"<redacted>")
+            .field("amount", &"<redacted>")
+            .field("amount_decimal", &"<redacted>")
+            .field("max_timeout_seconds", &self.max_timeout_seconds)
+            .finish()
+    }
 }
 
 #[derive(Clone)]
@@ -157,10 +171,11 @@ impl fmt::Debug for VerifiedPayment {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("VerifiedPayment")
-            .field("payer", &self.payer)
-            .field("payer_public_key", &self.payer_public_key)
-            .field("delegate_nonce", &self.delegate_nonce)
-            .field("max_block_height", &self.max_block_height)
+            .field("network", &self.requirements.network)
+            .field("payer", &"<redacted>")
+            .field("payer_public_key", &"<redacted>")
+            .field("delegate_nonce", &"<redacted>")
+            .field("max_block_height", &"<redacted>")
             .field("requirements", &self.requirements)
             .field("signed_delegate", &"<redacted>")
             .field("signed_delegate_bytes", &"<redacted>")
@@ -205,20 +220,32 @@ impl fmt::Debug for PreparedTransaction {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("PreparedTransaction")
-            .field("transaction_hash", &self.transaction_hash)
-            .field("relayer_nonce", &self.relayer_nonce)
-            .field("signer_id", &self.signer_id)
-            .field("signer_public_key", &self.signer_public_key)
+            .field("transaction_hash", &"<redacted>")
+            .field("relayer_nonce", &"<redacted>")
+            .field("signer_id", &"<redacted>")
+            .field("signer_public_key", &"<redacted>")
             .field("signed_transaction_bytes", &"<redacted>")
             .finish()
     }
 }
 
-#[derive(Debug)]
 pub enum TransactionLookup {
     Unknown,
     Pending(TxExecutionStatus),
     Final(Box<FinalExecutionOutcomeView>),
+}
+
+impl fmt::Debug for TransactionLookup {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unknown => formatter.write_str("TransactionLookup::Unknown"),
+            Self::Pending(status) => formatter
+                .debug_tuple("TransactionLookup::Pending")
+                .field(status)
+                .finish(),
+            Self::Final(_) => formatter.write_str("TransactionLookup::Final(<redacted>)"),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

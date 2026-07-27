@@ -1,20 +1,18 @@
 //! Chain-neutral settlement vocabulary shared by the settlement engine.
 //!
-//! The engine in [`crate::service`] currently threads NEAR primitives directly.
-//! To let a second chain (eip155/EVM) ride the same durable journal and
-//! recovery, the engine must speak these neutral value types instead, and a
-//! [`ChainProvider`] enum dispatches inward to the concrete per-chain provider.
-//!
-//! Phase 0 introduces this vocabulary and the NEAR wrapping without changing
-//! NEAR behavior; the EVM variant is added in Phase 1. See
-//! `docs/evm-v2-design.md`.
+//! The engine in [`crate::service`] speaks neutral value types while the closed
+//! [`ChainProvider`] enum dispatches to the audited NEAR and EVM providers.
+//! Provider-specific verified and prepared values remain typed inside enum
+//! variants so recovery can validate them without weakening the shared model.
 
 use std::fmt;
 
 use near_primitives::hash::CryptoHash;
 use near_primitives::types::AccountId;
 use near_primitives::views::FinalExecutionOutcomeView;
-use x402_chain_eip155_provider::prepare::EvmPrepared;
+use x402_chain_eip155_provider::prepare::{
+    EvmPrepared, ExpectedEvmSubmission, StoredTransactionError, validate_signed_transaction,
+};
 use x402_chain_eip155_provider::provider::{
     EvmChainProvider, EvmHead, EvmReconcileStatus, EvmTerminalOutcome, EvmVerifiedPayment,
     EvmVerifyRejection,
@@ -29,8 +27,7 @@ use x402_types::proto;
 
 /// The settlement provider for the environment's chain. A closed enum (rather
 /// than `dyn`) so the engine can hold one `Arc<ChainProvider>` and dispatch
-/// inward with neutral value types. Phase 0 wraps NEAR; Phase 1 adds `Evm`.
-#[derive(Debug)]
+/// inward with neutral value types.
 pub enum ChainProvider {
     /// A NEAR delegate-settlement provider.
     Near(NearChainProvider),
@@ -39,10 +36,20 @@ pub enum ChainProvider {
     Evm(Box<EvmChainProvider>),
 }
 
+impl fmt::Debug for ChainProvider {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Near(_) => formatter.write_str("Near(<redacted>)"),
+            Self::Evm(_) => formatter.write_str("Evm(<redacted>)"),
+        }
+    }
+}
+
 impl ChainProvider {
     /// Borrow the inner NEAR provider. The settlement engine speaks only neutral
     /// [`ChainProvider`] methods; this accessor exists for tests that drive the
     /// concrete `NearChainProvider` directly to stage journal fixtures.
+    #[cfg(test)]
     #[must_use]
     pub fn as_near(&self) -> &NearChainProvider {
         match self {
@@ -84,6 +91,120 @@ impl ChainProvider {
             Self::Near(_) => None,
             Self::Evm(provider) => Some(provider.required_confirmations()),
         }
+    }
+
+    /// Convert a provider-specific prepared value into the chain-neutral
+    /// submission journal contract. The chain-specific value remains alongside
+    /// it only for the immediate broadcast call.
+    #[must_use]
+    pub fn durable_submission(&self, prepared: &Prepared) -> DurableSubmission {
+        let recovery_policy = match self {
+            Self::Near(_) => RecoveryPolicy::NearFinality,
+            Self::Evm(provider) => {
+                RecoveryPolicy::EvmConfirmations(provider.required_confirmations())
+            }
+        };
+        DurableSubmission {
+            submitter: prepared.signer_id.clone(),
+            nonce: prepared.signer_nonce,
+            bytes: prepared.submit_bytes.clone(),
+            hash: prepared.submit_hash.clone(),
+            recovery_policy,
+        }
+    }
+
+    /// Validate a stored EVM submission against its exact journal row before
+    /// receipt evidence is considered. The provider supplies immutable chain,
+    /// signer, token, gas, and EIP-712 domain facts; the binding supplies the
+    /// settlement-specific values and historical fee policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed corruption reason for malformed fields, a provider/row
+    /// mismatch, or any invalid signed envelope/calldata.
+    pub fn validate_stored_submission(
+        &self,
+        bytes: &[u8],
+        binding: &StoredEvmSubmission,
+    ) -> Result<(), StoredSubmissionError> {
+        let Self::Evm(provider) = self else {
+            return Err(StoredSubmissionError::WrongProvider);
+        };
+        if binding.network != provider.caip2().to_string() {
+            return Err(StoredSubmissionError::Field("network"));
+        }
+        let transaction_hash = binding
+            .hash
+            .parse()
+            .map_err(|_| StoredSubmissionError::Field("transaction hash"))?;
+        let facilitator_signer = binding
+            .submitter
+            .parse()
+            .map_err(|_| StoredSubmissionError::Field("submitter"))?;
+        if facilitator_signer != provider.signer_address() {
+            return Err(StoredSubmissionError::Field("submitter"));
+        }
+        let account_nonce = u64::try_from(binding.nonce)
+            .map_err(|_| StoredSubmissionError::Field("account nonce"))?;
+        let token = binding
+            .asset
+            .parse()
+            .map_err(|_| StoredSubmissionError::Field("asset"))?;
+        if token != provider.asset() {
+            return Err(StoredSubmissionError::Field("asset"));
+        }
+        let payer = binding
+            .payer
+            .parse()
+            .map_err(|_| StoredSubmissionError::Field("payer"))?;
+        let recipient = binding
+            .payee
+            .parse()
+            .map_err(|_| StoredSubmissionError::Field("payee"))?;
+        let value = binding
+            .amount
+            .parse()
+            .map_err(|_| StoredSubmissionError::Field("amount"))?;
+        let valid_after = binding
+            .valid_after
+            .parse()
+            .map_err(|_| StoredSubmissionError::Field("validAfter"))?;
+        let valid_before = binding
+            .valid_before
+            .parse()
+            .map_err(|_| StoredSubmissionError::Field("validBefore"))?;
+        let expected_scope = format!(
+            "{}:{}:{}",
+            binding.network,
+            binding.asset.to_ascii_lowercase(),
+            binding.payer.to_ascii_lowercase()
+        );
+        if binding.anchor_scope != expected_scope {
+            return Err(StoredSubmissionError::Field("anchor scope"));
+        }
+        let domain = provider.transfer_domain();
+        validate_signed_transaction(
+            bytes,
+            &ExpectedEvmSubmission {
+                transaction_hash,
+                facilitator_signer,
+                chain_id: provider.chain_id(),
+                account_nonce,
+                token,
+                gas_limit: binding.gas_limit,
+                max_fee_per_gas: binding.max_fee_per_gas,
+                payer,
+                payee: recipient,
+                value,
+                valid_after,
+                valid_before,
+                authorization_nonce: binding.anchor_value.into(),
+                payment_hash: binding.payment_hash.into(),
+                domain,
+            },
+        )
+        .map(|_| ())
+        .map_err(StoredSubmissionError::Transaction)
     }
 
     /// The eip155 pre-verify payment identity: the offline ERC-3009 EIP-712
@@ -339,9 +460,13 @@ impl ChainProvider {
         signer: &str,
         payer: &str,
         asset: &str,
+        recovery_policy: RecoveryPolicy,
     ) -> ReconcileStatus {
         match self {
             Self::Near(provider) => {
+                if recovery_policy != RecoveryPolicy::NearFinality {
+                    return ReconcileStatus::verdict(ReconcileVerdict::Ambiguous);
+                }
                 let (Ok(hash), Ok(signer_id), Ok(payer_id), Ok(asset_id)) = (
                     submit_hash.parse::<CryptoHash>(),
                     signer.parse::<AccountId>(),
@@ -393,7 +518,14 @@ impl ChainProvider {
                 // EVM reconciles on the transaction hash alone; the NEAR signer/
                 // payer/asset identity checks live inside the provider's verify.
                 let _ = (signer, payer, asset);
-                match provider.reconcile_hash(submit_hash).await {
+                let RecoveryPolicy::EvmConfirmations(required_confirmations) = recovery_policy
+                else {
+                    return ReconcileStatus::verdict(ReconcileVerdict::Ambiguous);
+                };
+                match provider
+                    .reconcile_hash_with_confirmations(submit_hash, required_confirmations)
+                    .await
+                {
                     Ok(EvmReconcileStatus::Terminal(outcome)) => ReconcileStatus::verdict(
                         ReconcileVerdict::Terminal(evm_terminal_to_neutral(&outcome)),
                     ),
@@ -493,7 +625,7 @@ impl ChainProvider {
 
 /// The exact-scheme requirements a payment was verified against, in neutral
 /// (string / atomic-unit) form for logging and cross-checks.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Requirements {
     /// CAIP-2 network id (e.g. `near:mainnet`, `eip155:8453`).
     pub network: String,
@@ -505,6 +637,18 @@ pub struct Requirements {
     pub amount: u128,
     /// Amount as the canonical decimal string advertised in requirements.
     pub amount_decimal: String,
+}
+
+impl fmt::Debug for Requirements {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Requirements")
+            .field("network", &self.network)
+            .field("asset", &"<redacted>")
+            .field("pay_to", &"<redacted>")
+            .field("amount", &"<redacted>")
+            .finish_non_exhaustive()
+    }
 }
 
 /// A verified payment ready to be prepared and submitted. Neutral fields drive
@@ -522,20 +666,125 @@ pub struct VerifiedPayment {
     pub detail: VerifiedDetail,
 }
 
+impl VerifiedPayment {
+    /// Produce the durable, chain-neutral payment identity written at claim
+    /// time. The request hash identifies this exact authorization; the scoped
+    /// anchor identifies the chain-enforced single-use primitive.
+    #[must_use]
+    pub fn identity(&self) -> PaymentIdentity {
+        let authorization = match &self.detail {
+            VerifiedDetail::Near(near) => AuthorizationMetadata::Near {
+                delegate_public_key: near.payer_public_key.to_string(),
+                delegate_nonce: near.delegate_nonce.to_string(),
+                max_block_height: near.max_block_height.to_string(),
+            },
+            VerifiedDetail::Evm(evm) => {
+                let authorization = evm.authorization_identity();
+                AuthorizationMetadata::Evm {
+                    version: 2,
+                    valid_after: authorization.valid_after.to_string(),
+                    valid_before: authorization.valid_before.to_string(),
+                }
+            }
+        };
+        let (anchor_scope, anchor_value) = match &self.detail {
+            VerifiedDetail::Near(_) => ("near".to_owned(), self.payment_hash),
+            VerifiedDetail::Evm(evm) => (
+                format!(
+                    "{}:{}:{}",
+                    self.requirements.network,
+                    self.requirements.asset.to_ascii_lowercase(),
+                    self.payer.to_ascii_lowercase()
+                ),
+                evm.authorization_identity().nonce.0,
+            ),
+        };
+        PaymentIdentity {
+            request_hash: self.payment_hash,
+            anchor_scope,
+            anchor_value,
+            authorization,
+        }
+    }
+}
+
+/// Durable identity extracted from a verified payment without retaining the
+/// signed bearer payload.
+#[derive(Clone)]
+pub struct PaymentIdentity {
+    /// Hash of the exact signed payment request.
+    pub request_hash: [u8; 32],
+    /// Namespace in which the chain-enforced anchor is single use.
+    pub anchor_scope: String,
+    /// Exact chain-enforced replay anchor (delegate hash / ERC-3009 nonce).
+    pub anchor_value: [u8; 32],
+    /// Minimal metadata needed to bind a stored submission during recovery.
+    pub authorization: AuthorizationMetadata,
+}
+
+impl fmt::Debug for PaymentIdentity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PaymentIdentity")
+            .field("request_hash", &"<redacted>")
+            .field("anchor_scope", &"<redacted>")
+            .field("anchor_value", &"<redacted>")
+            .field("authorization", &self.authorization)
+            .finish()
+    }
+}
+
+/// Minimal chain-specific authorization metadata retained by the journal.
+#[derive(Clone)]
+pub enum AuthorizationMetadata {
+    /// NEAR delegate identity needed for stored-transaction validation.
+    Near {
+        /// Delegate public key.
+        delegate_public_key: String,
+        /// Delegate nonce.
+        delegate_nonce: String,
+        /// Delegate expiry block height.
+        max_block_height: String,
+    },
+    /// EVM validity window; payer/token/value and nonce are stored in neutral
+    /// settlement columns and the scoped anchor.
+    Evm {
+        /// Metadata schema version.
+        version: u8,
+        /// ERC-3009 lower validity bound.
+        valid_after: String,
+        /// ERC-3009 upper validity bound.
+        valid_before: String,
+    },
+}
+
+impl fmt::Debug for AuthorizationMetadata {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Near { .. } => formatter.write_str("Near(<redacted>)"),
+            Self::Evm { version, .. } => formatter
+                .debug_struct("Evm")
+                .field("version", version)
+                .field("authorization", &"<redacted>")
+                .finish(),
+        }
+    }
+}
+
 impl fmt::Debug for VerifiedPayment {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("VerifiedPayment")
-            .field("payer", &self.payer)
+            .field("payer", &"<redacted>")
             .field("payment_hash", &"<redacted>")
             .field("requirements", &self.requirements)
-            .field("detail", &self.detail)
+            .field("detail", &"<redacted>")
             .finish()
     }
 }
 
 /// Chain-specific verified-payment state.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum VerifiedDetail {
     /// NEAR: the decoded, signature-checked delegate payment.
     Near(NearVerified),
@@ -543,9 +792,115 @@ pub enum VerifiedDetail {
     Evm(EvmVerifiedPayment),
 }
 
+impl fmt::Debug for VerifiedDetail {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Near(_) => formatter.write_str("Near(<redacted>)"),
+            Self::Evm(_) => formatter.write_str("Evm(<redacted>)"),
+        }
+    }
+}
+
+/// Recovery rules carried with the exact durable submission.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RecoveryPolicy {
+    /// NEAR final execution and receipt-graph validation.
+    NearFinality,
+    /// EVM conservative confirmation depth.
+    EvmConfirmations(u64),
+}
+
+/// Chain-neutral exact bytes and identity persisted before broadcast.
+#[derive(Clone)]
+pub struct DurableSubmission {
+    /// Facilitator relayer/signer identity.
+    pub submitter: String,
+    /// Submission account/access-key nonce.
+    pub nonce: u128,
+    /// Exact signed bytes; recovery never creates replacements.
+    pub bytes: Vec<u8>,
+    /// Hash of the exact signed bytes.
+    pub hash: String,
+    /// Provider-owned reconciliation policy.
+    pub recovery_policy: RecoveryPolicy,
+}
+
+impl fmt::Debug for DurableSubmission {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DurableSubmission")
+            .field("submitter", &"<redacted>")
+            .field("nonce", &"<redacted>")
+            .field("bytes", &"<redacted>")
+            .field("hash", &"<redacted>")
+            .field("recovery_policy", &self.recovery_policy)
+            .finish()
+    }
+}
+
+/// Journal values that bind one stored EVM envelope to one settlement.
+pub struct StoredEvmSubmission {
+    /// CAIP-2 network.
+    pub network: String,
+    /// Journaled transaction hash.
+    pub hash: String,
+    /// Configured facilitator signer recorded at claim.
+    pub submitter: String,
+    /// Journaled signer account nonce.
+    pub nonce: u128,
+    /// Circle USDC token address.
+    pub asset: String,
+    /// Verified payer address.
+    pub payer: String,
+    /// Policy-authorized recipient.
+    pub payee: String,
+    /// Exact atomic token amount.
+    pub amount: String,
+    /// ERC-3009 lower validity bound.
+    pub valid_after: String,
+    /// ERC-3009 upper validity bound.
+    pub valid_before: String,
+    /// Scoped ERC-3009 nonce namespace.
+    pub anchor_scope: String,
+    /// Raw ERC-3009 nonce.
+    pub anchor_value: [u8; 32],
+    /// Canonical signed-payment identity.
+    pub payment_hash: [u8; 32],
+    /// Gas limit captured in the admission policy snapshot.
+    pub gas_limit: u64,
+    /// Maximum fee per gas captured in the admission policy snapshot.
+    pub max_fee_per_gas: u128,
+}
+
+impl fmt::Debug for StoredEvmSubmission {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("StoredEvmSubmission")
+            .field("network", &self.network)
+            .field("payment", &"<redacted>")
+            .field("gas_limit", &self.gas_limit)
+            .field("max_fee_per_gas", &self.max_fee_per_gas)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Typed failure while binding stored bytes to a settlement row.
+#[derive(Debug, thiserror::Error)]
+pub enum StoredSubmissionError {
+    /// The configured provider cannot validate this submission family.
+    #[error("stored submission does not match the configured provider")]
+    WrongProvider,
+    /// A journal field is malformed or conflicts with immutable provider state.
+    #[error("stored EVM submission has an invalid {0}")]
+    Field(&'static str),
+    /// Exact-envelope validation rejected the bytes or calldata.
+    #[error("stored EVM transaction is inconsistent with the settlement")]
+    Transaction(#[source] StoredTransactionError),
+}
+
 /// A snapshot of the facilitator's signer/relayer and chain head, used to
 /// prepare a submission and to gate readiness.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct SignerHead {
     /// NEAR block height / EVM block number at snapshot time.
     pub chain_block_height: u64,
@@ -559,6 +914,20 @@ pub struct SignerHead {
     pub signer_public_key: String,
     /// Signer's native-gas balance in atomic units (yoctoNEAR / wei).
     pub signer_balance_atomic: u128,
+}
+
+impl fmt::Debug for SignerHead {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SignerHead")
+            .field("chain_block_height", &self.chain_block_height)
+            .field("chain_block_ref", &"<redacted>")
+            .field("signer_nonce", &"<redacted>")
+            .field("signer_id", &"<redacted>")
+            .field("signer_public_key", &"<redacted>")
+            .field("signer_balance_atomic", &"<redacted>")
+            .finish()
+    }
 }
 
 /// A prepared, signed submission. `submit_bytes`/`submit_hash` are durable and
@@ -585,22 +954,31 @@ impl fmt::Debug for Prepared {
         formatter
             .debug_struct("Prepared")
             .field("submit_bytes", &"<redacted>")
-            .field("submit_hash", &self.submit_hash)
-            .field("signer_id", &self.signer_id)
-            .field("signer_public_key", &self.signer_public_key)
-            .field("signer_nonce", &self.signer_nonce)
-            .field("detail", &self.detail)
+            .field("submit_hash", &"<redacted>")
+            .field("signer_id", &"<redacted>")
+            .field("signer_public_key", &"<redacted>")
+            .field("signer_nonce", &"<redacted>")
+            .field("detail", &"<redacted>")
             .finish()
     }
 }
 
 /// Chain-specific prepared-transaction state.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum PreparedDetail {
     /// NEAR: the prepared outer meta-transaction.
     Near(NearPrepared),
     /// EVM: the durable signed ERC-3009 settlement transaction.
     Evm(EvmPrepared),
+}
+
+impl fmt::Debug for PreparedDetail {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Near(_) => formatter.write_str("Near(<redacted>)"),
+            Self::Evm(_) => formatter.write_str("Evm(<redacted>)"),
+        }
+    }
 }
 
 /// The result of broadcasting a prepared submission.
@@ -646,7 +1024,7 @@ pub struct StatusOutcome {
 /// A terminal settlement outcome with the cost and evidence needed for the
 /// journal. The provider validates the chain-specific receipt/log locus before
 /// constructing this, so the engine consumes only neutral fields.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct TerminalOutcome {
     /// Whether the transfer succeeded (inner receipt / log success).
     pub success: bool,
@@ -670,6 +1048,23 @@ pub struct TerminalOutcome {
     /// The confirmation depth observed when this outcome was accepted as
     /// terminal (`>= required_confirmations` for eip155). `None` for NEAR.
     pub confirmations: Option<u64>,
+}
+
+impl fmt::Debug for TerminalOutcome {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TerminalOutcome")
+            .field("success", &self.success)
+            .field("tx_hash", &"<redacted>")
+            .field("recipient_delta_atomic", &"<redacted>")
+            .field("fee_atomic", &"<redacted>")
+            .field("gas_units", &self.gas_units)
+            .field("failure_detail", &self.failure_detail)
+            .field("mined_block_number", &self.mined_block_number)
+            .field("mined_block_hash", &"<redacted>")
+            .field("confirmations", &self.confirmations)
+            .finish()
+    }
 }
 
 /// A neutral verification rejection: the machine reason plus the flag the engine

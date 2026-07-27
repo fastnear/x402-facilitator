@@ -47,16 +47,56 @@ async function expectHttpError(label, action, status, code) {
   throw new Error(`${label} unexpectedly succeeded`);
 }
 
+async function checkAuthentication(invalidVersion, invalidApiKey) {
+  const missingAuthClient = clientWithKey();
+  await expectHttpError(
+    "missing verify authentication",
+    () => verify(missingAuthClient, invalidVersion),
+    401,
+    "invalid_api_key",
+  );
+  await expectHttpError(
+    "missing settle authentication",
+    () => settle(missingAuthClient, invalidVersion),
+    401,
+    "invalid_api_key",
+  );
+
+  const invalidAuthClient = clientWithKey(invalidApiKey);
+  await expectHttpError(
+    "invalid verify authentication",
+    () => verify(invalidAuthClient, invalidVersion),
+    401,
+    "invalid_api_key",
+  );
+  await expectHttpError(
+    "invalid settle authentication",
+    () => settle(invalidAuthClient, invalidVersion),
+    401,
+    "invalid_api_key",
+  );
+}
+
 const client = clientWithKey(scenario.apiKey);
+const expectedNetwork = scenario.network;
+if (typeof expectedNetwork !== "string") {
+  throw new Error("scenario.network must contain the canonical v2 network");
+}
 const supported = await client.getSupported();
 const kind = supported.kinds.find(
   candidate =>
     candidate.x402Version === 2 &&
     candidate.scheme === "exact" &&
-    candidate.network === "near:testnet",
+    candidate.network === expectedNetwork,
 );
 if (!kind || !supported.extensions.includes("payment-identifier")) {
-  throw new Error("official client did not receive the expected NEAR support declaration");
+  throw new Error("official client did not receive the expected support declaration");
+}
+if (
+  typeof scenario.expectedSigner === "string" &&
+  !supported.signers?.[expectedNetwork]?.includes(scenario.expectedSigner)
+) {
+  throw new Error("official client did not receive the expected facilitator signer");
 }
 
 const invalidVerification = await verify(client, scenario.invalidVersion);
@@ -67,78 +107,63 @@ const invalidSettlement = await settle(client, scenario.invalidVersion);
 assert.equal(invalidSettlement.success, false);
 assert.equal(invalidSettlement.errorReason, "invalid_x402_version");
 assert.equal(invalidSettlement.transaction, "");
-assert.equal(invalidSettlement.network, "near:testnet");
+assert.equal(invalidSettlement.network, expectedNetwork);
 
-const validVerification = await verify(client, scenario.valid);
-assert.equal(validVerification.isValid, true);
-assert.equal(validVerification.payer, scenario.expectedPayer);
+await checkAuthentication(scenario.invalidVersion, scenario.invalidApiKey);
 
-const successfulSettlement = await settle(client, scenario.valid);
-assert.equal(successfulSettlement.success, true);
-assert.equal(successfulSettlement.payer, scenario.expectedPayer);
-assert.equal(successfulSettlement.network, "near:testnet");
-assert.notEqual(successfulSettlement.transaction, "");
+let summary;
+if (scenario.mode === "protocol") {
+  summary = {
+    supported: true,
+    invalidVersion: {
+      verify: invalidVerification.invalidReason,
+      settle: invalidSettlement.errorReason,
+    },
+    authentication: true,
+    mode: "protocol",
+  };
+} else {
+  const validVerification = await verify(client, scenario.valid);
+  assert.equal(validVerification.isValid, true);
+  assert.equal(validVerification.payer, scenario.expectedPayer);
 
-const exactReplay = await settle(client, scenario.valid);
-assert.deepEqual(
-  exactReplay,
-  successfulSettlement,
-  "official client did not receive the exact terminal response on replay",
-);
+  const successfulSettlement = await settle(client, scenario.valid);
+  assert.equal(successfulSettlement.success, true);
+  assert.equal(successfulSettlement.payer, scenario.expectedPayer);
+  assert.equal(successfulSettlement.network, expectedNetwork);
+  assert.notEqual(successfulSettlement.transaction, "");
 
-await expectHttpError(
-  "payment identifier conflict",
-  () => settle(client, scenario.conflict),
-  409,
-  "payment_identifier_conflict",
-);
+  const exactReplay = await settle(client, scenario.valid);
+  assert.deepEqual(
+    exactReplay,
+    successfulSettlement,
+    "official client did not receive the exact terminal response on replay",
+  );
 
-const duplicate = await settle(client, scenario.duplicate);
-assert.equal(duplicate.success, false);
-assert.equal(duplicate.errorReason, "duplicate_settlement");
-assert.equal(duplicate.transaction, "");
-assert.equal(duplicate.network, "near:testnet");
+  await expectHttpError(
+    "payment identifier conflict",
+    () => settle(client, scenario.conflict),
+    409,
+    "payment_identifier_conflict",
+  );
 
-const missingAuthClient = clientWithKey();
-await expectHttpError(
-  "missing verify authentication",
-  () => verify(missingAuthClient, scenario.invalidVersion),
-  401,
-  "invalid_api_key",
-);
-await expectHttpError(
-  "missing settle authentication",
-  () => settle(missingAuthClient, scenario.invalidVersion),
-  401,
-  "invalid_api_key",
-);
+  const duplicate = await settle(client, scenario.duplicate);
+  assert.equal(duplicate.success, false);
+  assert.equal(duplicate.errorReason, "duplicate_settlement");
+  assert.equal(duplicate.transaction, "");
+  assert.equal(duplicate.network, expectedNetwork);
 
-const invalidAuthClient = clientWithKey(scenario.invalidApiKey);
-await expectHttpError(
-  "invalid verify authentication",
-  () => verify(invalidAuthClient, scenario.invalidVersion),
-  401,
-  "invalid_api_key",
-);
-await expectHttpError(
-  "invalid settle authentication",
-  () => settle(invalidAuthClient, scenario.invalidVersion),
-  401,
-  "invalid_api_key",
-);
+  const rateClient = clientWithKey(scenario.rateApiKey);
+  assert.equal((await verify(rateClient, scenario.invalidVersion)).isValid, false);
+  assert.equal((await verify(rateClient, scenario.invalidVersion)).isValid, false);
+  await expectHttpError(
+    "verify rate limit",
+    () => verify(rateClient, scenario.invalidVersion),
+    429,
+    "rate_limit_exceeded",
+  );
 
-const rateClient = clientWithKey(scenario.rateApiKey);
-assert.equal((await verify(rateClient, scenario.invalidVersion)).isValid, false);
-assert.equal((await verify(rateClient, scenario.invalidVersion)).isValid, false);
-await expectHttpError(
-  "verify rate limit",
-  () => verify(rateClient, scenario.invalidVersion),
-  429,
-  "rate_limit_exceeded",
-);
-
-process.stdout.write(
-  JSON.stringify({
+  summary = {
     supported: true,
     invalidVersion: {
       verify: invalidVerification.invalidReason,
@@ -153,5 +178,7 @@ process.stdout.write(
     duplicate: duplicate.errorReason,
     authentication: true,
     rateLimit: 429,
-  }),
-);
+  };
+}
+
+process.stdout.write(JSON.stringify(summary));

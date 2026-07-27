@@ -21,8 +21,8 @@ FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bb
 
 ARG VERSION=0.0.0
 ARG VCS_REF=unknown
-LABEL org.opencontainers.image.title="FastNEAR x402 facilitator for NEAR" \
-      org.opencontainers.image.description="Rust x402 v2 exact Circle USDC facilitator for NEAR" \
+LABEL org.opencontainers.image.title="FastNEAR x402 facilitator for NEAR and Base" \
+      org.opencontainers.image.description="Rust x402 exact Circle USDC facilitator for NEAR and Base" \
       org.opencontainers.image.source="https://github.com/fastnear/x402-near-facilitator" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.revision="${VCS_REF}" \

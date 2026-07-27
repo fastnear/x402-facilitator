@@ -417,6 +417,181 @@ fn delegate_debug_output_redacts_payment_material() -> Result<(), Box<dyn Error>
 
 #[test]
 #[allow(clippy::too_many_lines)]
+fn debug_output_redacts_near_payment_and_recovery_material() -> Result<(), Box<dyn Error>> {
+    let fixture = fixture()?;
+    let encoded = &fixture.delegates[0].signed_delegate_action;
+    let decoded = decode_signed_delegate(encoded)?;
+    let payer = decoded
+        .signed_delegate
+        .delegate_action
+        .sender_id
+        .to_string();
+    let payer_public_key = decoded
+        .signed_delegate
+        .delegate_action
+        .public_key
+        .to_string();
+    let asset = "debug-asset-secret.testnet";
+    let recipient_account = "debug-payee-secret.testnet";
+    let amount = "987654321012345678901234";
+    let requirements = crate::VerifiedRequirements {
+        network: NearNetwork::Testnet,
+        asset: asset.parse()?,
+        pay_to: recipient_account.parse()?,
+        amount: amount.parse()?,
+        amount_decimal: amount.to_owned(),
+        max_timeout_seconds: 61,
+    };
+    let requirements_debug = format!("{requirements:?}");
+    assert!(requirements_debug.contains("VerifiedRequirements"));
+    assert!(requirements_debug.contains("<redacted>"));
+    for secret in [asset, recipient_account, amount] {
+        assert!(!requirements_debug.contains(secret));
+    }
+
+    let verified = crate::VerifiedPayment::new(
+        requirements,
+        decoded.signed_delegate,
+        decoded.bytes,
+        [90; 32],
+    );
+    let verified_debug = format!("{verified:?}");
+    assert!(verified_debug.contains("VerifiedPayment"));
+    for secret in [
+        payer.as_str(),
+        payer_public_key.as_str(),
+        asset,
+        recipient_account,
+        amount,
+        encoded,
+        "90, 90, 90",
+    ] {
+        assert!(!verified_debug.contains(secret));
+    }
+
+    let relayer = test_signer("debug-relayer-secret.testnet")?;
+    let relayer_id = relayer.get_account_id().to_string();
+    let relayer_public_key = relayer.public_key().to_string();
+    let transaction_hash = CryptoHash::hash_bytes(b"prepared-transaction-debug-secret");
+    let signed_transaction_bytes = vec![222, 173, 190, 239, 202, 254];
+    let prepared = crate::PreparedTransaction::new(
+        transaction_hash,
+        8_888_777_666,
+        relayer.get_account_id(),
+        relayer.public_key(),
+        signed_transaction_bytes,
+    );
+    let prepared_debug = format!("{prepared:?}");
+    assert!(prepared_debug.contains("PreparedTransaction"));
+    for secret in [
+        transaction_hash.to_string(),
+        relayer_id.clone(),
+        relayer_public_key.clone(),
+        "8888777666".to_owned(),
+        "222, 173, 190, 239".to_owned(),
+    ] {
+        assert!(!prepared_debug.contains(&secret));
+    }
+
+    let block_hash = CryptoHash::hash_bytes(b"relayer-head-debug-secret");
+    let head = RelayerHead {
+        block_height: 1_234,
+        block_hash,
+        access_key_nonce: 7_777_666_655,
+    };
+    let head_debug = format!("{head:?}");
+    assert!(head_debug.contains("block_height: 1234"));
+    assert!(!head_debug.contains(&block_hash.to_string()));
+    assert!(!head_debug.contains("7777666655"));
+
+    let account = MockRpc::account();
+    let account_code_hash = account.code_hash;
+    let account_balance = account.amount.as_yoctonear().to_string();
+    let status = crate::RelayerStatus {
+        block_height: 1_235,
+        block_hash,
+        access_key_nonce: 7_777_666_656,
+        account,
+    };
+    let status_debug = format!("{status:?}");
+    assert!(status_debug.contains("RelayerStatus"));
+    for secret in [
+        block_hash.to_string(),
+        account_code_hash.to_string(),
+        account_balance,
+        "7777666656".to_owned(),
+    ] {
+        assert!(!status_debug.contains(&secret));
+    }
+
+    let failure_reason = "debug-failure-reason-secret";
+    let failure_message = "debug-failure-message-secret";
+    let disposition = crate::SettlementDisposition::Failed {
+        transaction: Some(transaction_hash),
+        reason: failure_reason.to_owned(),
+        message: Some(failure_message.to_owned()),
+    };
+    let disposition_debug = format!("{disposition:?}");
+    assert!(disposition_debug.contains("SettlementDisposition::Failed"));
+    for secret in [
+        transaction_hash.to_string(),
+        failure_reason.to_owned(),
+        failure_message.to_owned(),
+    ] {
+        assert!(!disposition_debug.contains(&secret));
+    }
+
+    let chain_provider = provider(Arc::new(MockRpc::new()))?;
+    let provider_debug = format!("{chain_provider:?}");
+    assert!(provider_debug.contains("NearChainProvider"));
+    assert!(!provider_debug.contains("relayer.testnet"));
+    assert!(!provider_debug.contains(&chain_provider.relayer_public_key().to_string()));
+
+    let final_block = FinalBlock {
+        height: 1_236,
+        hash: block_hash,
+    };
+    let final_block_debug = format!("{final_block:?}");
+    assert!(final_block_debug.contains("height: 1236"));
+    assert!(!final_block_debug.contains(&block_hash.to_string()));
+
+    let outcome = successful_outcome()?;
+    let outcome_hash = outcome.transaction.hash;
+    let outcome_signer = outcome.transaction.signer_id.to_string();
+    let lookup_debug = format!("{:?}", TransactionLookup::Final(Box::new(outcome)));
+    assert!(lookup_debug.contains("TransactionLookup::Final"));
+    assert!(!lookup_debug.contains(&outcome_hash.to_string()));
+    assert!(!lookup_debug.contains(&outcome_signer));
+    let pending_debug = format!(
+        "{:?}",
+        TransactionLookup::Pending(near_primitives::views::TxExecutionStatus::IncludedFinal)
+    );
+    assert!(pending_debug.contains("IncludedFinal"));
+
+    let receipt_id = CryptoHash::hash_bytes(b"successful-receipt-debug-secret");
+    let receipt = crate::SuccessfulTransferReceipt {
+        receipt_id,
+        value: vec![17, 34, 51, 68],
+    };
+    let receipt_debug = format!("{receipt:?}");
+    assert!(receipt_debug.contains("SuccessfulTransferReceipt"));
+    assert!(!receipt_debug.contains(&receipt_id.to_string()));
+    assert!(!receipt_debug.contains("17, 34, 51, 68"));
+
+    let rpc_detail = "debug-rpc-payload-secret";
+    let rpc_error = NearRpcError::Request(rpc_detail.to_owned());
+    assert!(!format!("{rpc_error:?}").contains(rpc_detail));
+    assert!(!rpc_error.to_string().contains(rpc_detail));
+
+    let receipt_detail = "debug-receipt-payload-secret";
+    let receipt_error = ReceiptValidationError::FinalFailure(receipt_detail.to_owned());
+    assert!(!format!("{receipt_error:?}").contains(receipt_detail));
+    assert!(!receipt_error.to_string().contains(receipt_detail));
+    Ok(())
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
 fn verification_reason_strings_and_payer_attribution_are_stable() {
     let cases = [
         (

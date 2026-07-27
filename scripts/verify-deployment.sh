@@ -25,7 +25,18 @@ curl $curl_common "$base_url/healthz" >/dev/null
 # shellcheck disable=SC2086
 curl $curl_common "$base_url/readyz" >/dev/null
 # shellcheck disable=SC2086
+landing=$(curl $curl_common "$base_url/")
+# shellcheck disable=SC2086
 supported=$(curl $curl_common "$base_url/supported")
+
+printf '%s' "$landing" | python3 -c '
+import sys
+
+body = sys.stdin.read()
+assert "<title>x402 facilitator for NEAR and Base</title>" in body
+assert "href=\"/supported\"" in body
+assert "docs/reference-access.md" in body
+'
 
 printf '%s' "$supported" | python3 -c '
 import json
@@ -47,12 +58,7 @@ if len(kinds) == 2:
     assert legacy["x402Version"] == 1
     assert legacy["scheme"] == "exact"
     assert legacy["network"] in {"base", "base-sepolia"}
-if kind["network"].startswith("near:"):
-    # The payment-identifier extension is advertised by the NEAR scheme
-    # handler; EVM instances advertise no extensions.
-    assert "payment-identifier" in body["extensions"]
-else:
-    assert isinstance(body["extensions"], list)
+assert "payment-identifier" in body["extensions"]
 assert isinstance(body["signers"], dict)
 '
 

@@ -55,8 +55,8 @@ impl fmt::Debug for RequestMeta {
             .field("x402_version", &self.x402_version)
             .field("scheme", &self.scheme)
             .field("network", &self.network)
-            .field("asset", &self.asset)
-            .field("amount", &self.amount)
+            .field("asset", &"<redacted>")
+            .field("amount", &"<redacted>")
             .field("pay_to", &"<redacted>")
             .field("signed_delegate_action", &"<redacted>")
             .field("payment_identifier", &"<redacted>")
@@ -64,7 +64,7 @@ impl fmt::Debug for RequestMeta {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VerifyResponse {
     pub is_valid: bool,
@@ -76,6 +76,19 @@ pub struct VerifyResponse {
     pub payer: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extensions: Option<Map<String, Value>>,
+}
+
+impl fmt::Debug for VerifyResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("VerifyResponse")
+            .field("is_valid", &self.is_valid)
+            .field("invalid_reason", &self.invalid_reason)
+            .field("invalid_message", &"<redacted>")
+            .field("payer", &"<redacted>")
+            .field("extensions", &"<redacted>")
+            .finish()
+    }
 }
 
 impl VerifyResponse {
@@ -104,7 +117,7 @@ impl VerifyResponse {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SettleResponse {
     pub success: bool,
@@ -118,6 +131,21 @@ pub struct SettleResponse {
     pub network: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extensions: Option<Map<String, Value>>,
+}
+
+impl fmt::Debug for SettleResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SettleResponse")
+            .field("success", &self.success)
+            .field("error_reason", &self.error_reason)
+            .field("error_message", &"<redacted>")
+            .field("payer", &"<redacted>")
+            .field("transaction", &"<redacted>")
+            .field("network", &self.network)
+            .field("extensions", &"<redacted>")
+            .finish()
+    }
 }
 
 impl SettleResponse {
@@ -162,12 +190,23 @@ pub struct SupportedKind {
     pub extra: Option<Value>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SupportedResponse {
     pub kinds: Vec<SupportedKind>,
     pub extensions: Vec<String>,
     pub signers: std::collections::HashMap<String, Vec<String>>,
+}
+
+impl fmt::Debug for SupportedResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SupportedResponse")
+            .field("kinds", &self.kinds)
+            .field("extensions", &self.extensions)
+            .field("signers", &"<redacted>")
+            .finish()
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -286,9 +325,9 @@ pub fn parse_request(
 /// Validate the chain-specific mechanism payload (`paymentPayload.payload`) and
 /// return the NEAR base64 `SignedDelegateAction`, or `None` for eip155. NEAR
 /// carries a signed delegate; eip155 carries an ERC-3009 `authorization` object
-/// plus the payer `signature`. Only the shape is checked here — the deep field
-/// and signature validation is the mechanism's job (NEAR decode at settle, or
-/// the upstream eip155 provider parser at verify/settle).
+/// plus the payer `signature`. The HTTP boundary denies unknown authorization
+/// fields and enforces lossless scalar encodings; address/signature semantics
+/// remain the upstream eip155 provider's job.
 fn parse_mechanism_payload(
     mechanism_payload: &Map<String, Value>,
     network: &str,
@@ -299,12 +338,11 @@ fn parse_mechanism_payload(
             &["authorization", "signature"],
             "paymentPayload.payload",
         )?;
-        if !mechanism_payload
+        let authorization = mechanism_payload
             .get("authorization")
-            .is_some_and(Value::is_object)
-        {
-            return Err(RequestError::Field("paymentPayload.payload.authorization"));
-        }
+            .and_then(Value::as_object)
+            .ok_or(RequestError::Field("paymentPayload.payload.authorization"))?;
+        validate_eip155_authorization(authorization)?;
         required_string(
             mechanism_payload,
             "signature",
@@ -323,6 +361,28 @@ fn parse_mechanism_payload(
             "paymentPayload.payload.signedDelegateAction",
         )?))
     }
+}
+
+fn validate_eip155_authorization(authorization: &Map<String, Value>) -> Result<(), RequestError> {
+    const PATH: &str = "paymentPayload.payload.authorization";
+    ensure_allowed_keys(
+        authorization,
+        &["from", "to", "value", "validAfter", "validBefore", "nonce"],
+        PATH,
+    )?;
+    required_string(authorization, "from", PATH)?;
+    required_string(authorization, "to", PATH)?;
+    required_decimal_string(authorization, "value", PATH)?;
+    required_decimal_string(authorization, "validAfter", PATH)?;
+    required_decimal_string(authorization, "validBefore", PATH)?;
+    let nonce = required_string(authorization, "nonce", PATH)?;
+    let valid_nonce = nonce
+        .strip_prefix("0x")
+        .is_some_and(|hex| hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    if !valid_nonce {
+        return Err(RequestError::Field(PATH));
+    }
+    Ok(())
 }
 
 pub fn request_fingerprint(
@@ -787,6 +847,45 @@ mod tests {
         assert!(parse_request(&encoded(&authorization_not_object), &policy, false).is_err());
     }
 
+    #[test]
+    fn eip155_authorization_is_strict_and_lossless_at_parse_boundary() {
+        let policy = PaymentIdentifierConfig::default();
+        let mut unknown = eip155_request_value();
+        unknown["paymentPayload"]["payload"]["authorization"]["unexpected"] = Value::Bool(true);
+        assert!(parse_request(&encoded(&unknown), &policy, false).is_err());
+
+        for field in ["from", "to", "value", "validAfter", "validBefore", "nonce"] {
+            let mut missing = eip155_request_value();
+            missing["paymentPayload"]["payload"]["authorization"]
+                .as_object_mut()
+                .unwrap_or_else(|| std::process::abort())
+                .remove(field);
+            assert!(parse_request(&encoded(&missing), &policy, false).is_err());
+        }
+
+        for field in ["value", "validAfter", "validBefore"] {
+            let mut numeric = eip155_request_value();
+            numeric["paymentPayload"]["payload"]["authorization"][field] = Value::from(1);
+            assert!(parse_request(&encoded(&numeric), &policy, false).is_err());
+
+            let mut non_decimal = eip155_request_value();
+            non_decimal["paymentPayload"]["payload"]["authorization"][field] =
+                Value::String("1.0".to_owned());
+            assert!(parse_request(&encoded(&non_decimal), &policy, false).is_err());
+        }
+
+        for nonce in [
+            "0x01",
+            "01",
+            "0xgg00000000000000000000000000000000000000000000000000000000000000",
+        ] {
+            let mut invalid_nonce = eip155_request_value();
+            invalid_nonce["paymentPayload"]["payload"]["authorization"]["nonce"] =
+                Value::String(nonce.to_owned());
+            assert!(parse_request(&encoded(&invalid_nonce), &policy, false).is_err());
+        }
+    }
+
     fn v1_wire_request_value() -> Value {
         serde_json::json!({
             "x402Version": 1,
@@ -843,6 +942,23 @@ mod tests {
     }
 
     #[test]
+    fn translated_v1_authorization_rejects_unknown_or_lossy_fields() {
+        let policy = PaymentIdentifierConfig::default();
+        let mut unknown = v1_wire_request_value();
+        unknown["paymentPayload"]["payload"]["authorization"]["unexpected"] = Value::Bool(true);
+        assert!(parse_request(&encoded(&unknown), &policy, true).is_err());
+
+        let mut numeric_window = v1_wire_request_value();
+        numeric_window["paymentPayload"]["payload"]["authorization"]["validAfter"] = Value::from(0);
+        assert!(parse_request(&encoded(&numeric_window), &policy, true).is_err());
+
+        let mut short_nonce = v1_wire_request_value();
+        short_nonce["paymentPayload"]["payload"]["authorization"]["nonce"] =
+            Value::String("0x01".to_owned());
+        assert!(parse_request(&encoded(&short_nonce), &policy, true).is_err());
+    }
+
+    #[test]
     fn v2_wire_requests_are_untouched_by_the_v1_gate() {
         let policy = PaymentIdentifierConfig::default();
         let body = encoded(&eip155_request_value());
@@ -886,16 +1002,46 @@ mod tests {
             x402_version: 2,
             scheme: "exact".to_owned(),
             network: "near:testnet".to_owned(),
-            asset: "usdc.testnet".to_owned(),
-            amount: "1000".to_owned(),
+            asset: "sensitive-asset.testnet".to_owned(),
+            amount: "sensitive-amount-1000".to_owned(),
             pay_to: "sensitive-payee.testnet".to_owned(),
             signed_delegate_action: Some("sensitive-signed-delegate".to_owned()),
             payment_identifier: Some("sensitive_identifier_1234".to_owned()),
         };
         let debug = format!("{meta:?}");
         assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains("sensitive-asset.testnet"));
+        assert!(!debug.contains("sensitive-amount-1000"));
         assert!(!debug.contains("sensitive-payee.testnet"));
         assert!(!debug.contains("sensitive-signed-delegate"));
         assert!(!debug.contains("sensitive_identifier_1234"));
+    }
+
+    #[test]
+    fn response_debug_output_redacts_payer_transaction_and_signers() {
+        let settle = SettleResponse::success(
+            "sensitive-payer".to_owned(),
+            "sensitive-transaction-hash".to_owned(),
+            "eip155:8453".to_owned(),
+        );
+        let verify = VerifyResponse::valid("sensitive-payer".to_owned());
+        let supported = SupportedResponse {
+            kinds: Vec::new(),
+            extensions: Vec::new(),
+            signers: std::collections::HashMap::from([(
+                "eip155:8453".to_owned(),
+                vec!["sensitive-signer".to_owned()],
+            )]),
+        };
+        for debug in [
+            format!("{settle:?}"),
+            format!("{verify:?}"),
+            format!("{supported:?}"),
+        ] {
+            assert!(debug.contains("<redacted>"));
+            assert!(!debug.contains("sensitive-payer"));
+            assert!(!debug.contains("sensitive-transaction-hash"));
+            assert!(!debug.contains("sensitive-signer"));
+        }
     }
 }

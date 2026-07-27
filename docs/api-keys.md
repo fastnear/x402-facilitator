@@ -47,14 +47,11 @@ action belong in the operator's private client registry; they are not
 stored in the settlement database. Link that external audit record to the
 client UUID without copying the raw key.
 
-The initial launch policies are:
-
-| Environment | Network | Asset | Payee |
-| --- | --- | --- | --- |
-| Testnet | `near:testnet` | Circle test USDC contract | `merchant.mike.testnet` |
-| Mainnet | `near:mainnet` | Circle native USDC contract | `count.mike.near` |
-
-No wildcard fields are allowed.
+Every allow-payee row contains the instance's exact CAIP-2 network, configured
+canonical Circle USDC contract, and one exact recipient. The admin command
+rejects cross-tier clients and policy values that do not match the instance.
+No wildcard fields are allowed; self-hosters must never copy payees from the
+public reference deployment.
 
 ## Lifecycle
 

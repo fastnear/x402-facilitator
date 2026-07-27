@@ -7,7 +7,7 @@ use std::process::Command;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -48,11 +48,11 @@ use crate::VERSION;
 use crate::auth::{ApiKeyAuthenticator, digest_api_key};
 use crate::chain::ChainProvider;
 use crate::config::{
-    ChainKind, Environment, PaymentIdentifierConfig, RequestLimits, ServiceConfig,
+    ChainKind, Eip155Config, Environment, PaymentIdentifierConfig, RequestLimits, ServiceConfig,
     SponsorshipConfig,
 };
 use crate::leadership::ReadinessState;
-use crate::store::{ApiClient, PgStore};
+use crate::store::{ApiClient, PgStore, SettlementState};
 use crate::telemetry::{Metrics, TelemetryGuard};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
@@ -61,6 +61,8 @@ const TESTNET_USDC: &str = "3e2210e1184b45b64c8a434c0a7e7b23cc04ea7eb7a6c3c32520
 const TEST_PAYEE: &str = "merchant.mike.testnet";
 const TEST_PAYER: &str = "x402-http-payer.testnet";
 const TEST_RELAYER: &str = "x402-http-relayer.testnet";
+const BASE_SEPOLIA_USDC: &str = "0x036cbd53842c5426634e7929541ec2318f3dcf7e";
+const BASE_PROTOCOL_SIGNER: &str = "0x51f2dbe5c2e1f3f0d9a5b6c7e8f9a0b1c2d3e4f5";
 const TEST_PEPPER: [u8; 32] = [0x42; 32];
 
 #[derive(Debug)]
@@ -70,6 +72,8 @@ struct MockRpc {
     sends: AtomicUsize,
     payer_nonce: AtomicU64,
     relayer_nonce: AtomicU64,
+    relayer_account_failures: AtomicUsize,
+    advance_payer_nonce: AtomicBool,
 }
 
 impl MockRpc {
@@ -83,7 +87,17 @@ impl MockRpc {
             sends: AtomicUsize::new(0),
             payer_nonce: AtomicU64::new(0),
             relayer_nonce: AtomicU64::new(0),
+            relayer_account_failures: AtomicUsize::new(0),
+            advance_payer_nonce: AtomicBool::new(true),
         }
+    }
+
+    fn fail_next_relayer_account_lookup(&self) {
+        self.relayer_account_failures.store(1, Ordering::SeqCst);
+    }
+
+    fn keep_payer_nonce_stable(&self) {
+        self.advance_payer_nonce.store(false, Ordering::SeqCst);
     }
 
     fn require_submitted_before_broadcast(&self, pool: PgPool) {
@@ -166,9 +180,19 @@ impl NearRpc for MockRpc {
     async fn view_account(
         &self,
         block_hash: CryptoHash,
-        _account_id: AccountId,
+        account_id: AccountId,
     ) -> Result<AccountView, NearRpcError> {
         self.ensure_pinned(block_hash)?;
+        if account_id.as_str() == TEST_RELAYER
+            && self
+                .relayer_account_failures
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+        {
+            return Err(NearRpcError::Timeout);
+        }
         Ok(Self::account())
     }
 
@@ -224,8 +248,10 @@ impl NearRpc for MockRpc {
                 "HTTP fixture expected delegate action",
             ));
         };
-        self.payer_nonce
-            .store(delegate.delegate_action.nonce, Ordering::SeqCst);
+        if self.advance_payer_nonce.load(Ordering::SeqCst) {
+            self.payer_nonce
+                .store(delegate.delegate_action.nonce, Ordering::SeqCst);
+        }
         Ok(TransactionLookup::Final(Box::new(successful_outcome(
             signed_transaction,
         )?)))
@@ -351,6 +377,29 @@ fn service_config() -> TestResult<ServiceConfig> {
     })
 }
 
+fn base_protocol_config() -> TestResult<ServiceConfig> {
+    let mut config = service_config()?;
+    config.chain_kind = ChainKind::Eip155;
+    config.network = "eip155:84532".to_owned();
+    config.asset = BASE_SEPOLIA_USDC.to_owned();
+    config.relayer_account_id = BASE_PROTOCOL_SIGNER.to_owned();
+    config.max_inner_gas = 0;
+    config.sponsorship = SponsorshipConfig {
+        global_daily_yocto_near: "500000000000000000".to_owned(),
+        default_client_daily_yocto_near: "100000000000000000".to_owned(),
+        reservation_yocto_near: "10000000000000000".to_owned(),
+        balance_warning_yocto_near: "1000000000000000000".to_owned(),
+        balance_hard_stop_yocto_near: "250000000000000000".to_owned(),
+    };
+    config.eip155 = Some(Eip155Config {
+        chain_id: 84_532,
+        required_confirmations: 2,
+        gas_limit: 120_000,
+        max_fee_per_gas_wei: "1000000000".to_owned(),
+    });
+    Ok(config)
+}
+
 fn build_facilitator(provider: NearChainProvider) -> FacilitatorLocal<SchemeRegistry> {
     let chain_id = provider.chain_id();
     let mut providers = std::collections::HashMap::new();
@@ -383,6 +432,41 @@ fn build_application(store: PgStore, metrics: Metrics) -> TestResult<TestApplica
         store,
         auth,
         Some(facilitator),
+        ChainProvider::Near(provider),
+        readiness.clone(),
+        metrics,
+    );
+    Ok(TestApplication {
+        router: router(state),
+        readiness,
+        rpc,
+        relayer_public_key,
+    })
+}
+
+// `/supported` and static protocol rejection need only the neutral provider
+// identity. A NEAR-backed provider with an address-shaped account keeps this
+// HTTP fixture offline while exercising the real EVM router branch
+// (`facilitator: None`) and canonical Base configuration.
+fn build_base_protocol_application(
+    store: PgStore,
+    metrics: Metrics,
+) -> TestResult<TestApplication> {
+    let config = base_protocol_config()?;
+    let rpc = Arc::new(MockRpc::new());
+    let primary: Arc<dyn NearRpc> = rpc.clone();
+    let backup: Arc<dyn NearRpc> = rpc.clone();
+    let relayer_signer = test_signer(BASE_PROTOCOL_SIGNER)?;
+    let relayer_public_key = relayer_signer.public_key().to_string();
+    let provider = NearChainProvider::new(NearNetwork::Testnet, primary, Arc::new(relayer_signer))
+        .with_backup_rpc(backup);
+    let auth = ApiKeyAuthenticator::new(store.clone(), Environment::Testnet, TEST_PEPPER)?;
+    let readiness = ReadinessState::default();
+    let state = AppState::new(
+        config,
+        store,
+        auth,
+        None,
         ChainProvider::Near(provider),
         readiness.clone(),
         metrics,
@@ -459,6 +543,37 @@ fn invalid_version_request_with_nonce(signer: &Signer, nonce: u64) -> TestResult
     request["x402Version"] = json!(1);
     request["paymentPayload"]["x402Version"] = json!(1);
     Ok(request)
+}
+
+fn base_invalid_version_request() -> Value {
+    let requirements = json!({
+        "scheme": "exact",
+        "network": "eip155:84532",
+        "asset": BASE_SEPOLIA_USDC,
+        "amount": "1000",
+        "payTo": "0xa2acb5d3ac1c35999532624188470ec6228039dc",
+        "maxTimeoutSeconds": 60,
+        "extra": {"name": "USDC", "version": "2"},
+    });
+    json!({
+        "x402Version": 1,
+        "paymentPayload": {
+            "x402Version": 1,
+            "accepted": requirements.clone(),
+            "payload": {
+                "authorization": {
+                    "from": "0x11efa374c489d106f9b6ac1b9b73a7a54c237c6d",
+                    "to": "0xa2acb5d3ac1c35999532624188470ec6228039dc",
+                    "value": "1000",
+                    "validAfter": "0",
+                    "validBefore": "9999999999",
+                    "nonce": "0x0000000000000000000000000000000000000000000000000000000000000001",
+                },
+                "signature": "0xdeadbeef",
+            },
+        },
+        "paymentRequirements": requirements,
+    })
 }
 
 fn api_key(seed: u8) -> (String, String) {
@@ -1084,6 +1199,7 @@ async fn assert_protected_contract(
     official_duplicate["paymentPayload"]["extensions"]["payment-identifier"]["info"]["id"] =
         json!("payment_official_000000000002");
     let official_scenario = json!({
+        "network": "near:testnet",
         "apiKey": official_key,
         "rateApiKey": official_rate_key,
         "invalidApiKey": invalid_official_key,
@@ -1095,6 +1211,13 @@ async fn assert_protected_contract(
     });
     let official_client_ran =
         run_official_client_if_requested(&application.router, &official_scenario).await?;
+    if std::env::var("X402_RUN_NODE_CLIENT_CONFORMANCE").as_deref() == Ok("1")
+        && !official_client_ran
+    {
+        return Err(
+            std::io::Error::other("required NEAR official-client conformance did not run").into(),
+        );
+    }
     assert_eq!(
         application.rpc.sends.load(Ordering::SeqCst),
         if official_client_ran { 2 } else { 1 }
@@ -1134,6 +1257,226 @@ async fn assert_protected_contract(
         "sponsorship_budget_exhausted"
     );
 
+    // A pre-prepare signer-head outage releases both the row and its budget.
+    // Identical identifierless requests may then race to resume one new
+    // attempt; altered canonical requests retain duplicate-payment semantics.
+    let (retry_client, retry_key) = seed_client(&database.store, 6, 100, 100).await?;
+    let retry_request = valid_request(payer, 10, None)?;
+    let retry_bytes = serde_json::to_vec(&retry_request)?;
+    let sends_before_retry = application.rpc.sends.load(Ordering::SeqCst);
+    application.rpc.fail_next_relayer_account_lookup();
+    let transient = call(
+        &application.router,
+        http_request(
+            Method::POST,
+            "/settle",
+            retry_bytes.clone(),
+            Some("application/json"),
+            Some(&retry_key),
+            None,
+        )?,
+    )
+    .await?;
+    assert_eq!(transient.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(transient.json()?["error"]["code"], "settlement_retryable");
+    assert_eq!(
+        transient
+            .headers
+            .get(RETRY_AFTER)
+            .and_then(|value| value.to_str().ok()),
+        Some("1")
+    );
+    assert_eq!(
+        application.rpc.sends.load(Ordering::SeqCst),
+        sends_before_retry
+    );
+
+    let retry_id: Uuid = sqlx::query_scalar(
+        "SELECT id FROM settlements \
+         WHERE api_client_id = $1 AND payment_identifier IS NULL",
+    )
+    .bind(retry_client.id)
+    .fetch_one(&database.pool)
+    .await?;
+    let released = database
+        .store
+        .settlement(retry_id)
+        .await?
+        .ok_or_else(|| std::io::Error::other("retryable settlement disappeared"))?;
+    assert_eq!(released.state, SettlementState::AwaitingRetry);
+    assert_eq!(released.reserved_yocto_near, "0");
+    assert_eq!(released.attempt_count, 1);
+    assert_eq!(released.retry_code.as_deref(), Some("relayer_unavailable"));
+    let released_usage = database.store.global_sponsorship_usage_today().await?;
+    assert_eq!(released_usage.reserved_yocto_near, "0");
+
+    let mut altered_retry = retry_request;
+    altered_retry["paymentRequirements"]["extra"] = json!({"changed": true});
+    let altered_retry = call(
+        &application.router,
+        http_request(
+            Method::POST,
+            "/settle",
+            serde_json::to_vec(&altered_retry)?,
+            Some("application/json"),
+            Some(&retry_key),
+            None,
+        )?,
+    )
+    .await?;
+    assert_eq!(altered_retry.status, StatusCode::OK);
+    assert_eq!(altered_retry.json()?["errorReason"], "duplicate_settlement");
+
+    ready(&application.readiness);
+    application.rpc.keep_payer_nonce_stable();
+    let retry_concurrency = 50;
+    let barrier = Arc::new(Barrier::new(retry_concurrency + 1));
+    let mut retry_tasks = tokio::task::JoinSet::new();
+    for _ in 0..retry_concurrency {
+        let router = application.router.clone();
+        let body = retry_bytes.clone();
+        let key = retry_key.clone();
+        let barrier = Arc::clone(&barrier);
+        retry_tasks.spawn(async move {
+            barrier.wait().await;
+            call(
+                &router,
+                http_request(
+                    Method::POST,
+                    "/settle",
+                    body,
+                    Some("application/json"),
+                    Some(&key),
+                    None,
+                )?,
+            )
+            .await
+        });
+    }
+    barrier.wait().await;
+    let mut retry_terminal_bytes: Option<Vec<u8>> = None;
+    while let Some(joined) = retry_tasks.join_next().await {
+        let response = joined??;
+        assert_eq!(response.status, StatusCode::OK);
+        assert_eq!(response.json()?["success"], true);
+        if let Some(expected) = &retry_terminal_bytes {
+            assert_eq!(&response.bytes, expected);
+        } else {
+            retry_terminal_bytes = Some(response.bytes);
+        }
+    }
+    assert_eq!(
+        application.rpc.sends.load(Ordering::SeqCst),
+        sends_before_retry + 1
+    );
+    let retried = database
+        .store
+        .settlement(retry_id)
+        .await?
+        .ok_or_else(|| std::io::Error::other("retried settlement disappeared"))?;
+    assert_eq!(retried.state, SettlementState::Succeeded);
+    assert_eq!(retried.attempt_count, 2);
+    assert_eq!(retried.retry_code, None);
+    let retry_states: Vec<String> = sqlx::query_scalar(
+        "SELECT to_state FROM settlement_events WHERE settlement_id = $1 ORDER BY id",
+    )
+    .bind(retry_id)
+    .fetch_all(&database.pool)
+    .await?;
+    assert_eq!(
+        retry_states,
+        vec![
+            "reserved",
+            "awaiting_retry",
+            "reserved",
+            "prepared",
+            "submitted",
+            "succeeded"
+        ]
+    );
+
+    Ok(())
+}
+
+async fn assert_base_protocol_contract(database: &TestDatabase, metrics: Metrics) -> TestResult {
+    let (_client, key) = seed_client(&database.store, 7, 100, 100).await?;
+    let (_, invalid_key) = api_key(98);
+    let application = build_base_protocol_application(database.store.clone(), metrics)?;
+
+    let supported = call(
+        &application.router,
+        http_request(Method::GET, "/supported", Vec::new(), None, None, None)?,
+    )
+    .await?;
+    assert_eq!(supported.status, StatusCode::OK);
+    let supported = supported.json()?;
+    assert_eq!(
+        supported["kinds"],
+        json!([{
+            "x402Version": 2,
+            "scheme": "exact",
+            "network": "eip155:84532",
+        }])
+    );
+    assert_eq!(supported["extensions"], json!(["payment-identifier"]));
+    assert_eq!(
+        supported["signers"]["eip155:84532"],
+        json!([BASE_PROTOCOL_SIGNER])
+    );
+
+    let invalid_version = base_invalid_version_request();
+    let verify_response = call(
+        &application.router,
+        http_request(
+            Method::POST,
+            "/verify",
+            serde_json::to_vec(&invalid_version)?,
+            Some("application/json"),
+            Some(&key),
+            None,
+        )?,
+    )
+    .await?;
+    assert_eq!(verify_response.status, StatusCode::OK);
+    assert_eq!(
+        verify_response.json()?["invalidReason"],
+        "invalid_x402_version"
+    );
+    let settle_response = call(
+        &application.router,
+        http_request(
+            Method::POST,
+            "/settle",
+            serde_json::to_vec(&invalid_version)?,
+            Some("application/json"),
+            Some(&key),
+            None,
+        )?,
+    )
+    .await?;
+    assert_eq!(settle_response.status, StatusCode::OK);
+    assert_eq!(
+        settle_response.json()?["errorReason"],
+        "invalid_x402_version"
+    );
+
+    let scenario = json!({
+        "mode": "protocol",
+        "network": "eip155:84532",
+        "expectedSigner": BASE_PROTOCOL_SIGNER,
+        "apiKey": key,
+        "invalidApiKey": invalid_key,
+        "invalidVersion": invalid_version,
+    });
+    let official_client_ran =
+        run_official_client_if_requested(&application.router, &scenario).await?;
+    if std::env::var("X402_RUN_NODE_CLIENT_CONFORMANCE").as_deref() == Ok("1")
+        && !official_client_ran
+    {
+        return Err(
+            std::io::Error::other("required Base official-client conformance did not run").into(),
+        );
+    }
     Ok(())
 }
 
@@ -1196,13 +1539,17 @@ async fn run_official_client_if_requested(router: &Router, scenario: &Value) -> 
     assert_eq!(summary["supported"], true);
     assert_eq!(summary["invalidVersion"]["verify"], "invalid_x402_version");
     assert_eq!(summary["invalidVersion"]["settle"], "invalid_x402_version");
-    assert_eq!(summary["valid"]["verify"], true);
-    assert_eq!(summary["valid"]["settle"], true);
-    assert_eq!(summary["valid"]["replay"], true);
-    assert_eq!(summary["conflict"], 409);
-    assert_eq!(summary["duplicate"], "duplicate_settlement");
     assert_eq!(summary["authentication"], true);
-    assert_eq!(summary["rateLimit"], 429);
+    if scenario["mode"] == "protocol" {
+        assert_eq!(summary["mode"], "protocol");
+    } else {
+        assert_eq!(summary["valid"]["verify"], true);
+        assert_eq!(summary["valid"]["settle"], true);
+        assert_eq!(summary["valid"]["replay"], true);
+        assert_eq!(summary["conflict"], 409);
+        assert_eq!(summary["duplicate"], "duplicate_settlement");
+        assert_eq!(summary["rateLimit"], 429);
+    }
     Ok(true)
 }
 
@@ -1219,7 +1566,11 @@ async fn custom_http_surface_matches_x402_contract() -> TestResult {
     let Some(database) = TestDatabase::from_explicit_environment().await? else {
         return Ok(());
     };
-    let result = assert_protected_contract(&database, metrics, &payer).await;
+    let result = async {
+        assert_protected_contract(&database, metrics.clone(), &payer).await?;
+        assert_base_protocol_contract(&database, metrics).await
+    }
+    .await;
     let cleanup = database.cleanup().await;
     result?;
     cleanup

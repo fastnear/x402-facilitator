@@ -16,7 +16,7 @@ use axum::body::{Body, to_bytes};
 use axum::extract::{Request, State};
 use axum::http::header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, RETRY_AFTER};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
-use axum::response::{IntoResponse, Response};
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use chrono::Utc;
 use near_primitives::action::Action;
@@ -32,7 +32,6 @@ use tower_http::sensitive_headers::SetSensitiveRequestHeadersLayer;
 use tower_http::trace::{DefaultOnResponse, TraceLayer};
 use tracing::Instrument as _;
 use uuid::Uuid;
-use x402_chain_eip155_provider::prepare::validate_signed_transaction;
 use x402_chain_near::{
     VerificationFailure, VerificationPolicy, decode_signed_delegate, decode_signed_transaction,
     signed_delegate_hash, signed_transaction_hash,
@@ -46,8 +45,9 @@ use x402_types::scheme::SchemeRegistry;
 use crate::VERSION;
 use crate::auth::{ApiKeyAuthenticator, AuthError, AuthenticatedClient};
 use crate::chain::{
-    BroadcastOutcome, ChainProvider, Prepared, PreparedDetail, ReconcileVerdict, SignerHead,
-    TerminalOutcome, VerifiedDetail, VerifiedPayment,
+    AuthorizationMetadata, BroadcastOutcome, ChainProvider, Prepared, PreparedDetail,
+    ReconcileVerdict, RecoveryPolicy, SignerHead, StoredEvmSubmission, TerminalOutcome,
+    VerifiedPayment,
 };
 use crate::config::{ChainKind, ServiceConfig};
 use crate::leadership::ReadinessState;
@@ -56,14 +56,48 @@ use crate::protocol::{
     request_fingerprint,
 };
 use crate::store::{
-    ClaimOutcome, EvmPreparedJournalEntry, NewSettlement, PgStore, PreparedJournalEntry,
-    SettlementRecord, SettlementState, StoreError, TerminalJournalEntry,
+    ClaimOutcome, EvmAuthorizationMetadata, EvmPreparedJournalEntry, NewSettlement, PgStore,
+    PreparedJournalEntry, RetryOutcome, RetryReservation, SettlementRecord, SettlementState,
+    StoreError, TerminalJournalEntry,
 };
 use crate::telemetry::Metrics;
 use crate::v1_compat::{self, WireVersion};
 
 const SERVICE_NAME: &str = "x402-near-facilitator";
 const RETRY_SECONDS: &str = "1";
+const LANDING_PAGE: &str = concat!(
+    r#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Open-source x402 exact-payment facilitator for Circle USDC on NEAR and Base.">
+  <title>x402 facilitator for NEAR and Base</title>
+</head>
+<body>
+  <main>
+    <h1>x402 facilitator for NEAR and Base</h1>
+    <p>Open-source, API-key-gated settlement for x402 <code>exact</code>
+    payments in Circle USDC, with sponsored gas and durable recovery.</p>
+    <p>This hostname is one network-pinned facilitator instance. Inspect its
+    live protocol capabilities at <a href="/supported">/supported</a>.</p>
+    <p>The reference deployment serves NEAR mainnet, NEAR testnet, and Base
+    mainnet. Canonical x402 v2 is preferred; the scheme is <code>exact</code>,
+    the asset is Circle USDC, the facilitator fee is zero, and sponsored gas
+    is bounded by per-client policy.</p>
+    <ul>
+      <li><a href="https://github.com/fastnear/x402-near-facilitator">Source and documentation</a></li>
+      <li><a href="https://github.com/fastnear/x402-near-facilitator/blob/main/docs/reference-access.md">Request reference-instance access</a></li>
+      <li><a href="https://github.com/fastnear/x402-near-facilitator/security/policy">Security policy</a></li>
+    </ul>
+    <p>Service version <code>"#,
+    env!("CARGO_PKG_VERSION"),
+    r#"</code>.</p>
+  </main>
+</body>
+</html>
+"#
+);
 
 #[derive(Clone)]
 #[allow(missing_debug_implementations)]
@@ -131,11 +165,12 @@ impl AppState {
         self.readiness.set_rpc(rpc_ready);
 
         let signer = self.provider.signer_head().await;
+        let signer_account_id = self.provider.signer_account_id();
         let policy_active = self
             .store
             .relayer_is_active(
                 &self.config.network,
-                &self.config.relayer_account_id,
+                &signer_account_id,
                 &self.provider.signer_public_key(),
             )
             .await
@@ -148,12 +183,9 @@ impl AppState {
                 !policy_active,
             );
         }
-        let relayer_ready = signer.is_ok_and(|head| {
-            decimal_is_at_least(
-                &head.signer_balance_atomic.to_string(),
-                &self.config.sponsorship.balance_hard_stop_yocto_near,
-            )
-        }) && policy_active;
+        let relayer_ready = signer
+            .is_ok_and(|head| signer_is_funded(&self.config, head.signer_balance_atomic))
+            && policy_active;
         self.readiness.set_relayer(relayer_ready);
 
         if let Ok(summary) = self.store.journal_summary().await {
@@ -195,9 +227,75 @@ fn decimal_usage_ratio(reserved: &str, spent: &str, limit: &str) -> Option<f64> 
     Some((reserved.parse::<f64>().ok()? + spent.parse::<f64>().ok()?) / limit)
 }
 
+fn signer_is_funded(config: &ServiceConfig, balance: u128) -> bool {
+    let Ok(hard_stop) = config
+        .sponsorship
+        .balance_hard_stop_yocto_near
+        .parse::<u128>()
+    else {
+        return false;
+    };
+    let required = if config.chain_kind == ChainKind::Eip155 {
+        let Ok(reservation) = config.sponsorship.reservation_yocto_near.parse::<u128>() else {
+            return false;
+        };
+        hard_stop.checked_add(reservation)
+    } else {
+        Some(hard_stop)
+    };
+    required.is_some_and(|required| balance >= required)
+}
+
+fn require_evm_recovery_balance(
+    state: &AppState,
+    record: &SettlementRecord,
+    balance: u128,
+) -> Result<(), StoreError> {
+    let required = state
+        .config
+        .sponsorship
+        .balance_hard_stop_yocto_near
+        .parse::<u128>()
+        .map_err(|_| StoreError::Corrupt("configured EVM balance hard stop is invalid".to_owned()))
+        .and_then(|hard_stop| {
+            record
+                .reserved_yocto_near
+                .parse::<u128>()
+                .map_err(|_| {
+                    StoreError::Corrupt(
+                        "journaled EVM sponsorship reservation is invalid".to_owned(),
+                    )
+                })
+                .and_then(|reservation| {
+                    hard_stop.checked_add(reservation).ok_or_else(|| {
+                        StoreError::Corrupt(
+                            "EVM recovery balance requirement overflowed".to_owned(),
+                        )
+                    })
+                })
+        });
+    let required = match required {
+        Ok(required) => required,
+        Err(error) => {
+            state.readiness.set_relayer(false);
+            state.readiness.set_reconciliation(false);
+            return Err(error);
+        }
+    };
+    if balance < required {
+        state.readiness.set_relayer(false);
+        state.readiness.set_reconciliation(false);
+        return Err(StoreError::Corrupt(
+            "EVM signer balance does not cover the durable recovery reservation".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 pub fn router(state: AppState) -> Router {
     let request_id = HeaderName::from_static("x-request-id");
     Router::new()
+        .route("/", get(landing))
         .route("/supported", get(supported))
         .route("/healthz", get(health))
         .route("/readyz", get(ready))
@@ -302,6 +400,10 @@ struct ReadyChecks {
     relayer: &'static str,
 }
 
+async fn landing() -> Html<&'static str> {
+    Html(LANDING_PAGE)
+}
+
 async fn health() -> axum::Json<HealthResponse<'static>> {
     axum::Json(HealthResponse {
         status: "ok",
@@ -373,19 +475,25 @@ async fn supported(State(state): State<AppState>) -> Response {
 /// Synthesize the `/supported` response for an EVM instance from config. NEAR
 /// derives the equivalent from its registered facilitator handlers.
 fn evm_supported(state: &AppState) -> SupportedResponse {
+    evm_supported_for(
+        &state.config.network,
+        state.config.accept_v1,
+        &state.provider.signer_account_id(),
+    )
+}
+
+fn evm_supported_for(network: &str, accept_v1: bool, signer: &str) -> SupportedResponse {
     let mut signers = std::collections::HashMap::new();
-    if let Ok(chain_id) = state.config.network.parse::<ChainId>() {
-        signers.insert(chain_id, vec![state.provider.signer_account_id()]);
+    if let Ok(chain_id) = network.parse::<ChainId>() {
+        signers.insert(chain_id, vec![signer.to_owned()]);
     }
     let mut kinds = vec![SupportedPaymentKind {
         x402_version: 2,
         scheme: "exact".to_owned(),
-        network: state.config.network.clone(),
+        network: network.to_owned(),
         extra: None,
     }];
-    if state.config.accept_v1
-        && let Some(alias) = v1_compat::v1_network_name(&state.config.network)
-    {
+    if accept_v1 && let Some(alias) = v1_compat::v1_network_name(network) {
         kinds.push(SupportedPaymentKind {
             x402_version: 1,
             scheme: "exact".to_owned(),
@@ -395,7 +503,7 @@ fn evm_supported(state: &AppState) -> SupportedResponse {
     }
     SupportedResponse {
         kinds,
-        extensions: vec![],
+        extensions: vec!["payment-identifier".to_owned()],
         signers,
     }
 }
@@ -690,6 +798,13 @@ async fn settle_inner(state: &AppState, request: Request) -> Response {
     // no matter which branch produced it.
     let wire = parsed.wire;
     let response = async {
+        // Reject a statically unsupported protocol envelope before deriving a
+        // chain-specific payment identity. This keeps invalid-version behavior
+        // chain-neutral and avoids asking a provider to interpret a dialect it
+        // does not serve.
+        if let Some(response) = static_settle_failure(state, &parsed) {
+            return protocol_json(StatusCode::OK, &response);
+        }
         // Chain-neutral pre-verify payment identity for idempotency. NEAR decodes
         // and signature-checks the base64 signed delegate; eip155 computes the
         // offline ERC-3009 EIP-712 transfer hash from the authorization (no RPC).
@@ -770,9 +885,6 @@ async fn settle_inner(state: &AppState, request: Request) -> Response {
                 )
                 .into_response();
             }
-        }
-        if let Some(response) = static_settle_failure(state, &parsed) {
-            return protocol_json(StatusCode::OK, &response);
         }
         if !state.readiness.can_settle() {
             if let Some(response) = prior_settlement_race_response(
@@ -906,33 +1018,44 @@ async fn settle_inner(state: &AppState, request: Request) -> Response {
             )
             .into_response();
         }
-        // The neutral verified payment drives the journal; the reservation row records
-        // the chain-specific authorization identity (generalized at migration 0002).
-        // NEAR persists the delegate identity; EVM persists the ERC-3009 authorization
-        // plus the facilitator signer address. The signed submission bytes are
-        // journaled later, at prepare (`mark_prepared` / `mark_prepared_evm`).
+        // Persist only the neutral single-use identity and the minimum metadata
+        // needed to validate a prepared submission during recovery. In particular,
+        // the signed EVM authorization is never copied into the reservation row.
+        let identity = verified.identity();
         let (
             chain_kind,
             delegate_public_key,
             delegate_nonce,
             delegate_max_block_height,
-            evm_authorization,
+            authorization_metadata,
             signer_address,
-        ) = match &verified.detail {
-            VerifiedDetail::Near(near_verified) => (
+        ) = match identity.authorization {
+            AuthorizationMetadata::Near {
+                delegate_public_key,
+                delegate_nonce,
+                max_block_height,
+            } => (
                 ChainKind::Near,
-                Some(near_verified.payer_public_key.to_string()),
-                Some(near_verified.delegate_nonce.to_string()),
-                Some(near_verified.max_block_height.to_string()),
+                Some(delegate_public_key),
+                Some(delegate_nonce),
+                Some(max_block_height),
                 None,
                 None,
             ),
-            VerifiedDetail::Evm(evm_verified) => (
+            AuthorizationMetadata::Evm {
+                version,
+                valid_after,
+                valid_before,
+            } => (
                 ChainKind::Eip155,
                 None,
                 None,
                 None,
-                Some(evm_verified.authorization_json()),
+                Some(EvmAuthorizationMetadata {
+                    version,
+                    valid_after,
+                    valid_before,
+                }),
                 Some(state.provider.signer_account_id()),
             ),
         };
@@ -940,8 +1063,10 @@ async fn settle_inner(state: &AppState, request: Request) -> Response {
             id: Uuid::new_v4(),
             api_client_id: client.id,
             payment_identifier: parsed.meta.payment_identifier.clone(),
-            payment_hash: verified.payment_hash,
+            payment_hash: identity.request_hash,
             request_fingerprint: fingerprint,
+            anchor_scope: identity.anchor_scope,
+            anchor_value: identity.anchor_value,
             x402_version: parsed.meta.x402_version,
             scheme: parsed.meta.scheme.clone(),
             network: parsed.meta.network.clone(),
@@ -953,7 +1078,7 @@ async fn settle_inner(state: &AppState, request: Request) -> Response {
             delegate_public_key,
             delegate_nonce,
             delegate_max_block_height,
-            evm_authorization,
+            authorization_metadata,
             signer_address,
             policy_snapshot: state.config.policy_snapshot(),
             reservation_yocto_near: state.config.sponsorship.reservation_yocto_near.clone(),
@@ -973,19 +1098,7 @@ async fn settle_inner(state: &AppState, request: Request) -> Response {
         };
         let settlement_id = match claim {
             ClaimOutcome::New(record) => {
-                let worker_state = state.clone();
-                let raw_request = parsed.raw.clone();
-                let worker_span = tracing::info_span!(
-                    "settlement_worker",
-                    network = %state.config.network,
-                    version = VERSION
-                );
-                tokio::spawn(
-                    async move {
-                        run_new_settlement(worker_state, record.id, raw_request).await;
-                    }
-                    .instrument(worker_span),
-                );
+                spawn_settlement_worker(state, record.id, parsed.raw.clone());
                 record.id
             }
             ClaimOutcome::Existing(record) => {
@@ -993,7 +1106,78 @@ async fn settle_inner(state: &AppState, request: Request) -> Response {
                 if record.state.is_terminal() {
                     return stored_terminal_response(&record);
                 }
-                record.id
+                if record.state == SettlementState::AwaitingRetry {
+                    let retry = RetryReservation {
+                        settlement_id: record.id,
+                        policy_snapshot: state.config.policy_snapshot(),
+                        reservation_yocto_near: state
+                            .config
+                            .sponsorship
+                            .reservation_yocto_near
+                            .clone(),
+                        global_daily_budget_yocto_near: state
+                            .config
+                            .sponsorship
+                            .global_daily_yocto_near
+                            .clone(),
+                        client_daily_budget_yocto_near: client.daily_budget_yocto_near.clone(),
+                    };
+                    match state.store.resume_awaiting_retry(&retry).await {
+                        Ok(RetryOutcome::Resumed(resumed)) => {
+                            spawn_settlement_worker(state, resumed.id, parsed.raw.clone());
+                            resumed.id
+                        }
+                        Ok(RetryOutcome::SettlementBusy) => {
+                            return ApiError::unavailable(
+                                "settlement_busy",
+                                "the configured signer is settling another payment",
+                            )
+                            .into_response();
+                        }
+                        Ok(RetryOutcome::BudgetExceeded) => {
+                            return ApiError::rate_limited(
+                                "sponsorship_budget_exhausted",
+                                "sponsorship budget is exhausted",
+                            )
+                            .into_response();
+                        }
+                        // A concurrent identical retry may have resumed the row
+                        // after our lookup. Join that attempt rather than treating
+                        // the expected state race as a database outage.
+                        Err(StoreError::Transition { .. }) => {
+                            match state.store.settlement(record.id).await {
+                                Ok(Some(current))
+                                    if current.state != SettlementState::AwaitingRetry =>
+                                {
+                                    current.id
+                                }
+                                Ok(Some(_)) => {
+                                    return ApiError::unavailable(
+                                        "settlement_retryable",
+                                        "settlement can be retried with the same request",
+                                    )
+                                    .into_response();
+                                }
+                                Ok(None) | Err(_) => {
+                                    return ApiError::unavailable(
+                                        "database_unavailable",
+                                        "settlement journal is temporarily unavailable",
+                                    )
+                                    .into_response();
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            return ApiError::unavailable(
+                                "database_unavailable",
+                                "settlement journal is temporarily unavailable",
+                            )
+                            .into_response();
+                        }
+                    }
+                } else {
+                    record.id
+                }
             }
             ClaimOutcome::IdentifierConflict => {
                 return ApiError::new(
@@ -1015,6 +1199,13 @@ async fn settle_inner(state: &AppState, request: Request) -> Response {
                     ),
                 );
             }
+            ClaimOutcome::SettlementBusy => {
+                return ApiError::unavailable(
+                    "settlement_busy",
+                    "the configured signer is settling another payment",
+                )
+                .into_response();
+            }
             ClaimOutcome::BudgetExceeded => {
                 return ApiError::rate_limited(
                     "sponsorship_budget_exhausted",
@@ -1026,7 +1217,7 @@ async fn settle_inner(state: &AppState, request: Request) -> Response {
 
         let deadline = Duration::from_secs(state.config.request_limits.settle_timeout_seconds);
         match tokio::time::timeout(deadline, wait_for_terminal(&state.store, settlement_id)).await {
-            Ok(Ok(record)) => stored_terminal_response(&record),
+            Ok(Ok(record)) => completed_settlement_response(&record),
             Ok(Err(_)) => ApiError::unavailable(
                 "database_unavailable",
                 "settlement journal is temporarily unavailable",
@@ -1104,6 +1295,9 @@ async fn prior_settlement_response(
     let response = match claim {
         ClaimOutcome::Existing(record) => {
             state.metrics.record_idempotency_replay();
+            if record.state == SettlementState::AwaitingRetry {
+                return Ok(None);
+            }
             if record.state.is_terminal() {
                 stored_terminal_response(&record)
             } else {
@@ -1112,7 +1306,7 @@ async fn prior_settlement_response(
                 match tokio::time::timeout(deadline, wait_for_terminal(&state.store, record.id))
                     .await
                 {
-                    Ok(Ok(record)) => stored_terminal_response(&record),
+                    Ok(Ok(record)) => completed_settlement_response(&record),
                     Ok(Err(error)) => return Err(error),
                     Err(_) => ApiError::unavailable(
                         "settlement_pending",
@@ -1138,7 +1332,7 @@ async fn prior_settlement_response(
                 state.config.network.clone(),
             ),
         ),
-        ClaimOutcome::New(_) | ClaimOutcome::BudgetExceeded => {
+        ClaimOutcome::New(_) | ClaimOutcome::SettlementBusy | ClaimOutcome::BudgetExceeded => {
             return Err(StoreError::Corrupt(
                 "existing-settlement lookup returned a non-existing outcome".to_owned(),
             ));
@@ -1276,12 +1470,23 @@ fn static_failure_reason(state: &AppState, request: &ParsedRequest) -> Option<&'
         Some("unsupported_scheme")
     } else if request.meta.network != state.config.network {
         Some("invalid_network")
-    } else if request.meta.asset != state.config.asset {
+    } else if !configured_asset_matches(
+        state.config.chain_kind,
+        &state.config.asset,
+        &request.meta.asset,
+    ) {
         Some("invalid_asset")
     } else if !decimal_is_at_least(&request.meta.amount, &state.config.minimum_amount) {
         Some("amount_below_minimum")
     } else {
         None
+    }
+}
+
+fn configured_asset_matches(chain_kind: ChainKind, configured: &str, requested: &str) -> bool {
+    match chain_kind {
+        ChainKind::Near => requested == configured,
+        ChainKind::Eip155 => requested.eq_ignore_ascii_case(configured),
     }
 }
 
@@ -1357,6 +1562,17 @@ fn stored_terminal_response(record: &SettlementRecord) -> Response {
     response
 }
 
+fn completed_settlement_response(record: &SettlementRecord) -> Response {
+    if record.state.is_terminal() {
+        return stored_terminal_response(record);
+    }
+    ApiError::unavailable(
+        "settlement_retryable",
+        "settlement can be retried with the same request",
+    )
+    .into_response()
+}
+
 async fn wait_for_terminal(store: &PgStore, id: Uuid) -> Result<SettlementRecord, StoreError> {
     let mut interval = tokio::time::interval(Duration::from_millis(100));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -1366,10 +1582,29 @@ async fn wait_for_terminal(store: &PgStore, id: Uuid) -> Result<SettlementRecord
             .settlement(id)
             .await?
             .ok_or_else(|| StoreError::Corrupt("settlement disappeared".to_owned()))?;
-        if record.state.is_terminal() {
+        if record.state.is_terminal() || record.state == SettlementState::AwaitingRetry {
             return Ok(record);
         }
     }
+}
+
+fn spawn_settlement_worker(
+    state: &AppState,
+    settlement_id: Uuid,
+    request: x402_types::proto::VerifyRequest,
+) {
+    let worker_state = state.clone();
+    let worker_span = tracing::info_span!(
+        "settlement_worker",
+        network = %state.config.network,
+        version = VERSION
+    );
+    tokio::spawn(
+        async move {
+            run_new_settlement(worker_state, settlement_id, request).await;
+        }
+        .instrument(worker_span),
+    );
 }
 
 // Settlement deliberately remains one sequence so the revalidation, journal,
@@ -1382,7 +1617,7 @@ async fn run_new_settlement(
 ) {
     let _relayer_guard = state.relayer_lock.lock().await;
     if !state.readiness.can_settle() {
-        terminal_service_failure(
+        retryable_service_failure(
             &state,
             settlement_id,
             "leadership_unavailable",
@@ -1397,7 +1632,7 @@ async fn run_new_settlement(
     let payment = match state.provider.verify(&request, &policy).await {
         Ok(payment) => payment,
         Err(rejection) if rejection.rpc_ambiguous => {
-            terminal_service_failure(
+            retryable_service_failure(
                 &state,
                 settlement_id,
                 "rpc_unavailable",
@@ -1411,8 +1646,44 @@ async fn run_new_settlement(
             return;
         }
     };
+    let Ok(Some(journaled)) = state.store.settlement(settlement_id).await else {
+        retryable_service_failure(
+            &state,
+            settlement_id,
+            "settlement_journal_unavailable",
+            "the claimed settlement could not be reloaded",
+        )
+        .await;
+        return;
+    };
+    let identity = payment.identity();
+    if journaled.state != SettlementState::Reserved
+        || journaled.payment_hash != identity.request_hash
+        || journaled.anchor_scope != identity.anchor_scope
+        || journaled.anchor_value != identity.anchor_value
+        || journaled.payer != payment.payer
+        || journaled.network != payment.requirements.network
+        || !journaled
+            .asset
+            .eq_ignore_ascii_case(&payment.requirements.asset)
+        || !journaled
+            .pay_to
+            .eq_ignore_ascii_case(&payment.requirements.pay_to)
+        || !decimal_is_at_least(&journaled.amount, &payment.requirements.amount_decimal)
+        || !decimal_is_at_least(&payment.requirements.amount_decimal, &journaled.amount)
+    {
+        terminal_protocol_failure(
+            &state,
+            settlement_id,
+            "settlement_identity_mismatch",
+            None,
+            None,
+        )
+        .await;
+        return;
+    }
     let Ok(signer_head) = fresh_signer_head(&state).await else {
-        terminal_service_failure(
+        retryable_service_failure(
             &state,
             settlement_id,
             "relayer_unavailable",
@@ -1422,7 +1693,7 @@ async fn run_new_settlement(
         return;
     };
     let Ok(prepared) = state.provider.prepare(&payment, &signer_head).await else {
-        terminal_service_failure(
+        retryable_service_failure(
             &state,
             settlement_id,
             "transaction_preparation_failed",
@@ -1431,22 +1702,43 @@ async fn run_new_settlement(
         .await;
         return;
     };
+    let submission = state.provider.durable_submission(&prepared);
     // EVM settles on its own durable path: journal the signed ERC-3009 transaction
     // into the dedicated eip155 columns, then submit. NEAR's access-key nonce
     // recheck and quarantine do not apply — an EVM re-submit is idempotent via the
     // single-use authorization nonce, and reorg safety comes from confirmation
     // depth at reconcile. The NEAR body below is unchanged.
-    if let PreparedDetail::Evm(_) = &prepared.detail {
-        settle_prepared_evm(&state, settlement_id, &prepared, &payment).await;
+    if let PreparedDetail::Evm(evm_prepared) = &prepared.detail {
+        let Some(estimated_l1_fee) = evm_prepared.estimated_l1_fee_wei() else {
+            retryable_service_failure(
+                &state,
+                settlement_id,
+                "l1_fee_estimation_failed",
+                "Base L1 data-fee estimation was unavailable",
+            )
+            .await;
+            return;
+        };
+        if !evm_reservation_covers_liability(&state.config, estimated_l1_fee) {
+            retryable_service_failure(
+                &state,
+                settlement_id,
+                "sponsorship_reservation_insufficient",
+                "the current Base transaction liability exceeds the reservation",
+            )
+            .await;
+            return;
+        }
+        settle_prepared_evm(&state, settlement_id, &prepared, &submission, &payment).await;
         return;
     }
     let journal = PreparedJournalEntry {
         settlement_id,
-        relayer_account_id: prepared.signer_id.clone(),
+        relayer_account_id: submission.submitter,
         relayer_public_key: prepared.signer_public_key.clone(),
-        relayer_nonce: prepared.signer_nonce.to_string(),
-        transaction_bytes: prepared.submit_bytes.clone(),
-        transaction_hash: prepared.submit_hash.clone(),
+        relayer_nonce: submission.nonce.to_string(),
+        transaction_bytes: submission.bytes,
+        transaction_hash: submission.hash,
     };
     if state.store.mark_prepared(&journal).await.is_err() {
         state.readiness.set_reconciliation(false);
@@ -1461,11 +1753,12 @@ async fn run_new_settlement(
     };
     if current_head.signer_nonce != signer_head.signer_nonce {
         let public_key = state.provider.signer_public_key();
+        let signer_account_id = state.provider.signer_account_id();
         let _quarantine = state
             .store
             .quarantine_relayer(
                 &state.config.network,
-                &state.config.relayer_account_id,
+                &signer_account_id,
                 &public_key,
                 "relayer nonce changed between preparation and broadcast",
                 &current_head.signer_nonce.to_string(),
@@ -1522,28 +1815,35 @@ async fn run_new_settlement(
 // never terminal in one shot — confirmation depth resolves it at reconcile — so
 // this leaves the row `submitted` for reconciliation. Leadership is re-checked
 // immediately before the durable transition and again immediately before the
-// external broadcast, mirroring the NEAR path's fencing; NEAR's nonce recheck and
-// quarantine are intentionally absent (idempotent via the single-use ERC-3009
-// authorization nonce).
+// external broadcast, mirroring the NEAR path's fencing. The EVM pending account
+// nonce is read from both RPCs immediately before broadcast; any drift quarantines
+// the signer instead of risking a different transaction identity.
 async fn settle_prepared_evm(
     state: &AppState,
     settlement_id: Uuid,
     prepared: &Prepared,
+    submission: &crate::chain::DurableSubmission,
     payment: &VerifiedPayment,
 ) {
-    let Some(required_confirmations) = state.provider.required_confirmations() else {
+    let RecoveryPolicy::EvmConfirmations(required_confirmations) = submission.recovery_policy
+    else {
         // Only an EVM provider reaches this path; a missing depth is a wiring
         // fault. Stay unready rather than journal an unconfirmable submission.
         state.readiness.set_reconciliation(false);
         tracing::error!(event = "evm_required_confirmations_missing");
         return;
     };
+    let Ok(required_confirmations) = i32::try_from(required_confirmations) else {
+        state.readiness.set_reconciliation(false);
+        tracing::error!(event = "evm_required_confirmations_out_of_range");
+        return;
+    };
     let journal = EvmPreparedJournalEntry {
         settlement_id,
-        signer_account_nonce: prepared.signer_nonce.to_string(),
-        submitted_tx_rlp: prepared.submit_bytes.clone(),
-        submitted_tx_hash: prepared.submit_hash.clone(),
-        required_confirmations: i32::try_from(required_confirmations).unwrap_or(i32::MAX),
+        signer_account_nonce: submission.nonce.to_string(),
+        submitted_tx_rlp: submission.bytes.clone(),
+        submitted_tx_hash: submission.hash.clone(),
+        required_confirmations,
     };
     if state.store.mark_prepared_evm(&journal).await.is_err() {
         state.readiness.set_reconciliation(false);
@@ -1569,11 +1869,39 @@ async fn settle_prepared_evm(
         tracing::warn!(event = "settlement_paused_before_broadcast");
         return;
     }
+    let Ok(current_head) = fresh_signer_head(state).await else {
+        state.readiness.set_reconciliation(false);
+        tracing::warn!(event = "settlement_paused_after_signer_nonce_recheck");
+        return;
+    };
+    if current_head.signer_nonce != submission.nonce {
+        let signer_account_id = state.provider.signer_account_id();
+        let _quarantine = state
+            .store
+            .quarantine_relayer(
+                &state.config.network,
+                &signer_account_id,
+                &state.provider.signer_public_key(),
+                "signer nonce changed between preparation and broadcast",
+                &current_head.signer_nonce.to_string(),
+            )
+            .await;
+        state.readiness.set_relayer(false);
+        state.readiness.set_reconciliation(false);
+        tracing::error!(event = "settlement_signer_nonce_changed_before_broadcast");
+        return;
+    }
+    if !state.readiness.can_settle() {
+        state.readiness.set_reconciliation(false);
+        tracing::warn!(event = "settlement_paused_after_signer_nonce_recheck");
+        return;
+    }
     match state.provider.broadcast(prepared, payment).await {
-        // Not expected for EVM (broadcast always reports Pending), but honor a
-        // terminal outcome if a provider ever produces one.
-        BroadcastOutcome::Terminal(outcome) => {
-            finalize_terminal(state, settlement_id, payment, outcome).await;
+        // EVM terminality is accepted only through recovery, where the stored
+        // (possibly raised) confirmation depth and dual-reader merge are applied.
+        BroadcastOutcome::Terminal(_) => {
+            state.readiness.set_reconciliation(false);
+            tracing::warn!(event = "evm_broadcast_terminal_deferred_to_reconciliation");
         }
         BroadcastOutcome::Rejected(_) => {
             terminal_transaction_rejected(
@@ -1593,23 +1921,37 @@ async fn settle_prepared_evm(
     }
 }
 
+fn evm_reservation_covers_liability(config: &ServiceConfig, estimated_l1_fee: u128) -> bool {
+    let Some(eip155) = &config.eip155 else {
+        return false;
+    };
+    let Ok(max_fee_per_gas) = eip155.max_fee_per_gas_wei.parse::<u128>() else {
+        return false;
+    };
+    let Ok(reservation) = config.sponsorship.reservation_yocto_near.parse::<u128>() else {
+        return false;
+    };
+    u128::from(eip155.gas_limit)
+        .checked_mul(max_fee_per_gas)
+        .and_then(|l2| l2.checked_add(estimated_l1_fee))
+        .is_some_and(|liability| reservation >= liability)
+}
+
 async fn fresh_signer_head(state: &AppState) -> Result<SignerHead, StoreError> {
     let head = state.provider.signer_head().await.map_err(|_| {
         state.readiness.set_relayer(false);
         StoreError::Corrupt("relayer chain state is unavailable".to_owned())
     })?;
+    let signer_account_id = state.provider.signer_account_id();
     let policy_active = state
         .store
         .relayer_is_active(
             &state.config.network,
-            &state.config.relayer_account_id,
+            &signer_account_id,
             &head.signer_public_key,
         )
         .await?;
-    let funded = decimal_is_at_least(
-        &head.signer_balance_atomic.to_string(),
-        &state.config.sponsorship.balance_hard_stop_yocto_near,
-    );
+    let funded = signer_is_funded(&state.config, head.signer_balance_atomic);
     if !policy_active || !funded {
         state.readiness.set_relayer(false);
         return Err(StoreError::Corrupt(
@@ -1739,39 +2081,23 @@ async fn terminal_protocol_failure(
     }
 }
 
-async fn terminal_service_failure(
+async fn retryable_service_failure(
     state: &AppState,
     settlement_id: Uuid,
     code: &'static str,
-    message: &'static str,
+    _message: &'static str,
 ) {
-    let result = state
-        .store
-        .mark_terminal(&TerminalJournalEntry {
-            settlement_id,
-            state: SettlementState::Failed,
-            http_status: StatusCode::SERVICE_UNAVAILABLE.as_u16(),
-            response_bytes: service_error_bytes(code, message),
-            error_code: Some(code.to_owned()),
-            error_detail: None,
-            gas_burnt: Some("0".to_owned()),
-            tokens_burnt: Some("0".to_owned()),
-            actual_yocto_near: "0".to_owned(),
-            mined_block_number: None,
-            mined_block_hash: None,
-            confirmations: None,
-        })
-        .await;
+    let result = state.store.mark_awaiting_retry(settlement_id, code).await;
     if result.is_ok() {
-        state.metrics.record_settlement_result("failed", code);
+        state.metrics.record_settlement_result("retryable", code);
         tracing::info!(
-            event = "settlement_terminal",
-            result = "failed",
+            event = "settlement_retry_released",
+            result = "retryable",
             reason = code
         );
     } else {
         state.readiness.set_reconciliation(false);
-        tracing::error!(event = "terminal_journal_failed");
+        tracing::error!(event = "settlement_retry_journal_failed");
     }
 }
 
@@ -1851,22 +2177,32 @@ pub async fn reconcile(state: &AppState) -> Result<(), StoreError> {
     state
         .metrics
         .record_pending_settlements(u64::try_from(records.len()).unwrap_or(u64::MAX));
-    for record in records {
+
+    // Release every pre-prepare reservation before ordered transaction
+    // reconciliation. A still-pending prepared transaction must stop later
+    // nonce processing, but it must not strand unrelated Reserved rows (and
+    // their sponsorship budget) behind it.
+    for record in records
+        .iter()
+        .filter(|record| record.state == SettlementState::Reserved)
+    {
         state.store.note_reconciliation(record.id).await?;
+        // The service is not ready while startup reconciliation runs, therefore
+        // every observed reserved row predates this leader. With no prepared
+        // bytes there can have been no broadcast.
+        retryable_service_failure(
+            state,
+            record.id,
+            "recovered_before_prepare",
+            "an interrupted settlement was released before transaction preparation",
+        )
+        .await;
+    }
+
+    for record in records {
         match record.state {
-            SettlementState::Reserved => {
-                // The service is not ready while startup reconciliation runs,
-                // therefore every observed reserved row predates this leader.
-                // With no prepared bytes there can have been no broadcast.
-                terminal_service_failure(
-                    state,
-                    record.id,
-                    "recovered_before_prepare",
-                    "an interrupted settlement was released before transaction preparation",
-                )
-                .await;
-            }
             SettlementState::Prepared | SettlementState::Submitted => {
+                state.store.note_reconciliation(record.id).await?;
                 reconcile_prepared(state, &record).await?;
                 let remains_nonterminal = state
                     .store
@@ -1877,7 +2213,10 @@ pub async fn reconcile(state: &AppState) -> Result<(), StoreError> {
                     break;
                 }
             }
-            SettlementState::Succeeded | SettlementState::Failed => {}
+            SettlementState::AwaitingRetry => {
+                state.store.note_reconciliation(record.id).await?;
+            }
+            SettlementState::Reserved | SettlementState::Succeeded | SettlementState::Failed => {}
         }
     }
     let remaining = state.store.nonterminal_settlements().await?;
@@ -1939,6 +2278,7 @@ async fn reconcile_prepared(state: &AppState, record: &SettlementRecord) -> Resu
             signer.as_str(),
             &record.payer,
             &record.asset,
+            RecoveryPolicy::NearFinality,
         )
         .await;
     if status.rpc_failover {
@@ -1984,11 +2324,12 @@ async fn reconcile_prepared(state: &AppState, record: &SettlementRecord) -> Resu
             .relayer_public_key
             .as_deref()
             .ok_or_else(|| StoreError::Corrupt("prepared row has no public key".to_owned()))?;
+        let signer_account_id = state.provider.signer_account_id();
         state
             .store
             .quarantine_relayer(
                 &state.config.network,
-                &state.config.relayer_account_id,
+                &signer_account_id,
                 public_key,
                 "nonce advanced while exact transaction remained unknown",
                 &primary_status
@@ -2070,6 +2411,7 @@ async fn reconcile_prepared(state: &AppState, record: &SettlementRecord) -> Resu
 // confirmation depth. No NEAR nonce-quarantine or delegate-expiry — an EVM
 // outcome is terminal only at the required confirmation depth, and an unknown
 // transaction is re-submitted (idempotent via the single-use ERC-3009 nonce).
+#[allow(clippy::too_many_lines)]
 async fn reconcile_prepared_evm(
     state: &AppState,
     record: &SettlementRecord,
@@ -2096,14 +2438,72 @@ async fn reconcile_prepared_evm(
         .submitted_tx_rlp
         .as_deref()
         .ok_or_else(|| StoreError::Corrupt("prepared row has no transaction bytes".to_owned()))?;
-    // Validate the exact persisted bytes before trusting any RPC result: they must
-    // decode to a signed transaction whose hash and recovered signer match.
-    validate_signed_transaction(bytes, hash, signer)
-        .map_err(StoreError::Corrupt)
+    let configured_confirmations = state
+        .provider
+        .required_confirmations()
+        .and_then(|depth| i32::try_from(depth).ok())
+        .ok_or_else(|| {
+            StoreError::Corrupt("configured EVM confirmation depth is invalid".to_owned())
+        })?;
+    let effective_confirmations = state
+        .store
+        .raise_required_confirmations(record.id, configured_confirmations)
+        .await?;
+    let required_confirmations = u64::try_from(effective_confirmations).map_err(|_| {
+        StoreError::Corrupt("journaled EVM confirmation depth is invalid".to_owned())
+    })?;
+    let metadata = record.authorization_metadata.as_ref().ok_or_else(|| {
+        StoreError::Corrupt("prepared EVM row has no authorization metadata".to_owned())
+    })?;
+    if metadata.version != 2 {
+        return Err(StoreError::Corrupt(
+            "prepared EVM authorization metadata version is invalid".to_owned(),
+        ));
+    }
+    let (gas_limit, max_fee_per_gas, admission_confirmations) = evm_policy_snapshot(record)?;
+    if required_confirmations < admission_confirmations {
+        return Err(StoreError::Corrupt(
+            "journaled EVM confirmation policy was lowered".to_owned(),
+        ));
+    }
+    let signer_nonce = record
+        .signer_account_nonce
+        .as_deref()
+        .and_then(|nonce| nonce.parse::<u128>().ok())
+        .ok_or_else(|| StoreError::Corrupt("prepared EVM row has invalid nonce".to_owned()))?;
+    let binding = StoredEvmSubmission {
+        network: record.network.clone(),
+        hash: hash.to_owned(),
+        submitter: signer.to_owned(),
+        nonce: signer_nonce,
+        asset: record.asset.clone(),
+        payer: record.payer.clone(),
+        payee: record.pay_to.clone(),
+        amount: record.amount.clone(),
+        valid_after: metadata.valid_after.clone(),
+        valid_before: metadata.valid_before.clone(),
+        anchor_scope: record.anchor_scope.clone(),
+        anchor_value: record.anchor_value,
+        payment_hash: record.payment_hash,
+        gas_limit,
+        max_fee_per_gas,
+    };
+    // Validate every field of the exact persisted envelope and both supported
+    // ERC-3009 calldata forms before trusting any RPC evidence.
+    state
+        .provider
+        .validate_stored_submission(bytes, &binding)
+        .map_err(|error| StoreError::Corrupt(error.to_string()))
         .inspect_err(|_| state.readiness.set_relayer(false))?;
     let status = state
         .provider
-        .reconcile_status(hash, signer, &record.payer, &record.asset)
+        .reconcile_status(
+            hash,
+            signer,
+            &record.payer,
+            &record.asset,
+            RecoveryPolicy::EvmConfirmations(required_confirmations),
+        )
         .await;
     match status.verdict {
         ReconcileVerdict::Terminal(outcome) => {
@@ -2127,6 +2527,37 @@ async fn reconcile_prepared_evm(
             if !can_reconciliation_broadcast(state) {
                 return Err(StoreError::Corrupt(
                     "leadership lost before reconciliation broadcast".to_owned(),
+                ));
+            }
+            let current_head = fresh_signer_head(state).await?;
+            require_evm_recovery_balance(state, record, current_head.signer_balance_atomic)?;
+            if current_head.signer_nonce > signer_nonce {
+                let signer_account_id = state.provider.signer_account_id();
+                state
+                    .store
+                    .quarantine_relayer(
+                        &state.config.network,
+                        &signer_account_id,
+                        &state.provider.signer_public_key(),
+                        "signer nonce advanced while exact transaction remained unknown",
+                        &current_head.signer_nonce.to_string(),
+                    )
+                    .await?;
+                state.readiness.set_relayer(false);
+                state.readiness.set_reconciliation(false);
+                return Err(StoreError::Corrupt(
+                    "EVM signer quarantined after unknown nonce advance".to_owned(),
+                ));
+            }
+            if current_head.signer_nonce != signer_nonce {
+                state.readiness.set_reconciliation(false);
+                return Err(StoreError::Corrupt(
+                    "EVM signer nonce regressed before exact-byte rebroadcast".to_owned(),
+                ));
+            }
+            if !can_reconciliation_broadcast(state) {
+                return Err(StoreError::Corrupt(
+                    "leadership lost immediately before reconciliation broadcast".to_owned(),
                 ));
             }
             match state
@@ -2159,6 +2590,69 @@ async fn reconcile_prepared_evm(
             ))
         }
     }
+}
+
+fn evm_policy_snapshot(record: &SettlementRecord) -> Result<(u64, u128, u64), StoreError> {
+    if record
+        .policy_snapshot
+        .get("chainKind")
+        .and_then(Value::as_str)
+        != Some("eip155")
+        || record
+            .policy_snapshot
+            .get("network")
+            .and_then(Value::as_str)
+            != Some(record.network.as_str())
+        || !record
+            .policy_snapshot
+            .get("asset")
+            .and_then(Value::as_str)
+            .is_some_and(|asset| asset.eq_ignore_ascii_case(&record.asset))
+    {
+        return Err(StoreError::Corrupt(
+            "EVM settlement policy identity is inconsistent".to_owned(),
+        ));
+    }
+    let eip155 = record
+        .policy_snapshot
+        .get("eip155")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            StoreError::Corrupt("EVM settlement has no stored admission policy".to_owned())
+        })?;
+    let chain_id = eip155
+        .get("chainId")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| StoreError::Corrupt("stored EVM chain id is invalid".to_owned()))?;
+    let network_chain_id = record
+        .network
+        .strip_prefix("eip155:")
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or_else(|| StoreError::Corrupt("journaled EVM network is invalid".to_owned()))?;
+    if chain_id != network_chain_id {
+        return Err(StoreError::Corrupt(
+            "stored EVM chain policy does not match the network".to_owned(),
+        ));
+    }
+    let gas_limit = eip155
+        .get("gasLimit")
+        .and_then(Value::as_u64)
+        .filter(|value| *value > 0)
+        .ok_or_else(|| StoreError::Corrupt("stored EVM gas limit is invalid".to_owned()))?;
+    let max_fee_per_gas = eip155
+        .get("maxFeePerGasWei")
+        .and_then(Value::as_str)
+        .and_then(|value| value.parse::<u128>().ok())
+        .filter(|value| *value > 0)
+        .ok_or_else(|| StoreError::Corrupt("stored EVM fee cap is invalid".to_owned()))?;
+    let required_confirmations = eip155
+        .get("requiredConfirmations")
+        .and_then(Value::as_u64)
+        .filter(|value| *value > 0)
+        .ok_or_else(|| {
+            StoreError::Corrupt("stored EVM confirmation policy is invalid".to_owned())
+        })?;
+    Ok((gas_limit, max_fee_per_gas, required_confirmations))
 }
 
 fn validate_stored_transaction(
@@ -2285,6 +2779,34 @@ async fn finalize_reconciled_terminal(
     };
     let bytes =
         serde_json::to_vec(&response).map_err(|error| StoreError::Corrupt(error.to_string()))?;
+    let fee_overrun = if record.chain_kind == ChainKind::Eip155 {
+        let reservation = record
+            .reserved_yocto_near
+            .parse::<u128>()
+            .map_err(|_| StoreError::Corrupt("EVM reservation is invalid".to_owned()))?;
+        outcome.fee_atomic > reservation
+    } else {
+        false
+    };
+    if fee_overrun {
+        // Quarantine before terminalization releases the EVM signer's active
+        // settlement slot. If this write fails the row stays nonterminal and
+        // reconciliation remains false, so a later readiness refresh cannot
+        // fail open during a terminal→quarantine gap.
+        state.readiness.set_relayer(false);
+        state.readiness.set_reconciliation(false);
+        let signer_account_id = state.provider.signer_account_id();
+        state
+            .store
+            .quarantine_relayer(
+                &state.config.network,
+                &signer_account_id,
+                &state.provider.signer_public_key(),
+                "actual Base fee exceeded the sponsorship reservation",
+                record.signer_account_nonce.as_deref().unwrap_or("0"),
+            )
+            .await?;
+    }
     state
         .store
         .mark_terminal(&TerminalJournalEntry {
@@ -2315,6 +2837,11 @@ async fn finalize_reconciled_terminal(
         result = metric_result,
         reason = metric_reason
     );
+    if fee_overrun {
+        return Err(StoreError::Corrupt(
+            "Base sponsorship quarantined after reservation overrun".to_owned(),
+        ));
+    }
     Ok(())
 }
 
@@ -2405,6 +2932,20 @@ mod tests {
         assert!(ensure_json(&headers).is_err());
     }
 
+    #[test]
+    fn configured_asset_matching_respects_chain_address_semantics() {
+        assert!(configured_asset_matches(
+            ChainKind::Eip155,
+            "0x036cbd53842c5426634e7929541ec2318f3dcf7e",
+            "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+        ));
+        assert!(!configured_asset_matches(
+            ChainKind::Near,
+            "usdc.fakes.testnet",
+            "USDC.FAKES.TESTNET",
+        ));
+    }
+
     #[tokio::test]
     async fn rate_limiter_enforces_each_operation_separately() {
         let limiter = RateLimiter::default();
@@ -2456,6 +2997,81 @@ mod tests {
             serde_json::from_slice(&service_error_bytes("pending", "retry")).unwrap_or(Value::Null);
         assert_eq!(value["error"]["code"], "pending");
         assert_eq!(value["error"]["message"], "retry");
+    }
+
+    #[tokio::test]
+    async fn landing_page_identifies_the_service_and_public_next_steps() {
+        let response = landing().await.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("text/html; charset=utf-8")
+        );
+        let bytes = to_bytes(response.into_body(), 32 * 1024)
+            .await
+            .unwrap_or_else(|_| std::process::abort());
+        let body = String::from_utf8_lossy(&bytes);
+        assert!(body.contains("x402 facilitator for NEAR and Base"));
+        assert!(body.contains("href=\"/supported\""));
+        assert!(body.contains("docs/reference-access.md"));
+        assert!(body.contains("security/policy"));
+        assert!(body.contains(VERSION));
+    }
+
+    #[test]
+    fn evm_support_advertises_payment_identifier_for_both_wire_versions() {
+        let supported = evm_supported_for(
+            "eip155:8453",
+            true,
+            "0x1111111111111111111111111111111111111111",
+        );
+        assert_eq!(supported.extensions, vec!["payment-identifier"]);
+        assert_eq!(supported.kinds.len(), 2);
+        assert_eq!(supported.kinds[0].network, "eip155:8453");
+        assert_eq!(supported.kinds[1].network, "base");
+    }
+
+    #[test]
+    fn evm_reservation_includes_l2_cap_and_current_l1_estimate() {
+        let config = ServiceConfig {
+            environment: crate::config::Environment::Testnet,
+            chain_kind: ChainKind::Eip155,
+            network: "eip155:84532".to_owned(),
+            bind_address: "127.0.0.1:0"
+                .parse()
+                .unwrap_or_else(|_| std::process::abort()),
+            primary_rpc_url: url::Url::parse("https://primary.invalid")
+                .unwrap_or_else(|_| std::process::abort()),
+            backup_rpc_url: url::Url::parse("https://backup.invalid")
+                .unwrap_or_else(|_| std::process::abort()),
+            asset: "0x036CbD53842c5426634e7929541eC2318f3dCF7e".to_owned(),
+            asset_symbol: "USDC".to_owned(),
+            minimum_amount: "1".to_owned(),
+            relayer_account_id: "0x1111111111111111111111111111111111111111".to_owned(),
+            max_inner_gas: 0,
+            database_max_connections: 1,
+            request_limits: crate::config::RequestLimits::default(),
+            sponsorship: crate::config::SponsorshipConfig {
+                global_daily_yocto_near: "100000".to_owned(),
+                default_client_daily_yocto_near: "100000".to_owned(),
+                reservation_yocto_near: "1100".to_owned(),
+                balance_warning_yocto_near: "100000".to_owned(),
+                balance_hard_stop_yocto_near: "1000".to_owned(),
+            },
+            payment_identifier: crate::config::PaymentIdentifierConfig::default(),
+            accept_v1: false,
+            eip155: Some(crate::config::Eip155Config {
+                chain_id: 84_532,
+                required_confirmations: 2,
+                gas_limit: 100,
+                max_fee_per_gas_wei: "10".to_owned(),
+            }),
+        };
+        assert!(evm_reservation_covers_liability(&config, 100));
+        assert!(!evm_reservation_covers_liability(&config, 101));
     }
 
     #[test]

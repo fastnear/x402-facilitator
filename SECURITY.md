@@ -18,8 +18,8 @@ guarantee of a fix timeline.
 
 ## Supported versions
 
-Only the currently deployed release and the latest tagged release receive
-security fixes.
+The latest tagged release receives security fixes. Any additional supported
+release branch will be listed here explicitly.
 
 ## Dependency advisory triage
 
