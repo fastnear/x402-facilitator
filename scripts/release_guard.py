@@ -45,7 +45,7 @@ def expected_image_labels(
 ) -> dict[str, str]:
     return {
         "org.opencontainers.image.description": (
-            "Rust x402 v2 exact Circle USDC facilitator for NEAR"
+            "Rust x402 v2 exact Circle USDC facilitator for NEAR and Base"
         ),
         "org.opencontainers.image.licenses": "Apache-2.0",
         "org.opencontainers.image.revision": commit,

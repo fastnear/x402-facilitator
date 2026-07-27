@@ -532,6 +532,19 @@ class ArtifactTests(unittest.TestCase):
 
 
 class WorkflowPolicyTests(unittest.TestCase):
+    def test_dockerfile_static_labels_match_release_guard(self) -> None:
+        dockerfile = (REPOSITORY_ROOT / "Dockerfile").read_text(encoding="utf-8")
+        labels = release_guard.expected_image_labels(
+            REPOSITORY, "1.2.3", COMMIT
+        )
+        for key in (
+            "org.opencontainers.image.description",
+            "org.opencontainers.image.licenses",
+            "org.opencontainers.image.source",
+            "org.opencontainers.image.title",
+        ):
+            self.assertIn(f'{key}="{labels[key]}"', dockerfile)
+
     def test_image_rebuild_uses_tagged_commit_epoch(self) -> None:
         workflow = (
             REPOSITORY_ROOT / ".github/workflows/release.yml"
