@@ -222,3 +222,8 @@ Final validation showed:
 
 No x402 authorization was signed for this release, no paid quote call was
 made, no deposit address was created, and no USDC or gas asset moved.
+
+The reverse-proxy compatibility finding was also submitted through
+StableFeedback as public, unverified feedback:
+
+<https://stablefeedback.dev/feedback/cms3qsrkg0000kq04fdk7ww0z>

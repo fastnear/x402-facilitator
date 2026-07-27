@@ -156,6 +156,11 @@ StableFeedback against the merchant origin and repository. Record the returned
 feed URL in dated evidence; do not include credentials, signed payment data, or
 private RPC details.
 
+The schema-rich-header proxy compatibility finding was submitted after the
+fix:
+
+- [StableFeedback: schema-rich x402 402 headers need proxy buffer guidance](https://stablefeedback.dev/feedback/cms3qsrkg0000kq04fdk7ww0z)
+
 ## x402 Scan evidence packet
 
 The dated mainnet evidence packet contains:
@@ -214,7 +219,8 @@ On 2026-07-27:
 
 See the dated
 [deployment and paid-flow evidence](../evidence/2026-07-27-agent-merchant-deployment.md).
-A StableFeedback feed URL and x402 Scan submission are not yet claimed.
+The StableFeedback feed URL is recorded above. An x402 Scan submission is not
+yet claimed.
 
 ## FastNear x402 landing-page save point
 
