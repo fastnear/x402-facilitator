@@ -1,0 +1,12 @@
+[Unit]
+Description=x402 synthetic canaries every five minutes
+
+[Timer]
+# Offset from x402-near-metrics.timer (*:0/5) so the two pushes do not land
+# on the same second.
+OnCalendar=*:2/5
+RandomizedDelaySec=30
+Persistent=true
+
+[Install]
+WantedBy=timers.target
