@@ -9,6 +9,8 @@
 coverage/
 dist/
 .DS_Store
+node_modules/
+__pycache__/
 
 # Instance runtime configs carry per-deploy values; only the .example templates
 # are tracked. (Applies to NEAR and eip155 configs alike.)
