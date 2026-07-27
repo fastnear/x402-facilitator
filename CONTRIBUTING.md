@@ -109,3 +109,22 @@ The workspace uses one lockstep version. Before 1.0, a minor release may
 contain an intentional public-API break, but it must be called out in the
 changelog and migration/upgrade notes. Patch releases remain backward
 compatible.
+
+## Publishing provider crates
+
+`x402-chain-near` and `x402-chain-eip155-provider` are public reusable crates.
+The facilitator service crate is application-only and must remain
+`publish = false`.
+
+For each release:
+
+1. work from a clean detached checkout of the verified signed release tag;
+2. confirm the intended versions are not already present on crates.io;
+3. run `cargo publish --locked --dry-run` for both provider packages;
+4. publish only those two exact tagged packages;
+5. use `cargo info` from outside the workspace to prove registry resolution;
+   and
+6. record the crate URLs and crates.io checksums in dated evidence.
+
+Never publish from a dirty worktree, rebuild a historical version from a
+different commit, or use the service crate as a transitive public API.

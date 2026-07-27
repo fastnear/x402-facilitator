@@ -1,12 +1,12 @@
 # Distribution: registry submissions
 
-Status (2026-07-26): the x402 Foundation facilitators-table entry **merged**
-(#2941); awesome-agentic-commerce #510 and x402facilitators #15 remain open;
-and the x402scan NEAR feature request remains open as #1040. Base mainnet is
-now live with authentic settlement activity, which makes x402-list actionable
-and creates a future x402scan facilitator path. v0.5.1 is deployed across the
-three live reference instances; its public landing pages and Base
-`payment-identifier` advertisement are visible in the
+Status (2026-07-26): the original x402 Foundation entry **merged** as #2941;
+its NEAR-and-Base follow-up is open as #2960. awesome-agentic-commerce #510,
+x402facilitators #15, Pay.sh #1020, and Gold-402 #64 remain open. The
+x402-list submission is pending manual review, and the Base demo resource is
+registered on x402scan. NEAR discovery remains tracked in x402scan #1040.
+v0.5.1 is deployed across the three live reference instances; its public
+landing pages and Base `payment-identifier` advertisement are visible in the
 [dated rollout evidence](evidence/2026-07-26-v051-reference-deployment.md).
 
 ## Readiness facts registries key off
@@ -21,7 +21,8 @@ three live reference instances; its public landing pages and Base
   `PAYMENT-REQUIRED` requirements header at
   `https://x402-demo.mikedotexe.com/work` (mainnet) and
   `https://x402-demo-test.mikedotexe.com/work` (testnet), and settles
-  real payments end to end (see the real-traffic evidence entry).
+  real payments end to end (see the
+  [real-traffic evidence](evidence/2026-07-23-real-traffic-and-recovery.md)).
 
 ## Reusable submission identity
 
@@ -44,31 +45,41 @@ There is no shared facilitator-registry manifest standard. Keep `/supported`
 as the machine contract and use the target-specific material below; do not
 publish a made-up `/.well-known` facilitator format.
 
+## Published provider crates
+
+The reusable NEAR and EVM providers are published at v0.5.1:
+
+- <https://crates.io/crates/x402-chain-near/0.5.1>
+- <https://crates.io/crates/x402-chain-eip155-provider/0.5.1>
+
+They were published from the signed v0.5.1 tag. Checksums and registry
+verification are recorded in the
+[dated distribution evidence](evidence/2026-07-26-registry-and-crates-wrap-up.md).
+The facilitator service crate remains application-only.
+
 ## Targets
 
 ### 1. x402scan — resource registration (web form, no PR)
 
-- Submit at <https://www.x402scan.com/resources/register>.
-- **URL to submit now: `https://x402-demo-base.mikedotexe.com/work`** (Base
-  mainnet — the network their validator supports). As of 2026-07-26 every
-  requirement their validator checks is in place: https resource URL in the
-  402 header, `info.x-guidance`, object-form `x-payment-info.protocols`,
-  input/output schemas, 402-before-validation, and a third-party client has
-  settled through the endpoint end to end (see
-  [evidence](evidence/2026-07-26-legacy-v1-compat-and-base-e2e.md)).
-- The NEAR resource below remains blocked on their upstream NEAR support.
+- **Base registration complete:** the `POST`
+  `https://x402-demo-base.mikedotexe.com/work` resource is live at
+  <https://www.x402scan.com/server/7c1727f6-7b5d-4018-abe9-22276406a685>.
+  Do not submit it again.
+- The row is active and records x402 v2, Base mainnet, and the fixed `$0.001`
+  payment. Its optional acceptance ownership proof is not verified. Adding
+  that marker requires a separately approved EIP-191 signature by the
+  production payee and is not a registration blocker.
+- The NEAR resource remains blocked on upstream NEAR support.
 - Original NEAR target: `https://x402-demo.mikedotexe.com/work`.
 - Per their discovery spec (`Merit-Systems/x402scan`
   `docs/DISCOVERY.md`, OpenAPI-first), both demo hostnames serve
   `/openapi.json` declaring the paid `POST /work` operation with
   `x-payment-info` (protocol `x402`, fixed `$0.001`), a `402` response,
   and the request-body input schema, plus `/.well-known/x402` for
-  compatibility fan-out (sources in `deploy/demo/discovery/`). Runtime
-  402 behavior remains authoritative and was validated by the live paid
-  flows.
-- Optionally also register the testnet resource URL if the form accepts
-  non-mainnet resources (their spec notes testnets are not indexed).
-- **Status 2026-07-23: blocked upstream.** The probe now parses our
+  compatibility fan-out (sources in `deploy/demo/discovery/`). Runtime 402
+  behavior remains authoritative and was validated by the
+  [live Base flow](evidence/2026-07-26-legacy-v1-compat-and-base-e2e.md).
+- **NEAR status 2026-07-23: blocked upstream.** The probe parses our
   discovery document (title, paid operation, input schema all accepted)
   but rejects registration with `No supported networks. Got:
   [near:mainnet]. Supported: [base, solana]`. Their
@@ -103,19 +114,17 @@ publish a made-up `/.well-known` facilitator format.
 ### 2. x402 Foundation repo — facilitators table (PR)
 
 - Upstream: `x402-foundation/x402`, file `docs/dev-tools/facilitators.md`.
-- Staged branch (based on clean upstream `main`):
-  <https://github.com/mikedotexe/x402/tree/x402-near-facilitator-listing>
+- Follow-up branch (based on current upstream `main`):
+  <https://github.com/mikedotexe/x402/tree/agent/update-near-base-facilitator-listing>
 - **PR merged 2026-07-24:** <https://github.com/x402-foundation/x402/pull/2941>.
   The maintainer accepted the `facilitators.md` entry and asked to drop the
   deprecated `typescript/site/` ecosystem-page files (removed in `b783c830`);
-  the merged PR is the single table entry below.
-- Entry added (alphabetical position):
-  `| [NEAR x402 Facilitator](https://x402.mikedotexe.com/supported) |
-  Independent facilitator for NEAR mainnet and testnet; NEP-141 USDC
-  settled through NEP-366 signed delegates with relayer-sponsored gas |`
-- v0.5.1 and the Base promotion are publicly evidenced. Update this existing
-  row in a small follow-up PR to say NEAR and Base and link the human-facing
-  root page. Do not create a second Base-only listing.
+  the merged PR is one table row.
+- **Multi-chain follow-up opened 2026-07-26:**
+  <https://github.com/x402-foundation/x402/pull/2960>. It changes only that
+  existing row to link the human-facing page and describe deployed NEAR and
+  Base support. No second Base-only listing or deprecated ecosystem files
+  were added.
 
 ### 3. x402.org ecosystem page — partner entry (DEPRECATED upstream)
 
@@ -132,8 +141,9 @@ publish a made-up `/.well-known` facilitator format.
 - Staged branch:
   <https://github.com/mikedotexe/awesome-agentic-commerce/tree/x402-near-facilitator-listing>
 - **PR opened 2026-07-23:** <https://github.com/Merit-Systems/awesome-agentic-commerce/pull/510>
-- The open entry still describes NEAR only. v0.5.1 is now deployed; amend that
-  PR to the reusable NEAR-and-Base description before it merges.
+- **Amended 2026-07-26:** the one-line entry, title, and body now describe the
+  deployed NEAR-and-Base facilitator and link the v0.5.1 rollout evidence. A
+  single concise review ping was left; the PR is awaiting maintainer review.
 
 ### 5. x402.watch / @swader/x402facilitators — facilitator directory (PR)
 
@@ -141,12 +151,13 @@ publish a made-up `/.well-known` facilitator format.
   npm `@swader/x402facilitators`) that other tools consume as a
   facilitator metadata source. Upstream: `Swader/x402facilitators`.
 - Staged branch (adds `Network.NEAR`, the NEP-141 USDC token constant,
-  explorer/icon wiring, and our entry; `tsc --noEmit` clean):
+  explorer/icon wiring, and our entry):
   <https://github.com/mikedotexe/x402facilitators/tree/x402-near-facilitator-listing>
 - **PR opened 2026-07-23:** <https://github.com/Swader/x402facilitators/pull/15>
-- The entry's logo references
-  `docs/assets/near-x402-facilitator.svg` in this repository (must be on
-  `main` before the PR is opened).
+- **Hardened 2026-07-26:** the gated config is now a typed constructor that
+  supplies `X-API-Key` for verify, settle, and supported calls, with a public
+  discovery config. An accidental npm lockfile was removed. Bun type-check,
+  lint, full build, and a direct auth-header assertion pass.
 - Leave this NEAR-enum PR narrowly scoped unless its maintainer responds. The
   directory's single-config URL does not cleanly represent the separate NEAR
   and Base endpoints, and it is lower priority than the active targets above.
@@ -165,7 +176,7 @@ publish a made-up `/.well-known` facilitator format.
 - Open the PR from
   <https://github.com/near/awesome-near/compare/main...mikedotexe:awesome-near:x402-near-facilitator-listing>
 
-### 8. x402-list.com — facilitator registry (ready for submission)
+### 8. x402-list.com — facilitator registry (pending review)
 
 - Submit through <https://x402-list.com/submit> or
   `POST https://x402-list.com/api/v1/submit`.
@@ -176,13 +187,15 @@ publish a made-up `/.well-known` facilitator format.
   `claimed_volume_usd`, and `notes`.
 - The prepared body is
   [`registry/x402-list-submission.json`](registry/x402-list-submission.json).
-  Revalidate it against the live OpenAPI immediately before submission.
-- Submit the lowercase Base signer and declare both `base` and `near`. Put the
-  NEAR named account in `notes`: the address validator accepts only EVM and
-  Solana formats, while non-measured networks are resolved in manual review.
-- The automatic probe scans 30 days of EVM USDC activity and is advisory;
-  every entry is manually reviewed. One facilitator submission per email is
-  allowed every seven days, so do not send a placeholder or speculative body.
+  It was revalidated against the live OpenAPI immediately before submission.
+- **Submitted once on 2026-07-26:** ID
+  `925e62da-75e7-49f5-adca-57762b835966`, status `pending`. The automatic
+  Base probe found the submitted settler with four transactions and no
+  errors.
+- The body declares both `base` and `near`; the NEAR named account is in
+  `notes` because the automatic address probe accepts EVM and Solana formats.
+  Every entry is manually reviewed. Do not resubmit while this review is
+  pending.
 
 ### 9. Pay.sh awesome-x402 — hosted-facilitator list (PR)
 
@@ -192,6 +205,8 @@ publish a made-up `/.well-known` facilitator format.
   API-key-gated facilitator for exact Circle USDC payments on NEAR and Base.`
 - The own-domain landing page is live. Their contribution rules require an
   active, documented, production-ready HTTPS destination.
+- **PR opened 2026-07-26:**
+  <https://github.com/xpaysh/awesome-x402/pull/1020>.
 
 ### 10. Gold-402 — hosted-facilitator list (PR)
 
@@ -202,6 +217,9 @@ publish a made-up `/.well-known` facilitator format.
   the maintainer requests a live verification.
 - v0.5.1 is live, and the homepage and `/supported` agree with the multi-chain
   description.
+- **PR opened 2026-07-26:**
+  <https://github.com/Haustorium12/gold-402/pull/64>. No reviewer credential
+  was created or disclosed.
 
 ### 11. x402dev monitor — skip until its gated-facilitator model is fixed
 
@@ -234,10 +252,3 @@ extension entries against `additionalProperties: false`). Replays must
 resend the byte-identical signed payload: the reference workload binds
 each payment identifier to the exact payload fingerprint, so a re-signed
 payment with a reused identifier is a `409` conflict by design.
-
-## Housekeeping
-
-- Mike's GitHub fork of the foundation repo was temporarily renamed by
-  tooling during fork setup and has been restored to `mikedotexe/x402`.
-  A leftover empty duplicate may exist as `mikedotexe/x402-foundation`;
-  delete it if present (it is not referenced by anything).

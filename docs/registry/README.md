@@ -5,13 +5,15 @@ review. It is not an x402 protocol extension or a standardized facilitator
 manifest. A running instance's `/supported` response remains authoritative for
 its network, scheme, wire version, extensions, and signer.
 
-- [`x402-list-submission.json`](x402-list-submission.json) is a
-  submission-ready body for x402-list.com's facilitator API. Review it against
-  that service's current OpenAPI immediately before submitting.
+- [`x402-list-submission.json`](x402-list-submission.json) is the reviewed body
+  submitted to x402-list.com's facilitator API on 2026-07-26. Submission
+  `925e62da-75e7-49f5-adca-57762b835966` is pending manual review; do not
+  resubmit it while that review remains open.
 
 The body uses the contact already published by the demo OpenAPI documents.
-Confirm that it should receive the registry review outcome immediately before
-submission; changing a contact does not change facilitator identity.
+Changing a contact does not change facilitator identity, but any future
+submission or update must still confirm the intended recipient immediately
+before sending.
 
 The stable public name remains **NEAR x402 Facilitator** because the project
 launched on NEAR. Descriptions must say that the current engine supports NEAR
