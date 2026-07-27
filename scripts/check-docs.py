@@ -163,6 +163,8 @@ def registry_submission_errors() -> list[str]:
         errors.append(f"{relative}: notes must identify the NEAR named settlement account")
     if not isinstance(notes, str) or "2026-07-26-v041-base-mainnet-canary.md" not in notes:
         errors.append(f"{relative}: notes must link the sanitized Base paid-flow evidence")
+    if not isinstance(notes, str) or "2026-07-26-v051-reference-deployment.md" not in notes:
+        errors.append(f"{relative}: notes must link the current deployment evidence")
     return errors
 
 
