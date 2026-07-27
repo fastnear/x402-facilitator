@@ -361,8 +361,12 @@ Host-state boxes verified live 2026-07-24
 
 ## Post-launch decisions
 
-- [x] NEAR Intents (`assetTransferMethod: "intents"`) adoption decided —
-      2026-07-24: carried by a future mainnet-only **sibling service**,
-      never by relaxing this service's invariants; upstream spec PR
-      opened (x402-foundation/x402#2948); engineering gates G1–G5 open in
+- [x] NEAR Intents Verifier adoption shape decided — updated 2026-07-27:
+      proposed `assetTransferMethod: "intents-verifier"` remains unadvertised
+      while x402-foundation/x402#2948 is under review. If adopted, it is an
+      in-tree method in `x402-chain-near`, the closed provider enum, the same
+      service binary, and the same durable engine. A separate mainnet process
+      may isolate the method operationally but does not fork the
+      implementation. Exact-effect, scoped-anchor, TOCTOU, fresh-402, and
+      mainnet-only evidence gates G1–G8 remain open in
       [near-intents-adoption-gates.md](near-intents-adoption-gates.md).
