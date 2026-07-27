@@ -28,10 +28,15 @@ nginx configuration expects a single certificate lineage named
 3. Create `x402-merchant-near` and `x402-merchant-base` users and credential
    directories.
 4. Create dedicated facilitator clients and exact payee policies.
-5. Install the application release and run `npm ci --omit=dev`.
-6. Install the systemd unit and nginx site, validate both, then enable the two
+5. Install non-secret process settings in root-owned, mode-0640
+   `/etc/x402-merchant/near.conf` and `/etc/x402-merchant/base.conf`. Keep all
+   keys out of these files and deliver them only through `LoadCredential`.
+6. Install the application release and run `npm ci --omit=dev`.
+7. Install the systemd unit and nginx site, validate both, then enable the two
    merchant services and reload nginx.
-7. Verify discovery, unpaid 402 responses, and paid flows. A funded test
+8. Run `npm run regression` from the release to verify both public origins,
+   discovery schemas, CORS, and unpaid x402 challenges without signing or
+   broadcasting anything. Then verify paid flows. A funded test
    must display the network, asset, amount, payer, payee, relayer/signer, and
    maximum sponsored gas immediately before broadcast.
 

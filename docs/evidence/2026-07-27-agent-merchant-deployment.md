@@ -227,3 +227,72 @@ The reverse-proxy compatibility finding was also submitted through
 StableFeedback as public, unverified feedback:
 
 <https://stablefeedback.dev/feedback/cms3qsrkg0000kq04fdk7ww0z>
+
+## Post-release regression and operations audit
+
+After the schema-rich-header incident, release
+`20260727-regression-audit-v4` completed a broader no-payment audit and became
+the active immutable release for both origins. The audit found and fixed:
+
+- NEAR transaction evidence declared a top-level block in OpenAPI but omitted
+  it from the actual response. The reader now resolves the transaction block,
+  verifies that its hash matches, returns height and hash, and fails closed on
+  missing or conflicting block evidence.
+- Activity search ignored unknown JSON fields even though its schema set
+  `additionalProperties: false`. Runtime validation now rejects them.
+- Only the quote route had a complete runtime output schema. Every route now
+  shares its complete output schema between OpenAPI and the Bazaar extension;
+  the OpenAPI examples are also sourced from the runtime discovery examples.
+- EVM transaction evidence now rejects malformed sender/recipient addresses,
+  non-canonical receipt status, and a receipt block newer than finalized chain
+  state.
+- The merchant service's non-secret settings moved from misleading `*.env`
+  names to root-owned mode-0640 `*.conf` files. Facilitator keys remain
+  delivered through systemd credentials. The dormant Base proof payer key was
+  removed from merchant-service group access and is mode 0600, root-only.
+- The default nginx TLS listener now uses the same HTTP/2 protocol options as
+  every named TLS virtual host, eliminating the repeated listener warning.
+
+`npm run regression` is the repeatable pre/post-promotion gate. It performs no
+signing and sends no payment header. On both origins it verifies:
+
+- all public discovery and health endpoints;
+- all ten unpaid route challenges;
+- canonical v2 network, asset, payee, and 1,000-atomic-unit price;
+- payment-before-application-validation ordering;
+- exact runtime Bazaar/OpenAPI input and output schema parity;
+- allowed and denied browser CORS behavior; and
+- a 12 KB maximum encoded challenge threshold beneath nginx's 16 KB upstream
+  header buffer.
+
+The final production run passed all checks. AgentCash 1.7.5 discovered five
+routes per origin and checked the concrete NEAR and Base routes without schema
+or payment warnings. Read-only mainnet RPC checks against the two previously
+settled transaction hashes returned:
+
+- NEAR: final, successful, with a transaction block whose returned hash
+  exactly matched the transaction's block hash; and
+- Base: finalized and successful, with confirmation depth 1,834 at the time
+  of the audit.
+
+Host verification showed the two current symlinks resolve directly to the
+standalone `20260727-regression-audit-v4` directory, deployed application
+hashes match the working tree, both services have zero automatic restarts, and
+there are no post-promotion merchant journal or nginx errors. DNS A/AAAA,
+HTTP-to-HTTPS redirects, certificate SANs, certificate renewal timer, disk,
+inode, and memory headroom were also healthy.
+
+An intermediate release-copy command preserved a symlink instead of creating
+a standalone directory. The service remained healthy, but that did not meet
+the immutable-release standard. It was corrected before this save point; the
+affected old directory was renamed `20260727-usdc-route-v2-invalidated`, and
+the active release was rebuilt as a real directory and hash-verified.
+
+The production dependency audit reports eight low-severity findings in the
+transitive `secp256k1`/`elliptic` path used by `@x402/near`; npm reports no
+available fix for the root path. There are no moderate, high, or critical
+findings. This is a tracked upstream dependency risk rather than a reason to
+replace pinned x402 packages ad hoc.
+
+No authorization was signed, no paid API call was made, no route execution was
+requested, and no funds moved during this regression audit.

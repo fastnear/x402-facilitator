@@ -33,6 +33,7 @@ test("NEAR transaction evidence accepts base58 hashes", async () => {
   const reader = createNearReader({
     network: "near:testnet",
     rpc: fakeRpc({
+      block: { header: { height: 43, hash: "block-hash" } },
       tx: {
         final_execution_status: "FINAL",
         status: { SuccessValue: "" },
@@ -44,6 +45,26 @@ test("NEAR transaction evidence accepts base58 hashes", async () => {
   const result = await reader.transaction("11111111111111111111111111111111111111111111", "alice.testnet");
   assert.equal(result.transaction.status, "succeeded");
   assert.equal(result.observedFinality, "final");
+  assert.deepEqual(result.block, { height: 43, hash: "block-hash" });
+});
+
+test("NEAR transaction evidence fails closed when block identity conflicts", async () => {
+  const reader = createNearReader({
+    network: "near:testnet",
+    rpc: fakeRpc({
+      block: { header: { height: 43, hash: "different-block" } },
+      tx: {
+        final_execution_status: "FINAL",
+        status: { SuccessValue: "" },
+        transaction: { block_hash: "block-hash", receiver_id: "merchant.testnet" },
+        receipts_outcome: [],
+      },
+    }),
+  });
+  await assert.rejects(
+    () => reader.transaction("11111111111111111111111111111111111111111111", "alice.testnet"),
+    error => error.code === "invalid_rpc",
+  );
 });
 
 test("EVM transaction evidence reports pending and finalized states", async () => {
@@ -64,6 +85,25 @@ test("EVM transaction evidence reports pending and finalized states", async () =
 test("RPC failures become typed unavailable errors", async () => {
   const rpc = new JsonRpcTransport("https://rpc.invalid", async () => ({ ok: false, status: 504 }), 20);
   await assert.rejects(() => rpc.request("block", {}), error => error instanceof ChainEvidenceError && error.code === "rpc_unavailable");
+});
+
+test("EVM transaction evidence rejects conflicting receipt finality", async () => {
+  const reader = createEvmReader({
+    network: "eip155:84532",
+    asset: "0x0000000000000000000000000000000000000000",
+    rpc: fakeRpc({
+      eth_getTransactionByHash: {
+        from: "0x1111111111111111111111111111111111111111",
+        to: null,
+      },
+      eth_getTransactionReceipt: { status: "0x1", blockNumber: "0x11" },
+      eth_getBlockByNumber: { number: "0x10", hash: "0x" + "22".repeat(32) },
+    }),
+  });
+  await assert.rejects(
+    () => reader.transaction("0x" + "11".repeat(32)),
+    error => error.code === "invalid_rpc",
+  );
 });
 
 test("EVM missing transactions are not presented as empty evidence", async () => {

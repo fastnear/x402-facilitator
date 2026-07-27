@@ -3,8 +3,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "check": "node --check server.mjs && node --check chain-reader.mjs && node --check activity-store.mjs && node --check cors.mjs && node --check usdc-route.mjs && node --check paid-flow.mjs && node --check paid-flow-proof.mjs && node --test chain-reader.test.mjs activity-store.test.mjs cors.test.mjs usdc-route.test.mjs paid-flow.test.mjs",
+    "check": "node --check server.mjs && node --check chain-reader.mjs && node --check activity-store.mjs && node --check cors.mjs && node --check usdc-route.mjs && node --check paid-flow.mjs && node --check paid-flow-proof.mjs && node --check regression-check.mjs && node --test chain-reader.test.mjs activity-store.test.mjs cors.test.mjs usdc-route.test.mjs paid-flow.test.mjs",
     "proof": "node paid-flow-proof.mjs",
+    "regression": "node regression-check.mjs",
     "start": "node server.mjs"
   },
   "dependencies": {

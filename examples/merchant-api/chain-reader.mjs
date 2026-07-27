@@ -116,6 +116,15 @@ export function createNearReader({ network, rpc, explorerBaseUrl }) {
     return { height: header.height, hash: header.hash };
   }
 
+  async function blockByHash(hash) {
+    const result = await rpc.request("block", { block_id: hash });
+    const header = block(result?.header, "transaction block header");
+    if (typeof header.height !== "number" || header.hash !== hash) {
+      throw new ChainEvidenceError("invalid_rpc", "transaction block conflicted with the transaction");
+    }
+    return { height: header.height, hash: header.hash };
+  }
+
   return {
     async account(accountId) {
       const account = validateNearAccount(accountId, "accountId");
@@ -128,6 +137,9 @@ export function createNearReader({ network, rpc, explorerBaseUrl }) {
       });
       if (!result || typeof result.amount !== "string") {
         throw new ChainEvidenceError("invalid_rpc", "account response was incomplete");
+      }
+      if (result.block_hash !== undefined && result.block_hash !== final.hash) {
+        throw new ChainEvidenceError("invalid_rpc", "account response conflicted with the pinned block");
       }
       return {
         network,
@@ -157,6 +169,9 @@ export function createNearReader({ network, rpc, explorerBaseUrl }) {
       if (!result || typeof result.status !== "object") {
         throw new ChainEvidenceError("invalid_rpc", "transaction response was incomplete");
       }
+      if (result.final_execution_status !== "FINAL") {
+        throw new ChainEvidenceError("invalid_rpc", "transaction did not reach requested finality");
+      }
       const transaction = result.transaction ?? {};
       const status = result.status;
       const failures = [];
@@ -165,11 +180,16 @@ export function createNearReader({ network, rpc, explorerBaseUrl }) {
       }
       const success = !status.Failure && failures.length === 0;
       const blockHash = transaction.block_hash ?? result.transaction_outcome?.block_hash;
+      if (typeof blockHash !== "string" || blockHash.length === 0) {
+        throw new ChainEvidenceError("invalid_rpc", "transaction response omitted its block");
+      }
+      const transactionBlock = await blockByHash(blockHash);
       return {
         network,
         kind: "transaction",
-        observedFinality: result.final_execution_status === "FINAL" ? "final" : "nonterminal",
+        observedFinality: "final",
         observedAt: new Date().toISOString(),
+        block: transactionBlock,
         transaction: {
           hash,
           signerId: signer,
@@ -233,6 +253,14 @@ export function createEvmReader({ network, rpc, asset, explorerBaseUrl }) {
       }
       const status = receipt ? hexNumber(receipt.status, "receipt status") : "pending";
       const blockNumber = receipt?.blockNumber ? hexNumber(receipt.blockNumber, "receipt block") : undefined;
+      if (receipt && status !== "0" && status !== "1") {
+        throw new ChainEvidenceError("invalid_rpc", "receipt status was not canonical");
+      }
+      if (blockNumber && BigInt(blockNumber) > BigInt(final.height)) {
+        throw new ChainEvidenceError("invalid_rpc", "receipt block was newer than finalized chain state");
+      }
+      const from = validateHex(tx.from, "transaction sender", 40);
+      const to = tx.to === null ? null : validateHex(tx.to, "transaction recipient", 40);
       const depth = blockNumber ? (BigInt(final.height) - BigInt(blockNumber)).toString(10) : "0";
       const observedFinality = receipt && BigInt(depth) >= 1n ? "finalized" : "nonterminal";
       return {
@@ -243,8 +271,8 @@ export function createEvmReader({ network, rpc, asset, explorerBaseUrl }) {
         block: final,
         transaction: {
           hash,
-          from: tx.from,
-          to: tx.to,
+          from,
+          to,
           blockNumber,
           confirmationDepth: depth,
           success: receipt ? status === "1" : undefined,

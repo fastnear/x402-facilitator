@@ -37,6 +37,7 @@ const exactScheme = config.network.startsWith("near:") ? new ExactNearScheme() :
 const resourceServer = new x402ResourceServer(facilitator).register(config.network, exactScheme);
 const price = process.env.AMOUNT ?? "1000";
 const resourceOrigin = config.resourceOrigin;
+const apiSchemas = createApiSchemas(config);
 const favicon = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
 const usdcRouteInputSchema = {
   type: "object",
@@ -162,8 +163,18 @@ const routes = {
     inputSchema: config.network.startsWith("near:")
       ? { type: "object", additionalProperties: false, required: ["accountId"], properties: { accountId: { type: "string" } } }
       : { type: "object", additionalProperties: false, required: ["address"], properties: { address: { type: "string", pattern: "^0x[0-9a-fA-F]{40}$" } } },
-    outputExample: { network: config.network, kind: "account", observedFinality: "finalized", account: {}, source: { status: "final" } },
-    outputSchema: { type: "object", required: ["network", "kind", "observedFinality", "account", "source"] },
+    outputExample: {
+      network: config.network,
+      kind: "account",
+      observedFinality: config.network.startsWith("near:") ? "final" : "finalized",
+      observedAt: "2026-07-27T20:00:00.000Z",
+      block: { height: config.network.startsWith("near:") ? 123456789 : "34567890", hash: config.network.startsWith("near:") ? "11111111111111111111111111111111" : `0x${"11".repeat(32)}` },
+      account: config.network.startsWith("near:")
+        ? { accountId: "alice.near", amountYoctoNear: "1000000000000000000000000", lockedYoctoNear: "0", storageUsage: 100, codeHash: "11111111111111111111111111111111" }
+        : { address: "0x0000000000000000000000000000000000000000", balanceWei: "0", isContract: false, asset: config.asset },
+      source: { type: config.network.startsWith("near:") ? "near-jsonrpc" : "evm-jsonrpc", status: config.network.startsWith("near:") ? "final" : "finalized" },
+    },
+    outputSchema: apiSchemas.accountOutput,
   }),
   "POST /v1/evidence/transaction": paidRoute({
     path: "/v1/evidence/transaction",
@@ -174,16 +185,27 @@ const routes = {
     inputSchema: config.network.startsWith("near:")
       ? { type: "object", additionalProperties: false, required: ["transactionHash", "signerId"], properties: { transactionHash: { type: "string" }, signerId: { type: "string" } } }
       : { type: "object", additionalProperties: false, required: ["transactionHash"], properties: { transactionHash: { type: "string", pattern: "^0x[0-9a-fA-F]{64}$" } } },
-    outputExample: { network: config.network, kind: "transaction", observedFinality: "finalized", transaction: {}, source: { status: "final" } },
-    outputSchema: { type: "object", required: ["network", "kind", "observedFinality", "transaction", "source"] },
+    outputExample: {
+      network: config.network,
+      kind: "transaction",
+      observedFinality: config.network.startsWith("near:") ? "final" : "finalized",
+      observedAt: "2026-07-27T20:00:00.000Z",
+      block: { height: config.network.startsWith("near:") ? 123456789 : "34567890", hash: config.network.startsWith("near:") ? "11111111111111111111111111111111" : `0x${"11".repeat(32)}` },
+      transaction: config.network.startsWith("near:")
+        ? { hash: "11111111111111111111111111111111111111111111", signerId: "alice.near", receiverId: "token.near", blockHash: "11111111111111111111111111111111", success: true, status: "succeeded", receiptCount: 1, failures: [] }
+        : { hash: `0x${"22".repeat(32)}`, from: "0x0000000000000000000000000000000000000000", to: config.payTo, blockNumber: "34567889", confirmationDepth: "1", success: true, status: "succeeded", gasUsed: "65000" },
+      explorerUrl: config.network.startsWith("near:") ? "https://nearblocks.io/txns/example" : "https://basescan.org/tx/example",
+      source: { type: config.network.startsWith("near:") ? "near-jsonrpc" : "evm-jsonrpc", status: config.network.startsWith("near:") ? "final" : "finalized" },
+    },
+    outputSchema: apiSchemas.transactionOutput,
   }),
   "POST /v1/activity/search": paidRoute({
     path: "/v1/activity/search",
     description: "Search the bounded final activity index",
     input: { query: "transfer", limit: 25 },
     inputSchema: { type: "object", additionalProperties: false, properties: { query: { type: "string" }, account: { type: "string" }, contract: { type: "string" }, limit: { type: "integer", minimum: 1, maximum: 100 }, cursor: { type: "string" } } },
-    outputExample: { items: [], nextCursor: null, index: { status: "ready" } },
-    outputSchema: { type: "object", required: ["items", "nextCursor", "index"] },
+    outputExample: { items: [], nextCursor: null, index: { status: "not_yet_indexed", recordCount: 0, indexedAt: null } },
+    outputSchema: apiSchemas.activityOutput,
   }),
   "POST /v1/routes/usdc/quote": paidRoute({
     path: "/v1/routes/usdc/quote",
@@ -203,8 +225,8 @@ const routes = {
     description: "Inspect indexed activity for one account, contract, or entity",
     input: {},
     inputSchema: { type: "object", additionalProperties: false, properties: {} },
-    outputExample: { identifier: "alice.testnet", status: "not_yet_indexed", records: [], index: { status: "not_yet_indexed" } },
-    outputSchema: { type: "object", required: ["identifier", "status", "records", "index"] },
+    outputExample: { identifier: "alice.testnet", status: "not_yet_indexed", records: [], index: { status: "not_yet_indexed", recordCount: 0, indexedAt: null } },
+    outputSchema: apiSchemas.entityOutput,
     method: "GET",
     bodyType: undefined,
     pathParams: { identifier: "alice.testnet" },
@@ -321,34 +343,132 @@ function invalidInput(message) {
   return error;
 }
 
-function openApi(config) {
+function createApiSchemas(config) {
   const near = config.network.startsWith("near:");
-  const accountInput = near ? { accountId: { type: "string" } } : { address: { type: "string", pattern: "^0x[0-9a-fA-F]{40}$" } };
-  const transactionInput = near ? { transactionHash: { type: "string" }, signerId: { type: "string" } } : { transactionHash: { type: "string", pattern: "^0x[0-9a-fA-F]{64}$" } };
+  const blockSchema = {
+    type: "object",
+    additionalProperties: false,
+    required: ["height", "hash"],
+    properties: {
+      height: near ? { type: "integer", minimum: 0 } : { type: "string", pattern: "^[0-9]+$" },
+      hash: { type: "string" },
+    },
+  };
+  const sourceSchema = {
+    type: "object",
+    additionalProperties: false,
+    required: ["type", "status"],
+    properties: {
+      type: { type: "string", const: near ? "near-jsonrpc" : "evm-jsonrpc" },
+      status: { type: "string", enum: ["final", "finalized", "nonterminal"] },
+    },
+  };
   const evidenceBase = {
     type: "object",
     additionalProperties: false,
     required: ["network", "kind", "observedFinality", "observedAt", "block", "source"],
     properties: {
-      network: { type: "string" },
+      network: { type: "string", const: config.network },
       kind: { type: "string" },
       observedFinality: { type: "string", enum: ["final", "finalized", "nonterminal"] },
-      observedAt: { type: "string", format: "date-time" },
-      block: { type: "object" },
-      source: { type: "object" },
-      explorerUrl: { type: "string", format: "uri" },
+      observedAt: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}T" },
+      block: blockSchema,
+      source: sourceSchema,
+      explorerUrl: { type: "string", pattern: "^https://" },
     },
   };
-  const accountOutput = { ...evidenceBase, required: [...evidenceBase.required, "account"], properties: { ...evidenceBase.properties, account: { type: "object" } } };
-  const transactionOutput = { ...evidenceBase, required: [...evidenceBase.required, "transaction"], properties: { ...evidenceBase.properties, transaction: { type: "object" } } };
+  const account = near
+    ? {
+      type: "object",
+      additionalProperties: false,
+      required: ["accountId", "amountYoctoNear", "lockedYoctoNear", "storageUsage", "codeHash"],
+      properties: {
+        accountId: { type: "string" },
+        amountYoctoNear: { type: "string", pattern: "^[0-9]+$" },
+        lockedYoctoNear: { type: "string", pattern: "^[0-9]+$" },
+        storageUsage: { type: "integer", minimum: 0 },
+        codeHash: { type: "string" },
+      },
+    }
+    : {
+      type: "object",
+      additionalProperties: false,
+      required: ["address", "balanceWei", "isContract", "asset"],
+      properties: {
+        address: { type: "string", pattern: "^0x[0-9a-fA-F]{40}$" },
+        balanceWei: { type: "string", pattern: "^[0-9]+$" },
+        isContract: { type: "boolean" },
+        asset: { type: "string", const: config.asset },
+      },
+    };
+  const transaction = near
+    ? {
+      type: "object",
+      additionalProperties: false,
+      required: ["hash", "signerId", "blockHash", "success", "status", "receiptCount", "failures"],
+      properties: {
+        hash: { type: "string" },
+        signerId: { type: "string" },
+        receiverId: { type: "string" },
+        blockHash: { type: "string" },
+        success: { type: "boolean" },
+        status: { type: "string", enum: ["succeeded", "failed"] },
+        receiptCount: { type: "integer", minimum: 0 },
+        failures: { type: "array", items: {} },
+      },
+    }
+    : {
+      type: "object",
+      additionalProperties: false,
+      required: ["hash", "from", "confirmationDepth", "status"],
+      properties: {
+        hash: { type: "string", pattern: "^0x[0-9a-fA-F]{64}$" },
+        from: { type: "string", pattern: "^0x[0-9a-fA-F]{40}$" },
+        to: { type: ["string", "null"] },
+        blockNumber: { type: "string", pattern: "^[0-9]+$" },
+        confirmationDepth: { type: "string", pattern: "^[0-9]+$" },
+        success: { type: "boolean" },
+        status: { type: "string", enum: ["succeeded", "failed", "pending"] },
+        gasUsed: { type: "string", pattern: "^[0-9]+$" },
+      },
+    };
+  const accountOutput = { ...evidenceBase, required: [...evidenceBase.required, "account"], properties: { ...evidenceBase.properties, kind: { type: "string", const: "account" }, account } };
+  const transactionOutput = { ...evidenceBase, required: [...evidenceBase.required, "transaction"], properties: { ...evidenceBase.properties, kind: { type: "string", const: "transaction" }, transaction } };
+  const indexSchema = {
+    type: "object",
+    additionalProperties: false,
+    required: ["status", "recordCount", "indexedAt"],
+    properties: {
+      status: { type: "string", enum: ["ready", "not_yet_indexed"] },
+      recordCount: { type: "integer", minimum: 0 },
+      indexedAt: { type: ["string", "null"] },
+    },
+  };
+  const activityRecord = {
+    type: "object",
+    additionalProperties: false,
+    required: ["id", "kind"],
+    properties: {
+      id: { type: "string" },
+      network: { type: "string" },
+      kind: { type: "string" },
+      account: { type: "string" },
+      contract: { type: "string" },
+      entity: { type: "string" },
+      block: {},
+      timestamp: { type: "string" },
+      summary: {},
+      indexedAt: { type: "string" },
+    },
+  };
   const activityOutput = {
     type: "object",
     additionalProperties: false,
     required: ["items", "nextCursor", "index"],
     properties: {
-      items: { type: "array", items: { type: "object" } },
+      items: { type: "array", items: activityRecord },
       nextCursor: { type: ["string", "null"] },
-      index: { type: "object" },
+      index: indexSchema,
     },
   };
   const entityOutput = {
@@ -358,26 +478,37 @@ function openApi(config) {
     properties: {
       identifier: { type: "string" },
       status: { type: "string", enum: ["indexed", "not_yet_indexed"] },
-      records: { type: "array", items: { type: "object" } },
-      index: { type: "object" },
+      records: { type: "array", items: activityRecord },
+      index: indexSchema,
     },
   };
+  return { accountOutput, transactionOutput, activityOutput, entityOutput };
+}
+
+function openApi(config) {
+  const near = config.network.startsWith("near:");
+  const accountInput = near ? { accountId: { type: "string" } } : { address: { type: "string", pattern: "^0x[0-9a-fA-F]{40}$" } };
+  const transactionInput = near ? { transactionHash: { type: "string" }, signerId: { type: "string" } } : { transactionHash: { type: "string", pattern: "^0x[0-9a-fA-F]{64}$" } };
+  const { accountOutput, transactionOutput, activityOutput, entityOutput } = apiSchemas;
+  const outputExample = route => routes[route].extensions.bazaar.info.output.example;
   return {
     openapi: "3.1.0",
     info: {
       title: `${near ? "NEAR" : "Base"} Agent Evidence & Route API`,
-      version: "0.2.0",
-      contact: { email: process.env.CONTACT_EMAIL ?? "support@example.invalid" },
+      version: "0.2.1",
+      contact: process.env.CONTACT_EMAIL
+        ? { email: process.env.CONTACT_EMAIL }
+        : { url: "https://mikedotexe.com" },
       description: "Paid, machine-readable chain evidence and bounded activity intelligence.",
       "x-guidance": `Use POST /v1/evidence/account for ${near ? "a NEAR account id" : "an EVM address"}, POST /v1/evidence/transaction for ${near ? "a transaction hash plus signer account" : "an EVM transaction hash"}, or POST /v1/routes/usdc/quote for a dry Base-USDC-to-NEAR-USDC route quote. An unpaid request returns HTTP 402 with canonical x402 v2 requirements.`,
     },
     servers: [{ url: config.resourceOrigin }],
     paths: {
-      "/v1/evidence/account": operation("Inspect final account evidence", { type: "object", additionalProperties: false, required: Object.keys(accountInput), properties: accountInput }, { network: config.network, kind: "account", observedFinality: "finalized", account: {}, source: {} }, accountOutput),
-      "/v1/evidence/transaction": operation("Inspect transaction evidence", { type: "object", additionalProperties: false, required: Object.keys(transactionInput), properties: transactionInput }, { network: config.network, kind: "transaction", observedFinality: "finalized", transaction: {}, source: {} }, transactionOutput),
-      "/v1/activity/search": operation("Search the bounded final activity index", { type: "object", additionalProperties: false, properties: { query: { type: "string" }, account: { type: "string" }, contract: { type: "string" }, limit: { type: "integer", minimum: 1, maximum: 100 }, cursor: { type: "string" } } }, { items: [], nextCursor: null, index: {} }, activityOutput),
-      "/v1/routes/usdc/quote": operation("Quote Base USDC to NEAR USDC", usdcRouteInputSchema, usdcRouteOutputExample, usdcRouteOutputSchema),
-      "/v1/entities/{identifier}": { get: { ...operation("Inspect an indexed entity", { type: "object", additionalProperties: false, properties: {} }, { identifier: "string", status: "string", records: [], index: {} }, entityOutput).get, parameters: [{ name: "identifier", in: "path", required: true, schema: { type: "string" } }] } },
+      "/v1/evidence/account": operation("Inspect final account evidence", { type: "object", additionalProperties: false, required: Object.keys(accountInput), properties: accountInput }, outputExample("POST /v1/evidence/account"), accountOutput),
+      "/v1/evidence/transaction": operation("Inspect transaction evidence", { type: "object", additionalProperties: false, required: Object.keys(transactionInput), properties: transactionInput }, outputExample("POST /v1/evidence/transaction"), transactionOutput),
+      "/v1/activity/search": operation("Search the bounded final activity index", { type: "object", additionalProperties: false, properties: { query: { type: "string" }, account: { type: "string" }, contract: { type: "string" }, limit: { type: "integer", minimum: 1, maximum: 100 }, cursor: { type: "string" } } }, outputExample("POST /v1/activity/search"), activityOutput),
+      "/v1/routes/usdc/quote": operation("Quote Base USDC to NEAR USDC", usdcRouteInputSchema, outputExample("POST /v1/routes/usdc/quote"), usdcRouteOutputSchema),
+      "/v1/entities/{identifier}": { get: { ...operation("Inspect an indexed entity", { type: "object", additionalProperties: false, properties: {} }, outputExample("GET /v1/entities/:identifier"), entityOutput).get, parameters: [{ name: "identifier", in: "path", required: true, schema: { type: "string" } }] } },
     },
   };
 

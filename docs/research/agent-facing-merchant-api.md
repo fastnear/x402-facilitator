@@ -197,6 +197,9 @@ On 2026-07-27:
   host as separate one-network processes;
 - current AgentCash `discover` found all five routes per origin and `check`
   completed without warnings for all ten concrete route URLs;
+- `npm run regression` provides a no-payment production gate across both
+  origins, all ten challenges, schema parity, validation ordering, CORS, and
+  the reverse-proxy header-size safety margin;
 - valid unpaid requests returned canonical v2 HTTP 402 requirements for
   `near:mainnet` and `eip155:8453`, each priced at 1,000 atomic USDC units and
   carrying Bazaar input/output metadata;
@@ -211,11 +214,15 @@ On 2026-07-27:
 - the quote-only Base-USDC-to-NEAR-USDC operation emitted matching OpenAPI and
   Bazaar schemas on both payment origins, while malformed unpaid bodies still
   reached HTTP 402 before application validation;
+- all five operations now share complete success-output schemas between
+  OpenAPI and runtime Bazaar metadata, and NEAR transaction evidence returns
+  and verifies its top-level block identity;
 - nginx's upstream response buffer was raised from the platform default to
   accommodate the 6.7 KB schema-rich `PAYMENT-REQUIRED` header; and
 - mocked chain/index tests covered finality pinning, pending/missing data,
-  RPC failure, malformed input, pagination, duplicate identifiers, conflicting
-  route quotes, provider failure, and provider timeout.
+  RPC failure, malformed and unknown input fields, conflicting block/receipt
+  finality, pagination, duplicate identifiers, conflicting route quotes,
+  provider failure, and provider timeout.
 
 See the dated
 [deployment and paid-flow evidence](../evidence/2026-07-27-agent-merchant-deployment.md).

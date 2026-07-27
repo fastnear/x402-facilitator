@@ -12,7 +12,7 @@ User=x402-merchant-%i
 Group=x402-merchant-%i
 WorkingDirectory=/opt/x402-merchant/current-%i
 ExecStart=/usr/bin/node /opt/x402-merchant/current-%i/server.mjs
-EnvironmentFile=/etc/x402-merchant/%i.env
+EnvironmentFile=/etc/x402-merchant/%i.conf
 LoadCredential=facilitator-api-key:/etc/x402-merchant/credentials/%i/api-key
 Environment=FACILITATOR_API_KEY_FILE=%d/facilitator-api-key
 Environment=NODE_ENV=production

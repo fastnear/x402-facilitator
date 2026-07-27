@@ -22,6 +22,10 @@ export class ActivityStore {
     if (!input || typeof input !== "object" || Array.isArray(input)) {
       throw invalidInput("request body must be an object");
     }
+    const allowed = new Set(["query", "account", "contract", "limit", "cursor"]);
+    for (const key of Object.keys(input)) {
+      if (!allowed.has(key)) throw invalidInput(`unexpected request field: ${key}`);
+    }
     const { query, account, contract, limit = 25, cursor } = input;
     if (query !== undefined && typeof query !== "string") throw invalidInput("query must be a string");
     if (account !== undefined && typeof account !== "string") throw invalidInput("account must be a string");

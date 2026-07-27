@@ -32,5 +32,6 @@ test("invalid cursors fail closed", () => {
 test("malformed search input and duplicate record ids fail closed", () => {
   const store = new ActivityStore(records);
   assert.throws(() => store.search({ limit: 0 }), error => error.status === 400);
+  assert.throws(() => store.search({ surprise: true }), /unexpected request field/);
   assert.throws(() => new ActivityStore([records[0], records[0]]), /duplicated/);
 });

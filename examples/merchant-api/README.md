@@ -99,6 +99,14 @@ Run once without `PROOF_CONFIRMATION_TOKEN` to obtain the exact preview. After
 the repository's fresh human confirmation, rerun with that token and a
 root-owned or service-owned `PROOF_RESULT_FILE`.
 
+## Public regression check
+
+`npm run regression` exercises both production origins without signing or
+broadcasting a payment. It verifies public discovery documents, all ten unpaid
+402 challenges, canonical network/asset/payee/amount fields, the 12 KB upstream
+header safety margin, Bazaar/OpenAPI schema parity, validation ordering, and
+the production browser CORS allowlist. Run it before and after every promotion.
+
 ## Safety
 
 The server performs read-only chain RPC calls and dry route-quote requests. It
