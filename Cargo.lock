@@ -2016,7 +2016,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3122,9 +3122,9 @@ dependencies = [
 
 [[package]]
 name = "near-chain-configs"
-version = "0.37.1"
+version = "0.37.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c040592165e3d2bfc8887976eeac4c933bc91bb43f6fbf88fcf29e77e033378"
+checksum = "532e1387aa2f8db926d8918478a9a3bf6e638f0f7ffc4c13437741afadc5e747"
 dependencies = [
  "anyhow",
  "bytesize",
@@ -3225,9 +3225,9 @@ dependencies = [
 
 [[package]]
 name = "near-jsonrpc-primitives"
-version = "0.37.1"
+version = "0.37.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "59337f4830f98c5e833ba9ed405eec923fb4c3b295462ba241c2576f25c5cd67"
+checksum = "a2fcc6d55d13526619f0dfd63b6ea2f4813decd10f9ad058f95eb8d25a9cd610"
 dependencies = [
  "arbitrary",
  "near-chain-configs",
@@ -4036,7 +4036,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4541,7 +4541,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6091,7 +6091,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
