@@ -52,8 +52,8 @@ use crate::chain::{
 use crate::config::{ChainKind, ServiceConfig};
 use crate::leadership::ReadinessState;
 use crate::protocol::{
-    ParsedRequest, SettleResponse, VerifyResponse, decimal_is_at_least, parse_request,
-    request_fingerprint,
+    NearAssetTransferMethod, ParsedRequest, SettleResponse, VerifyResponse, decimal_is_at_least,
+    parse_request, request_fingerprint,
 };
 use crate::store::{
     ClaimOutcome, EvmAuthorizationMetadata, EvmPreparedJournalEntry, NewSettlement, PgStore,
@@ -1492,6 +1492,12 @@ fn static_failure_reason(state: &AppState, request: &ParsedRequest) -> Option<&'
         Some("unsupported_scheme")
     } else if request.meta.network != state.config.network {
         Some("invalid_network")
+    } else if request
+        .meta
+        .near_asset_transfer_method
+        .is_some_and(|method| method != NearAssetTransferMethod::Delegate)
+    {
+        Some("unsupported_asset_transfer_method")
     } else if !configured_asset_matches(
         state.config.chain_kind,
         &state.config.asset,
