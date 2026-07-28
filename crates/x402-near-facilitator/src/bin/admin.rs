@@ -304,11 +304,17 @@ fn key(command: KeyCommand) -> Result<()> {
 // One ordered construction sequence (shared `build_chain_provider`, then
 // leadership + reconcile), mirroring the service binary's startup.
 async fn reconcile_command(config_path: &Path) -> Result<()> {
-    let config = ServiceConfig::load(config_path).context("load service config")?;
+    let mut config = ServiceConfig::load(config_path).context("load service config")?;
     let secrets = SecretFiles::from_environment()
         .context("locate credentials")?
         .load()
         .context("load credentials")?;
+    config
+        .apply_rpc_url_overrides(
+            secrets.primary_rpc_url.as_ref().map(|value| value.as_str()),
+            secrets.backup_rpc_url.as_ref().map(|value| value.as_str()),
+        )
+        .context("apply protected RPC configuration")?;
     let telemetry =
         TelemetryGuard::initialize(config.environment, None).context("initialize telemetry")?;
     let store = PgStore::connect(

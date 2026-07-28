@@ -4,9 +4,11 @@
 # Every run pushes to CloudWatch (region us-east-1, namespace x402near,
 # colocated with the readyz alarms and the SNS alert topic):
 #   - RelayerBalanceNear{Network=mainnet|testnet}: NEAR-instance relayer
-#     account balance in NEAR, read from the same RPC endpoint the service uses.
+#     account balance in NEAR, read through the same primary/backup RPC pair
+#     the service uses.
 #   - SignerBalanceEth{Network=<instance>}: eip155-instance signer native-gas
-#     balance in ETH, read from the same RPC endpoint the service uses.
+#     balance in ETH, read through the same primary/backup RPC pair the service
+#     uses.
 #   - CertDaysRemaining{Host=<lineage>}: days until each Let's Encrypt
 #     certificate lineage expires (one datapoint per lineage).
 #
@@ -17,8 +19,9 @@ set -euo pipefail
 
 readonly REGION=us-east-1
 readonly NAMESPACE=x402near
-readonly CONFIG_DIR=/etc/x402-near-facilitator
-readonly CERT_LIVE_DIR=/etc/letsencrypt/live
+readonly CONFIG_DIR=${X402_METRICS_CONFIG_DIR:-/etc/x402-near-facilitator}
+readonly CREDENTIAL_DIR=${X402_METRICS_CREDENTIAL_DIR:-/etc/x402-near-facilitator/credentials}
+readonly CERT_LIVE_DIR=${X402_METRICS_CERT_LIVE_DIR:-/etc/letsencrypt/live}
 
 fail=0
 
@@ -35,28 +38,95 @@ publish() {
     --unit None
 }
 
+read_rpc_credential() {
+  local path=$1 value
+  [ -r "$path" ] || return 1
+  [ "$(wc -c <"$path")" -le 65536 ] || return 1
+  [ "$(wc -l <"$path")" -eq 1 ] || return 1
+  IFS= read -r value <"$path" || return 1
+  value=${value%$'\r'}
+  case "$value" in
+    https://*) ;;
+    *) return 1 ;;
+  esac
+  case "$value" in
+    *[[:space:]]*) return 1 ;;
+  esac
+  printf '%s' "$value"
+}
+
+rpc_url() {
+  local config=$1 role=$2
+  local instance credential
+  instance=$(basename "$config" .json)
+  credential="$CREDENTIAL_DIR/$instance/$role-rpc-url"
+  if [ -e "$credential" ]; then
+    read_rpc_credential "$credential"
+  else
+    jq -er \
+      ".${role}_rpc_url | select(type == \"string\" and startswith(\"https://\") and (test(\"[[:space:]]\") | not))" \
+      "$config" 2>/dev/null
+  fi
+}
+
+rpc_result_with_fallback() {
+  local config=$1 request=$2 result_filter=$3
+  local role rpc curl_url response result
+
+  # One bounded attempt per independent endpoint is enough for a five-minute
+  # metric. Pass the URL through curl's stdin config rather than argv, and
+  # suppress curl/jq diagnostics, because provider URLs may contain credentials.
+  # Resolve each role independently: a malformed or unreadable credential for
+  # one endpoint must not suppress a healthy endpoint in the other role. The
+  # caller emits only the bounded instance name when neither yields a result.
+  for role in primary backup; do
+    if ! rpc=$(rpc_url "$config" "$role"); then
+      continue
+    fi
+    curl_url=${rpc//\\/\\\\}
+    curl_url=${curl_url//\"/\\\"}
+    if response=$(
+      printf 'url = "%s"\n' "$curl_url" |
+        curl -sS --fail --max-time 20 --config - \
+          -H 'Content-Type: application/json' \
+          -d "$request" 2>/dev/null
+    ) &&
+      result=$(jq -er "$result_filter" <<<"$response" 2>/dev/null); then
+      printf '%s' "$result"
+      return 0
+    fi
+  done
+  return 1
+}
+
 relayer_balance_near() {
   local config=$1
-  local account rpc response amount
-  account=$(jq -r .relayer_account_id "$config")
-  rpc=$(jq -r .primary_rpc_url "$config")
-  response=$(curl -sS --fail --max-time 20 "$rpc" \
-    -H 'Content-Type: application/json' \
-    -d '{"jsonrpc":"2.0","id":"metrics","method":"query","params":{"request_type":"view_account","finality":"final","account_id":"'"$account"'"}}')
-  amount=$(jq -er .result.amount <<<"$response")
+  local account request amount
+  account=$(jq -er \
+    '.relayer_account_id | select(type == "string" and length > 0)' \
+    "$config" 2>/dev/null) || return 1
+  request=$(jq -cn --arg account "$account" \
+    '{jsonrpc:"2.0",id:"metrics",method:"query",params:{request_type:"view_account",finality:"final",account_id:$account}}') ||
+    return 1
+  amount=$(rpc_result_with_fallback "$config" "$request" \
+    '.result.amount | select(type == "string" and test("^[0-9]+$"))') ||
+    return 1
   # yoctoNEAR -> NEAR; float precision loss is irrelevant at alert scale.
   awk -v y="$amount" 'BEGIN { printf "%.6f", y / 1e24 }'
 }
 
 signer_balance_eth() {
   local config=$1
-  local account rpc response hex
-  account=$(jq -r .relayer_account_id "$config")
-  rpc=$(jq -r .primary_rpc_url "$config")
-  response=$(curl -sS --fail --max-time 20 "$rpc" \
-    -H 'Content-Type: application/json' \
-    -d '{"jsonrpc":"2.0","id":"metrics","method":"eth_getBalance","params":["'"$account"'","latest"]}')
-  hex=$(jq -er .result <<<"$response")
+  local account request hex
+  account=$(jq -er \
+    '.relayer_account_id | select(type == "string" and length > 0)' \
+    "$config" 2>/dev/null) || return 1
+  request=$(jq -cn --arg account "$account" \
+    '{jsonrpc:"2.0",id:"metrics",method:"eth_getBalance",params:[$account,"latest"]}') ||
+    return 1
+  hex=$(rpc_result_with_fallback "$config" "$request" \
+    '.result | select(type == "string" and test("^0x[0-9a-fA-F]+$"))') ||
+    return 1
   # eth_getBalance returns 0x-hex wei. Parse it in awk so the conversion needs
   # no gawk/bc/python: awk doubles carry every magnitude without the 64-bit
   # overflow bash arithmetic hits above ~9.2 ETH, and sub-wei rounding is

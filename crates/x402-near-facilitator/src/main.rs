@@ -30,9 +30,15 @@ struct Cli {
 #[allow(clippy::too_many_lines)]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let config = ServiceConfig::load(&cli.config).context("load service config")?;
+    let mut config = ServiceConfig::load(&cli.config).context("load service config")?;
     let secret_files = SecretFiles::from_environment().context("locate credentials")?;
     let secrets = secret_files.load().context("load credentials")?;
+    config
+        .apply_rpc_url_overrides(
+            secrets.primary_rpc_url.as_ref().map(|value| value.as_str()),
+            secrets.backup_rpc_url.as_ref().map(|value| value.as_str()),
+        )
+        .context("apply protected RPC configuration")?;
     let otel = OtelConfig::from_environment().context("load telemetry configuration")?;
     let telemetry = TelemetryGuard::initialize(config.environment, otel.as_ref())
         .context("initialize telemetry")?;
