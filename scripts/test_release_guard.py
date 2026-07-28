@@ -614,6 +614,16 @@ class WorkflowPolicyTests(unittest.TestCase):
             3,
         )
 
+    def test_sbom_attestations_avoid_deprecated_wrapper_and_storage_records(
+        self,
+    ) -> None:
+        workflow = (
+            REPOSITORY_ROOT / ".github/workflows/release.yml"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("actions/attest-sbom@", workflow)
+        self.assertEqual(workflow.count("uses: actions/attest@"), 2)
+        self.assertEqual(workflow.count("create-storage-record: false"), 2)
+
     def test_resume_ancestry_and_latest_order_are_fail_closed(self) -> None:
         workflow = (
             REPOSITORY_ROOT / ".github/workflows/release.yml"

@@ -319,7 +319,7 @@ def decide_stable_publication(
 
 def normalize_sbom_document(document: dict[str, Any], commit: str) -> dict[str, Any]:
     normalized = dict(document)
-    # attest-sbom recognizes CycloneDX only when bomFormat, specVersion, and
+    # actions/attest recognizes CycloneDX only when bomFormat, specVersion, and
     # serialNumber are all present, so the generator's random serialNumber is
     # replaced with a commit-derived value rather than removed.
     normalized["serialNumber"] = "urn:uuid:" + str(

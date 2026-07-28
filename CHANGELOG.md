@@ -13,6 +13,13 @@ Patch releases remain backward compatible within the current minor line.
 
 ## [Unreleased]
 
+### Changed
+
+- Replaced the deprecated SBOM-attestation wrapper with the direct,
+  SHA-pinned GitHub action and disabled unused OCI artifact-catalog records.
+  Provenance and SBOM publication to the repository and registry are
+  unchanged, without adding the broader metadata write permission.
+
 ## [0.5.3] - 2026-07-27
 
 This backward-compatible release supersedes the unpublished v0.5.2 release
