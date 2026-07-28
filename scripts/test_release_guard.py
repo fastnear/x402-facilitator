@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 import sys
 import tempfile
 import unittest
@@ -532,6 +533,25 @@ class ArtifactTests(unittest.TestCase):
 
 
 class WorkflowPolicyTests(unittest.TestCase):
+    def test_sbom_assertions_match_exact_workspace_dependency_pins(self) -> None:
+        cargo = (REPOSITORY_ROOT / "Cargo.toml").read_text(encoding="utf-8")
+        workflow = (
+            REPOSITORY_ROOT / ".github/workflows/release.yml"
+        ).read_text(encoding="utf-8")
+        for dependency in ("near-primitives", "x402-types"):
+            workspace_match = re.search(
+                rf'(?m)^{re.escape(dependency)}\s*=\s*"=([^"]+)"\s*$',
+                cargo,
+            )
+            self.assertIsNotNone(workspace_match)
+            expected = workspace_match.group(1) if workspace_match else ""
+            workflow_pins = re.findall(
+                rf'\.name == "{re.escape(dependency)}" and '
+                rf'\.version == "([^"]+)"',
+                workflow,
+            )
+            self.assertEqual(workflow_pins, [expected] * 4)
+
     def test_dockerfile_static_labels_match_release_guard(self) -> None:
         dockerfile = (REPOSITORY_ROOT / "Dockerfile").read_text(encoding="utf-8")
         labels = release_guard.expected_image_labels(

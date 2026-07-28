@@ -13,10 +13,26 @@ Patch releases remain backward compatible within the current minor line.
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-07-27
+
+This backward-compatible release supersedes the unpublished v0.5.2 release
+checkpoint and carries forward the complete operations patch documented
+immediately below. There are no additional runtime, wire-contract, settlement,
+or database-schema changes.
+
+### Fixed
+
+- Updated native and OCI SBOM validation to match the workspace's locked
+  `near-primitives` dependency, and added a repository gate that prevents
+  future release-workflow dependency assertions from drifting behind the
+  authoritative workspace pins.
+
 ## [0.5.2] - 2026-07-27
 
-This backward-compatible operations patch has no wire-contract, settlement,
-or database-schema changes.
+This backward-compatible operations patch has no wire-contract, settlement, or
+database-schema changes. Its signed checkpoint passed the source, quality, and
+fuzz gates, but no release was published because a stale SBOM assertion stopped
+artifact creation; v0.5.3 supersedes it without rewriting the public tag.
 
 ### Added
 
@@ -272,7 +288,8 @@ store, leadership, HTTP) at every step.
 Initial hardened NEAR-only release lineage (durable journal, dual-RPC
 reconciliation, leadership failover, sponsorship budgets). See git history.
 
-[Unreleased]: https://github.com/fastnear/x402-facilitator/compare/v0.5.2...HEAD
+[Unreleased]: https://github.com/fastnear/x402-facilitator/compare/v0.5.3...HEAD
+[0.5.3]: https://github.com/fastnear/x402-facilitator/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/fastnear/x402-facilitator/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/fastnear/x402-facilitator/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/fastnear/x402-facilitator/compare/v0.4.1...v0.5.0
