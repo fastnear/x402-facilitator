@@ -2,7 +2,7 @@
 
 This sanitized record covers the Base/NEAR RPC incident review and the
 host-only maintenance completed on the reference deployment. It does not claim
-that the v0.5.2 service binary was deployed; all three facilitator instances
+that a newer service binary was deployed; all three facilitator instances
 remained on the attested v0.5.1 release while the software patch entered its
 normal review and release gate.
 
@@ -17,7 +17,7 @@ normal review and release gate.
 - NEAR mainnet and testnet were already configured with FastNEAR regular and
   archival endpoints. No NEAR provider cutover was necessary.
 - The Base service remained on its existing public primary/backup readers
-  pending the v0.5.2 binary rollout. No settlement transaction was broadcast.
+  pending the patch binary rollout. No settlement transaction was broadcast.
 
 ## Authenticated Base provider
 
@@ -90,14 +90,18 @@ and relayer gates ready. The Base service was still on v0.5.1 at this
 checkpoint; therefore its service traffic had not yet switched to the
 protected Alchemy endpoint.
 
-## Remaining v0.5.2 gate
+## Remaining v0.5.3 gate
+
+The signed v0.5.2 checkpoint passed source, quality, and fuzz validation, but a
+stale `near-primitives` SBOM assertion stopped artifact creation. No v0.5.2
+release was published or installed; v0.5.3 supersedes the immutable checkpoint.
 
 Before the Base service cutover:
 
 1. pass the complete local and PostgreSQL/conformance gates;
-2. merge and produce the signed, attested v0.5.2 release;
+2. merge and produce the signed, attested v0.5.3 release;
 3. prove there are no active nonterminal Base settlements;
-4. install the protected-RPC systemd drop-in, promote v0.5.2, and restart only
+4. install the protected-RPC systemd drop-in, promote v0.5.3, and restart only
    the Base instance;
 5. verify `/`, `/supported`, `/readyz`, the bounded readiness-transition
    journal, exact provider behavior, and CloudWatch telemetry;
