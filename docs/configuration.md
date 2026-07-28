@@ -27,12 +27,23 @@ is configured for the native deployment, or a secret value is supplied inline.
 | `DATABASE_DIRECT_URL_FILE` | `database-direct-url` | Direct PostgreSQL URL for session leadership; may equal the application URL only when it is already direct |
 | `RELAYER_KEY_FILE` | `relayer-key` | Dedicated relayer/signer service key; never an operator recovery key |
 | `API_KEY_PEPPER_FILE` | `api-key-pepper` | Random HMAC pepper independent of all API keys |
+| `PRIMARY_RPC_URL_FILE` | `primary-rpc-url` | Optional complete HTTPS RPC URL when the provider embeds a credential in its path or query |
+| `BACKUP_RPC_URL_FILE` | `backup-rpc-url` | Optional complete HTTPS backup RPC URL when it embeds a credential |
 | `OTEL_EXPORTER_OTLP_HEADERS_FILE` | `otel-headers` | Optional OTLP authorization header; omit when telemetry export is disabled |
 
 Files must contain only the value, end with a newline, be owned by root, and be
 mode 0600 before systemd imports them. The service should trim one terminal
 newline, but no other whitespace. Secret values must never be accepted through
 CLI arguments.
+
+The JSON configuration continues to carry non-secret fallback RPC URLs.
+Authenticated provider URLs override either corresponding JSON value only when
+`PRIMARY_RPC_URL_FILE` or `BACKUP_RPC_URL_FILE` is set, and the complete
+configuration is validated again after the override. Install an instance-local
+systemd drop-in based on
+`deploy/systemd/x402-rpc-credentials.conf.example`; do not add authenticated
+URLs to checked-in JSON, an `Environment=` value, or a command line. The two
+effective endpoints must still use HTTPS and different hosts.
 
 The checked-in examples disable telemetry export. If an OTLP backend is
 adopted, set its HTTPS endpoint, resource attributes

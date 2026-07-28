@@ -156,15 +156,16 @@ impl AppState {
         Arc::clone(&self.relayer_lock)
     }
 
-    /// Refresh the chain-dependent readiness gates.  Both independent RPCs
-    /// must report the configured network and finality, and the configured
-    /// relayer key must be `FullAccess`, active in policy, and funded above the
-    /// hard-stop threshold.
+    /// Refresh the chain-dependent readiness gates. NEAR retains independent
+    /// RPC-liveness and relayer-status reads; EVM derives both gates from one
+    /// conservative primary/backup head snapshot. The configured signer must
+    /// also be active in policy and funded above the hard-stop threshold.
     pub async fn refresh_chain_readiness(&self) -> bool {
-        let rpc_ready = self.provider.readiness_probe().await;
+        let observation = self.provider.readiness_observation().await;
+        let rpc_ready = observation.rpc_ready;
         self.readiness.set_rpc(rpc_ready);
 
-        let signer = self.provider.signer_head().await;
+        let signer = observation.signer_head;
         let signer_account_id = self.provider.signer_account_id();
         let policy_active = self
             .store
@@ -418,6 +419,7 @@ async fn ready(State(state): State<AppState>) -> Response {
         .operationally_ready(&state.config.network, &state.config.asset)
         .await
         .unwrap_or(false);
+    state.readiness.set_database(database);
     let snapshot = state.readiness.snapshot();
     let is_ready = database
         && snapshot.leadership

@@ -2,11 +2,13 @@
 Description=x402-near operational metrics push
 After=network-online.target
 Wants=network-online.target
-OnFailure=x402-near-alert@%n.service
 
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/x402-near-metrics.sh
+# Three instances can each exhaust one 20-second attempt against both
+# independent RPCs. Keep that bounded failure path inside the unit deadline.
+TimeoutStartSec=180
 # The AWS CLI needs a writable HOME for its cache; keep it in the
 # unit-private /tmp so the sandbox stays read-only elsewhere.
 Environment=HOME=/tmp

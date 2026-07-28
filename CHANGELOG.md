@@ -13,6 +13,39 @@ Patch releases remain backward compatible within the current minor line.
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-07-27
+
+This backward-compatible operations patch has no wire-contract, settlement,
+or database-schema changes.
+
+### Added
+
+- Optional protected primary and backup RPC URL credentials, loaded through
+  the existing secret-file/systemd-credential boundary and revalidated after
+  they replace the public JSON fallbacks. This permits authenticated provider
+  endpoints without putting their keys in the repository, process arguments,
+  or ordinary environment variables.
+- Bounded readiness transition events that identify the `database`,
+  `leadership`, `reconciliation`, `rpc`, or `relayer` gate and its `ready` or
+  `not_ready` state without logging account, network, transaction,
+  authorization, or endpoint details.
+
+### Changed
+
+- Base readiness now derives RPC and signer health from one conservative
+  primary/backup EVM head snapshot instead of repeating the same multi-call
+  read twice per refresh.
+- Balance monitoring tries the effective primary endpoint and then the
+  independent backup for both chain families. Provider URLs and response
+  bodies remain suppressed, and persistent missing-data alarms now debounce
+  a single failed five-minute interval before notifying.
+
+### Fixed
+
+- Removed the facilitator-specific Nginx logrotate stanza that overlapped
+  Ubuntu's packaged `/var/log/nginx/*.log` rule and caused the host logrotate
+  unit to fail.
+
 ## [0.5.1] - 2026-07-26
 
 ### Fixed
@@ -239,7 +272,8 @@ store, leadership, HTTP) at every step.
 Initial hardened NEAR-only release lineage (durable journal, dual-RPC
 reconciliation, leadership failover, sponsorship budgets). See git history.
 
-[Unreleased]: https://github.com/fastnear/x402-facilitator/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/fastnear/x402-facilitator/compare/v0.5.2...HEAD
+[0.5.2]: https://github.com/fastnear/x402-facilitator/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/fastnear/x402-facilitator/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/fastnear/x402-facilitator/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/fastnear/x402-facilitator/compare/v0.4.0...v0.4.1

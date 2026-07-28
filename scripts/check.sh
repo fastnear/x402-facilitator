@@ -39,6 +39,7 @@ python3 -m json.tool deploy/config/testnet.json.example >/dev/null
 python3 -m json.tool deploy/config/base-sepolia.json.example >/dev/null
 python3 -m json.tool deploy/config/base.json.example >/dev/null
 python3 -B scripts/test_release_guard.py
+bash scripts/test-monitoring.sh
 python3 scripts/check-docs.py
 
 git diff --check

@@ -125,6 +125,12 @@ At least daily, and after every restart or provider incident:
 - check certificate expiry and the reverse proxy's authentication-header
   redaction.
 
+On Ubuntu hosts using the packaged Nginx logrotate policy, let its
+`/var/log/nginx/*.log` wildcard own every facilitator, demo, and merchant log.
+Do not add an overlapping per-service stanza. Validate the full configuration
+with `logrotate --debug /etc/logrotate.conf` after changing a virtual host or
+rotation policy.
+
 Alert labels must stay low-cardinality. Account IDs, addresses, payment IDs,
 authorization hashes, and transaction hashes belong only in access-controlled
 investigation data, never metric labels.

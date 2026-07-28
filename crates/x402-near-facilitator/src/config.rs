@@ -179,6 +179,8 @@ pub struct SecretFiles {
     pub database_direct_url: PathBuf,
     pub relayer_key: PathBuf,
     pub api_key_pepper: PathBuf,
+    pub primary_rpc_url: Option<PathBuf>,
+    pub backup_rpc_url: Option<PathBuf>,
 }
 
 #[allow(missing_debug_implementations)]
@@ -187,6 +189,8 @@ pub struct RuntimeSecrets {
     pub database_direct_url: Zeroizing<String>,
     pub relayer_key: Zeroizing<String>,
     pub api_key_pepper: Zeroizing<String>,
+    pub primary_rpc_url: Option<Zeroizing<String>>,
+    pub backup_rpc_url: Option<Zeroizing<String>>,
 }
 
 #[derive(Clone)]
@@ -220,6 +224,25 @@ impl ServiceConfig {
         let config: Self = serde_json::from_slice(&bytes)?;
         config.validate()?;
         Ok(config)
+    }
+
+    /// Replace either non-secret configured RPC URL with a URL read from a
+    /// protected credential file, then re-run the complete configuration
+    /// validation. Authenticated providers commonly carry their API key in the
+    /// URL path, so the secret value must never be accepted inline in JSON,
+    /// process arguments, or an ordinary environment variable.
+    pub fn apply_rpc_url_overrides(
+        &mut self,
+        primary_rpc_url: Option<&str>,
+        backup_rpc_url: Option<&str>,
+    ) -> Result<(), ConfigError> {
+        if let Some(value) = primary_rpc_url {
+            self.primary_rpc_url = parse_secret_rpc_url("PRIMARY_RPC_URL_FILE", value)?;
+        }
+        if let Some(value) = backup_rpc_url {
+            self.backup_rpc_url = parse_secret_rpc_url("BACKUP_RPC_URL_FILE", value)?;
+        }
+        self.validate()
     }
 
     // Keep launch-policy validation in one ordered, auditable sequence.
@@ -519,6 +542,8 @@ impl SecretFiles {
             database_direct_url,
             relayer_key: required_path("RELAYER_KEY_FILE")?,
             api_key_pepper: required_path("API_KEY_PEPPER_FILE")?,
+            primary_rpc_url: optional_path("PRIMARY_RPC_URL_FILE"),
+            backup_rpc_url: optional_path("BACKUP_RPC_URL_FILE"),
         })
     }
 
@@ -528,6 +553,16 @@ impl SecretFiles {
             database_direct_url: read_secret(&self.database_direct_url)?,
             relayer_key: read_secret(&self.relayer_key)?,
             api_key_pepper: read_secret(&self.api_key_pepper)?,
+            primary_rpc_url: self
+                .primary_rpc_url
+                .as_deref()
+                .map(read_secret)
+                .transpose()?,
+            backup_rpc_url: self
+                .backup_rpc_url
+                .as_deref()
+                .map(read_secret)
+                .transpose()?,
         })
     }
 }
@@ -577,6 +612,20 @@ fn validate_otel_endpoint(endpoint: &Url) -> Result<(), ConfigError> {
         ));
     }
     Ok(())
+}
+
+fn parse_secret_rpc_url(name: &'static str, value: &str) -> Result<Url, ConfigError> {
+    let url = Url::parse(value).map_err(|_| ConfigError::Environment {
+        name,
+        message: "credential must contain one valid absolute URL".to_owned(),
+    })?;
+    if url.scheme() != "https" {
+        return Err(ConfigError::Environment {
+            name,
+            message: "credential URL must use HTTPS".to_owned(),
+        });
+    }
+    Ok(url)
 }
 
 pub fn read_secret(path: &Path) -> Result<Zeroizing<String>, ConfigError> {
@@ -796,6 +845,48 @@ mod tests {
     fn accepts_base_sepolia_eip155_policy() {
         // Includes `accept_v1: true`: the legacy-wire gate is valid on eip155.
         assert!(valid_base_sepolia_config().validate().is_ok());
+    }
+
+    #[test]
+    fn protected_rpc_url_overrides_are_validated_after_application() {
+        let mut config = valid_base_sepolia_config();
+        assert!(
+            config
+                .apply_rpc_url_overrides(
+                    Some("https://base-sepolia.g.alchemy.com/v2/not-a-real-key"),
+                    None,
+                )
+                .is_ok()
+        );
+        assert_eq!(
+            config.primary_rpc_url.host_str(),
+            Some("base-sepolia.g.alchemy.com")
+        );
+        assert_eq!(
+            config.backup_rpc_url.host_str(),
+            Some("base-sepolia-rpc.publicnode.com")
+        );
+    }
+
+    #[test]
+    fn protected_rpc_url_errors_never_echo_secret_material() {
+        let secret = "alchemy-secret-that-must-not-appear";
+        let error = parse_secret_rpc_url(
+            "PRIMARY_RPC_URL_FILE",
+            &format!("not a url containing {secret}"),
+        )
+        .err()
+        .unwrap_or_else(|| std::process::abort())
+        .to_string();
+        assert!(!error.contains(secret));
+
+        let mut config = valid_base_sepolia_config();
+        let error = config
+            .apply_rpc_url_overrides(Some(&format!("http://example.invalid/{secret}")), None)
+            .err()
+            .unwrap_or_else(|| std::process::abort())
+            .to_string();
+        assert!(!error.contains(secret));
     }
 
     #[test]

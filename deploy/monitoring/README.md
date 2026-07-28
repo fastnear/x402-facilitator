@@ -17,7 +17,7 @@ topic `arn:aws:sns:us-east-1:341982967115:x402-facilitator-alerts`.
 | `x402-near-backup.sh` | `/usr/local/bin/` | Nightly dumps, S3 push, `BackupSuccess` signal |
 | `x402-near-backup.{service,timer}` | `/etc/systemd/system/` | Drive the nightly backup |
 | `x402-near-alert.sh` | `/usr/local/bin/` | Publish a unit failure to SNS |
-| `x402-near-alert@.service` | `/etc/systemd/system/` | `OnFailure=` target for any monitored unit |
+| `x402-near-alert@.service` | `/etc/systemd/system/` | `OnFailure=` target for units that need immediate notification |
 | `certbot-onfailure.conf` | `/etc/systemd/system/certbot.service.d/x402-near-onfailure.conf` | Alert on failed certificate renewal |
 | `x402-canary.sh` | `/usr/local/bin/` | Synthetic `/verify` + demo `/work` canaries every 5 minutes |
 | `x402-canary.{service,timer}` | `/etc/systemd/system/` | Drive the canaries (offset 2 minutes from the metrics timer) |
@@ -26,6 +26,42 @@ topic `arn:aws:sns:us-east-1:341982967115:x402-facilitator-alerts`.
 
 Install scripts mode 0755 root-owned, units 0644 root-owned, then
 `systemctl daemon-reload` and `systemctl enable --now` the timers.
+
+The metrics script makes one bounded request to the effective primary RPC and,
+if that response is unavailable or malformed, one to the independent backup.
+When an instance has `primary-rpc-url` or `backup-rpc-url` credential files, the
+script reads the same files that override the service's public JSON fallbacks.
+It passes each URL to curl through stdin and never prints the endpoint or RPC
+response because provider URLs may contain credentials. The metrics service
+deliberately has no immediate `OnFailure=` notification: balance alarms require
+three consecutive missing five-minute datapoints, so one provider interval does
+not send an email while a persistent failure still trips the existing dead-man
+alarm. Its explicit three-minute unit deadline also accommodates both bounded
+RPC attempts for all three currently installed instances during a broad
+provider outage.
+Backup, canary, snapshot, and certificate-renewal failures retain their
+immediate hooks.
+
+## Nginx log rotation
+
+Ubuntu's packaged `/etc/logrotate.d/nginx` rule owns
+`/var/log/nginx/*.log`, including the facilitator, demo, and merchant virtual
+hosts. Do not install an overlapping per-service rule: logrotate treats a file
+matched by two stanzas as a configuration error and may skip the entire run.
+
+For a host that still has the retired
+`/etc/logrotate.d/x402-near-facilitator` rule, first confirm that the packaged
+Nginx rule contains the wildcard. Move the retired file out of
+`/etc/logrotate.d` so it remains recoverable, then validate the complete
+configuration without rotating files:
+
+```sh
+sudo grep -F '/var/log/nginx/*.log' /etc/logrotate.d/nginx
+sudo install -d -m 0700 /root/x402-retired-config
+sudo mv /etc/logrotate.d/x402-near-facilitator \
+  /root/x402-retired-config/x402-near-facilitator.logrotate
+sudo logrotate --debug /etc/logrotate.conf
+```
 
 ## Canary fixtures
 
@@ -146,8 +182,10 @@ starts warning, and well before the hard-stop halts settlement.
 ## Failure-path coverage
 
 - Relayer balance low → balance alarm (before the service's own warning).
-- Metrics push broken (timer, RPC, credentials, host down) → missing-data
-  on every 5-minute metric → balance/cert alarms.
+- Metrics push broken after primary/backup fallback (timer, both RPCs,
+  credentials, host down) → missing-data on every affected five-minute metric
+  → balance/cert alarms. The metrics unit omits an immediate `OnFailure=` hook
+  so the balance alarms' three-period evaluation debounces one bad interval.
 - Nightly backup fails, including a failed S3 push → unit exits nonzero →
   `OnFailure=` SNS alert, and no `BackupSuccess` datapoint → dead-man alarm
   within a day.

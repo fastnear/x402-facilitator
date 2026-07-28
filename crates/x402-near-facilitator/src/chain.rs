@@ -6,6 +6,7 @@
 //! variants so recovery can validate them without weakening the shared model.
 
 use std::fmt;
+use std::future::Future;
 
 use near_primitives::hash::CryptoHash;
 use near_primitives::types::AccountId;
@@ -242,6 +243,22 @@ impl ChainProvider {
                     && provider.backup_rpc_final_block().await.is_ok()
             }
             Self::Evm(provider) => provider.readiness_probe().await,
+        }
+    }
+
+    /// Observe the chain-dependent readiness inputs.
+    ///
+    /// NEAR intentionally retains its independent two-endpoint liveness probe
+    /// and relayer-status read. EVM obtains one conservative primary/backup
+    /// [`EvmHead`] and derives both the RPC and signer gates from that same
+    /// snapshot, avoiding a second burst of identical RPC calls per refresh.
+    pub async fn readiness_observation(&self) -> ChainReadinessObservation {
+        match self {
+            Self::Near(_) => ChainReadinessObservation {
+                rpc_ready: self.readiness_probe().await,
+                signer_head: self.signer_head().await,
+            },
+            Self::Evm(provider) => observe_evm_readiness(|| provider.head()).await,
         }
     }
 
@@ -620,6 +637,46 @@ impl ChainProvider {
                 BroadcastOutcome::Pending
             }
         }
+    }
+}
+
+/// Chain-neutral inputs for one readiness refresh.
+///
+/// `rpc_ready` and `signer_head` remain independent because NEAR's liveness
+/// probe and relayer-status query intentionally have distinct semantics. EVM
+/// fills both fields from one conservative provider snapshot.
+pub struct ChainReadinessObservation {
+    /// Whether the provider's required RPC endpoints are currently usable.
+    pub rpc_ready: bool,
+    /// The signer snapshot used for funding and policy readiness.
+    pub signer_head: Result<SignerHead, SignerHeadError>,
+}
+
+impl fmt::Debug for ChainReadinessObservation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ChainReadinessObservation")
+            .field("rpc_ready", &self.rpc_ready)
+            .field("signer_ready", &self.signer_head.is_ok())
+            .finish()
+    }
+}
+
+async fn observe_evm_readiness<Load, Loaded, Error>(load_head: Load) -> ChainReadinessObservation
+where
+    Load: FnOnce() -> Loaded,
+    Loaded: Future<Output = Result<EvmHead, Error>>,
+    Error: fmt::Display,
+{
+    match load_head().await {
+        Ok(head) => ChainReadinessObservation {
+            rpc_ready: true,
+            signer_head: Ok(evm_head_to_signer_head(&head)),
+        },
+        Err(error) => ChainReadinessObservation {
+            rpc_ready: false,
+            signer_head: Err(SignerHeadError(error.to_string())),
+        },
     }
 }
 
@@ -1308,12 +1365,54 @@ fn execution_cost_near(outcome: &FinalExecutionOutcomeView) -> (u64, u128) {
 
 #[cfg(test)]
 mod tests {
-    use super::final_outcomes_conflict;
+    use std::cell::Cell;
+
+    use super::{EvmHead, final_outcomes_conflict, observe_evm_readiness};
 
     #[test]
     fn conflicting_final_results_fail_closed() {
         assert!(!final_outcomes_conflict(Some(&1_u8), Some(&1_u8)));
         assert!(final_outcomes_conflict(Some(&1_u8), Some(&2_u8)));
         assert!(!final_outcomes_conflict(Some(&1_u8), None));
+    }
+
+    #[tokio::test]
+    async fn evm_readiness_uses_one_conservative_head_snapshot() {
+        let calls = Cell::new(0_u8);
+        let observation = observe_evm_readiness(|| {
+            calls.set(calls.get().saturating_add(1));
+            async {
+                Ok::<_, &'static str>(EvmHead {
+                    block_number: 42,
+                    account_nonce: 7,
+                    gas_balance_wei: 1_000,
+                    signer_address: [0_u8; 20].into(),
+                })
+            }
+        })
+        .await;
+
+        assert_eq!(calls.get(), 1);
+        assert!(observation.rpc_ready);
+        let signer = observation
+            .signer_head
+            .unwrap_or_else(|_| std::process::abort());
+        assert_eq!(signer.chain_block_height, 42);
+        assert_eq!(signer.signer_nonce, 7);
+        assert_eq!(signer.signer_balance_atomic, 1_000);
+    }
+
+    #[tokio::test]
+    async fn evm_readiness_fails_both_gates_from_one_failed_snapshot() {
+        let calls = Cell::new(0_u8);
+        let observation = observe_evm_readiness(|| {
+            calls.set(calls.get().saturating_add(1));
+            async { Err::<EvmHead, _>("unavailable") }
+        })
+        .await;
+
+        assert_eq!(calls.get(), 1);
+        assert!(!observation.rpc_ready);
+        assert!(observation.signer_head.is_err());
     }
 }
