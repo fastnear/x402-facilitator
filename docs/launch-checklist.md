@@ -57,8 +57,9 @@ or conversation alone is not launch evidence.
 - [x] The Rust toolchain (pinned to 1.93 by `rust-toolchain.toml`; container
       build image `rust:1.97-bookworm` per `Dockerfile`), `Cargo.lock`, x402-rs
       crate versions (`x402-types` / `x402-facilitator-local` `=2.0.2`), NEAR
-      crate versions (`near-*` `=0.37.1`, `near-jsonrpc-client` `=0.22.0`), and
-      official `@x402/near@2.19.0` oracle version are pinned. — 2026-07-24.
+      crate versions (`near-*` `=0.37.2`, `near-jsonrpc-client` `=0.22.0`), and
+      official `@x402/near@2.19.0` oracle version are pinned. — 2026-07-24;
+      NEAR pin updated 2026-07-27.
 - [x] Formatting, Clippy with warnings denied, all tests, migration test,
       oracle diff, `cargo deny`, and `cargo audit` pass in CI. — 2026-07-23:
       enforced on every push and on v0.1.3 by `scripts/check.sh` and

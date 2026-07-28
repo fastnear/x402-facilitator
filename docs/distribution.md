@@ -1,20 +1,21 @@
 # Distribution: registry submissions
 
-Status (2026-07-26): the original x402 Foundation entry **merged** as #2941;
-its NEAR-and-Base follow-up is open as #2960. awesome-agentic-commerce #510,
-x402facilitators #15, Pay.sh #1020, and Gold-402 #64 remain open. The
+Status (2026-07-27): the original x402 Foundation entry **merged** as #2941,
+and its NEAR-and-Base follow-up **merged** as #2960.
+awesome-agentic-commerce #510, x402facilitators #15, Pay.sh #1020, and
+Gold-402 #64 remain open. The
 x402-list submission is pending manual review, and the Base demo resource is
 registered on x402scan. NEAR discovery remains tracked in x402scan #1040.
-v0.5.1 is deployed across the three live reference instances; its public
+v0.5.3 is deployed across the three live reference instances; its public
 landing pages and Base `payment-identifier` advertisement are visible in the
-[dated rollout evidence](evidence/2026-07-26-v051-reference-deployment.md).
+[dated rollout evidence](evidence/2026-07-27-v053-rpc-readiness-rollout.md).
 
 ## Readiness facts registries key off
 
 - The reference deployment has live NEAR mainnet, NEAR testnet, and Base
   mainnet facilitator instances. Base Sepolia remains a configured rollout
   target and must not be presented as live.
-- v0.5.1 `/supported` is canonical x402 v2 with `kinds`,
+- v0.5.3 `/supported` is canonical x402 v2 with `kinds`,
   `extensions: ["payment-identifier"]`, and per-network `signers`; the gated
   legacy v1 kind is advertised only by an EVM instance that enables it.
 - The public demo resource server returns a valid 402 with a base64
@@ -123,7 +124,7 @@ The facilitator service crate remains application-only.
   The maintainer accepted the `facilitators.md` entry and asked to drop the
   deprecated `typescript/site/` ecosystem-page files (removed in `b783c830`);
   the merged PR is one table row.
-- **Multi-chain follow-up opened 2026-07-26:**
+- **Multi-chain follow-up merged 2026-07-27:**
   <https://github.com/x402-foundation/x402/pull/2960>. It changes only that
   existing row to link the human-facing page and describe deployed NEAR and
   Base support. No second Base-only listing or deprecated ecosystem files
@@ -218,7 +219,7 @@ The facilitator service crate remains application-only.
   NEAR paid-flow evidence because the authenticated endpoints cannot be probed
   without a key; arrange a narrowly scoped reviewer credential out of band if
   the maintainer requests a live verification.
-- v0.5.1 is live, and the homepage and `/supported` agree with the multi-chain
+- v0.5.3 is live, and the homepage and `/supported` agree with the multi-chain
   description.
 - **PR opened 2026-07-26:**
   <https://github.com/Haustorium12/gold-402/pull/64>. No reviewer credential

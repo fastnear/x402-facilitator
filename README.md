@@ -30,7 +30,7 @@ deployment. This repository deliberately separates software release state from
 deployment state: a GitHub release does not imply that any public instance has
 been promoted. Dated launch and end-to-end records live in
 [`docs/evidence/`](docs/evidence/); the
-[v0.5.1 reference deployment record](docs/evidence/2026-07-26-v051-reference-deployment.md)
+[v0.5.3 RPC-readiness rollout](docs/evidence/2026-07-27-v053-rpc-readiness-rollout.md)
 is the best starting point. Public reference endpoints have no availability
 SLA.
 
