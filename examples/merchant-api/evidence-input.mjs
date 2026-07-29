@@ -1,10 +1,15 @@
+const NEAR_CRYPTO_HASH_PATTERN = "^[1-9A-HJ-NP-Za-km-z]{32,44}$";
+
 export const PATTERNS = Object.freeze({
   nearAccountId: "^(?=.{2,64}$)[a-z0-9]+(?:[._-][a-z0-9]+)*$",
   // OpenAPI can express the base58 alphabet and its possible rendered
   // lengths; `isNearCryptoHash` below also verifies the decoded 32-byte
   // length. The all-zero account code hash is rendered as 32 `1`s.
-  nearCryptoHash: "^[1-9A-HJ-NP-Za-km-z]{32,44}$",
-  nearTransactionHash: "^[1-9A-HJ-NP-Za-km-z]{43,44}$",
+  nearCryptoHash: NEAR_CRYPTO_HASH_PATTERN,
+  // Transactions, receipts, and blocks are all NEAR CryptoHashes. A
+  // transaction hash may legitimately render below 43 characters when it
+  // has leading zero bytes, so do not use length as a proxy for its type.
+  nearTransactionHash: NEAR_CRYPTO_HASH_PATTERN,
   evmAddress: "^0x[0-9a-fA-F]{40}$",
   evmTransactionHash: "^0x[0-9a-fA-F]{64}$",
   atomicUsdcAmount: "^[1-9][0-9]{0,15}$",
@@ -12,7 +17,6 @@ export const PATTERNS = Object.freeze({
 
 const nearAccountIdPattern = new RegExp(PATTERNS.nearAccountId);
 const nearCryptoHashPattern = new RegExp(PATTERNS.nearCryptoHash);
-const nearTransactionHashPattern = new RegExp(PATTERNS.nearTransactionHash);
 const evmAddressPattern = new RegExp(PATTERNS.evmAddress);
 const evmTransactionHashPattern = new RegExp(PATTERNS.evmTransactionHash);
 const atomicUsdcAmountPattern = new RegExp(PATTERNS.atomicUsdcAmount);
@@ -46,7 +50,7 @@ export function isNearCryptoHash(value) {
 }
 
 export function isNearTransactionHash(value) {
-  return typeof value === "string" && nearTransactionHashPattern.test(value);
+  return isNearCryptoHash(value);
 }
 
 export function isEvmAddress(value) {
@@ -91,7 +95,7 @@ export function evidenceInputSchema(network, kind) {
         ? {
           transactionHash: {
             type: "string",
-            minLength: 43,
+            minLength: 32,
             maxLength: 44,
             pattern: PATTERNS.nearTransactionHash,
           },
@@ -114,6 +118,7 @@ export function evidenceInputSchema(network, kind) {
 }
 
 export function validateEvidenceInput(network, kind, value, invalid = defaultInvalid) {
+  const near = network.startsWith("near:");
   const schema = evidenceInputSchema(network, kind);
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw invalid("request body must be an object");
@@ -144,6 +149,9 @@ export function validateEvidenceInput(network, kind, value, invalid = defaultInv
     if (!new RegExp(fieldSchema.pattern).test(candidate)) {
       throw invalid(`${field} has an invalid shape`);
     }
+    if (near && field === "transactionHash" && !isNearTransactionHash(candidate)) {
+      throw invalid("transactionHash is not a 32-byte NEAR CryptoHash");
+    }
   }
   return value;
 }
@@ -155,7 +163,7 @@ export function nearExampleAccountId(network) {
 }
 
 export const NEAR_TRANSACTION_HASH_EXAMPLE =
-  "11111111111111111111111111111111111111111111";
+  "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi";
 
 function defaultInvalid(message) {
   return new TypeError(message);

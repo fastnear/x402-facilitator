@@ -15,7 +15,7 @@ body:
     id: networks
     attributes:
       label: Active reference networks
-      description: Select only networks the integration will use now.
+      description: Select only networks the integration will use now. Base mainnet uses Circle USDC's `USD Coin` / `2` EIP-712 domain.
       options:
         - label: near:testnet
         - label: near:mainnet
@@ -89,4 +89,6 @@ body:
         - label: I control, or am authorized to use, every listed recipient.
           required: true
         - label: I understand access is exact-policy, bounded, revocable, and has no SLA.
+          required: true
+        - label: I will complete read-only verification before settlement is enabled and will not ask the facilitator operator to fund payer wallets or manufacture activity.
           required: true

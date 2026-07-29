@@ -3,7 +3,6 @@ import {
   isEvmTransactionHash,
   isNearAccountId,
   isNearCryptoHash,
-  isNearTransactionHash,
 } from "./evidence-input.mjs";
 
 const DEFAULT_TIMEOUT_MS = 12_000;
@@ -58,17 +57,21 @@ function rpcHex(value, field, length) {
 
 function validateNearHash(value, field) {
   const hash = requireString(value, field);
-  if (!isNearTransactionHash(hash)) {
-    throw new ChainEvidenceError("invalid_input", `${field} is not a valid NEAR hash`, 400);
+  if (!isNearCryptoHash(hash)) {
+    throw new ChainEvidenceError(
+      "invalid_input",
+      `${field} is not a 32-byte NEAR CryptoHash`,
+      400,
+    );
   }
   return hash;
 }
 
 function rpcNearHash(value, field) {
-  if (!isNearTransactionHash(value)) {
+  if (!isNearCryptoHash(value)) {
     throw new ChainEvidenceError(
       "invalid_rpc",
-      `${field} had an invalid NEAR hash shape`,
+      `${field} had an invalid NEAR CryptoHash`,
     );
   }
   return value;
@@ -130,8 +133,8 @@ function nearOutcomeStatus(value, field, { final = false } = {}) {
   if (
     !final
     && keys[0] === "SuccessReceiptId"
-    && typeof status.SuccessReceiptId === "string"
   ) {
+    rpcNearHash(status.SuccessReceiptId, `${field} SuccessReceiptId`);
     return { success: true };
   }
   throw new ChainEvidenceError("invalid_rpc", `${field} was not a canonical terminal status`);
@@ -272,17 +275,25 @@ export function createNearReader({ network, chainId, rpc, explorerBaseUrl }) {
     return { height, hash: headerHash };
   }
 
+  async function checkIdentity() {
+    const status = await rpc.request("status", []);
+    if (status?.chain_id !== chainId) {
+      throw new ChainEvidenceError(
+        "wrong_chain",
+        `NEAR RPC chain identity did not match ${chainId}`,
+        503,
+      );
+    }
+    return { network, chainId };
+  }
+
   return {
-    async checkIdentity() {
-      const status = await rpc.request("status", []);
-      if (status?.chain_id !== chainId) {
-        throw new ChainEvidenceError(
-          "wrong_chain",
-          `NEAR RPC chain identity did not match ${chainId}`,
-          503,
-        );
-      }
-      return { network, chainId };
+    checkIdentity,
+
+    async checkReadiness() {
+      const identity = await checkIdentity();
+      await finalBlock();
+      return identity;
     },
 
     async account(accountId) {
@@ -351,7 +362,8 @@ export function createNearReader({ network, chainId, rpc, explorerBaseUrl }) {
         throw new ChainEvidenceError("invalid_rpc", "transaction did not reach requested finality");
       }
       const transaction = block(result.transaction, "transaction");
-      if (transaction.hash !== hash) {
+      const returnedTransactionHash = rpcNearHash(transaction.hash, "transaction hash");
+      if (returnedTransactionHash !== hash) {
         throw new ChainEvidenceError("invalid_rpc", "transaction hash conflicted with the request");
       }
       if (transaction.signer_id !== signer) {
@@ -361,7 +373,11 @@ export function createNearReader({ network, chainId, rpc, explorerBaseUrl }) {
         result.transaction_outcome,
         "transaction outcome",
       );
-      if (transactionOutcome.id !== hash) {
+      const returnedTransactionOutcomeId = rpcNearHash(
+        transactionOutcome.id,
+        "transaction outcome id",
+      );
+      if (returnedTransactionOutcomeId !== hash) {
         throw new ChainEvidenceError("invalid_rpc", "transaction outcome conflicted with the request");
       }
       const outcomeBlockHash = rpcNearHash(
@@ -438,17 +454,25 @@ export function createEvmReader({ network, chainId, rpc, asset, explorerBaseUrl 
     };
   }
 
+  async function checkIdentity() {
+    const actual = hexNumber(await rpc.request("eth_chainId", []), "chain id");
+    if (actual !== chainId) {
+      throw new ChainEvidenceError(
+        "wrong_chain",
+        `EVM RPC chain identity did not match ${chainId}`,
+        503,
+      );
+    }
+    return { network, chainId };
+  }
+
   return {
-    async checkIdentity() {
-      const actual = hexNumber(await rpc.request("eth_chainId", []), "chain id");
-      if (actual !== chainId) {
-        throw new ChainEvidenceError(
-          "wrong_chain",
-          `EVM RPC chain identity did not match ${chainId}`,
-          503,
-        );
-      }
-      return { network, chainId };
+    checkIdentity,
+
+    async checkReadiness() {
+      const identity = await checkIdentity();
+      await finalBlock();
+      return identity;
     },
 
     async account(address) {

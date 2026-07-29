@@ -20,8 +20,25 @@ test("activity search returns bounded pages and cursors", () => {
 
 test("empty activity index reports not_yet_indexed", () => {
   const store = new ActivityStore();
+  assert.deepEqual(store.indexMetadata(), {
+    status: "not_yet_indexed",
+    recordCount: 0,
+    indexedAt: null,
+  });
   assert.equal(store.search({}).index.status, "not_yet_indexed");
   assert.equal(store.entity("alice.testnet").status, "not_yet_indexed");
+});
+
+test("activity index metadata is precomputed independently of searches", () => {
+  const store = new ActivityStore(records);
+  const metadata = store.indexMetadata();
+  assert.deepEqual(metadata, {
+    status: "ready",
+    recordCount: 2,
+    indexedAt: "2026-07-27T00:00:00Z",
+  });
+  assert.equal(Object.isFrozen(metadata), true);
+  assert.equal(store.search({}).index, metadata);
 });
 
 test("invalid cursors fail closed", () => {

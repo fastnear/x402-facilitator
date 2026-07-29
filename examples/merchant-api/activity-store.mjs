@@ -27,6 +27,7 @@ export class ActivityStore {
       ids.add(normalized.id);
       return normalized;
     });
+    this.index = Object.freeze(indexMetadata(this.records));
   }
 
   static async fromFile(path) {
@@ -34,6 +35,10 @@ export class ActivityStore {
     const parsed = JSON.parse(await readFile(path, "utf8"));
     if (!Array.isArray(parsed)) throw new Error("ACTIVITY_INDEX_FILE must contain a JSON array");
     return new ActivityStore(parsed);
+  }
+
+  indexMetadata() {
+    return this.index;
   }
 
   search(input = {}) {
@@ -52,11 +57,7 @@ export class ActivityStore {
     return {
       items: page,
       nextCursor: nextOffset < filtered.length ? encodeCursor(nextOffset) : null,
-      index: {
-        status: this.records.length === 0 ? "not_yet_indexed" : "ready",
-        recordCount: this.records.length,
-        indexedAt: this.records.length === 0 ? null : this.records[0].indexedAt ?? null,
-      },
+      index: this.indexMetadata(),
     };
   }
 
@@ -70,9 +71,8 @@ export class ActivityStore {
       status: match.length === 0 ? "not_yet_indexed" : "indexed",
       records: match.slice(0, 100),
       index: {
+        ...this.indexMetadata(),
         status: match.length === 0 ? "not_yet_indexed" : "ready",
-        recordCount: this.records.length,
-        indexedAt: this.records.length === 0 ? null : this.records[0].indexedAt ?? null,
       },
     };
   }
@@ -133,6 +133,14 @@ function normalizeRecord(record) {
     timestamp: record.timestamp,
     summary: record.summary,
     indexedAt: record.indexedAt,
+  };
+}
+
+function indexMetadata(records) {
+  return {
+    status: records.length === 0 ? "not_yet_indexed" : "ready",
+    recordCount: records.length,
+    indexedAt: records.length === 0 ? null : records[0].indexedAt ?? null,
   };
 }
 

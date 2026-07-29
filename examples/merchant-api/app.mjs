@@ -1,5 +1,4 @@
 import express from "express";
-import { HTTPFacilitatorClient } from "@x402/core/server";
 import { paymentMiddlewareFromHTTPServer, x402HTTPResourceServer, x402ResourceServer } from "@x402/express";
 import { ExactEvmScheme } from "@x402/evm/exact/server";
 import { declareDiscoveryExtension } from "@x402/extensions/bazaar";
@@ -29,8 +28,10 @@ import {
 import { formatUsdc, loadConfig } from "./config.mjs";
 import {
   createFacilitatorProbe,
+  MerchantFacilitatorClient,
   withFacilitatorRetries,
 } from "./facilitator.mjs";
+import { createReadinessCache } from "./readiness-cache.mjs";
 
 const favicon = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
 const routeAssetSchema = {
@@ -184,7 +185,7 @@ function createRoutes(config) {
       block: { height: near ? 123456789 : "34567890", hash: near ? NEAR_TRANSACTION_HASH_EXAMPLE : `0x${"11".repeat(32)}` },
       transaction: near
         ? { hash: NEAR_TRANSACTION_HASH_EXAMPLE, signerId: nearExampleAccount, receiverId: config.network === "near:mainnet" ? "token.near" : "token.testnet", blockHash: NEAR_TRANSACTION_HASH_EXAMPLE, success: true, status: "succeeded", receiptCount: 1, failures: [] }
-        : { hash: `0x${"22".repeat(32)}`, from: "0x0000000000000000000000000000000000000000", to: config.payTo, blockNumber: "34567889", confirmationDepth: "1", success: true, status: "succeeded", gasUsed: "65000" },
+        : { hash: `0x${"22".repeat(32)}`, from: "0x0000000000000000000000000000000000000000", to: config.asset, blockNumber: "34567889", confirmationDepth: "1", success: true, status: "succeeded", gasUsed: "65000" },
       explorerUrl: near ? "https://nearblocks.io/txns/example" : "https://basescan.org/tx/example",
       source: { type: near ? "near-jsonrpc" : "evm-jsonrpc", status: near ? "final" : "finalized" },
     },
@@ -250,6 +251,8 @@ export async function createMerchantApplication({
   paymentMiddlewareFactory = paymentMiddlewareFromHTTPServer,
   fetchImpl = globalThis.fetch,
   logger = console,
+  readinessCacheMs = 1_000,
+  now = () => Date.now(),
 } = {}) {
   const activityStore = activity
     ?? await ActivityStore.fromFile(config.activityIndexFile);
@@ -257,13 +260,14 @@ export async function createMerchantApplication({
     providerOrigin: config.oneClickProviderOrigin,
     providerJwt: config.oneClickJwt,
   });
-  const rawFacilitator = facilitator ?? new HTTPFacilitatorClient({
+  const rawFacilitator = facilitator ?? new MerchantFacilitatorClient({
     url: config.facilitatorUrl,
     createAuthHeaders: async () => ({
       supported: {},
       verify: { "X-API-Key": config.apiKey },
       settle: { "X-API-Key": config.apiKey },
     }),
+    fetchImpl,
   });
   const retryingFacilitator = withFacilitatorRetries(rawFacilitator);
   const probe = facilitatorProbe ?? createFacilitatorProbe({
@@ -300,11 +304,16 @@ export async function createMerchantApplication({
     return paymentInitialization;
   }
 
+  const checkDependencies = createReadinessCache({
+    check: () => dependencyReadiness(reader, probe, initializePaymentServer),
+    ttlMs: readinessCacheMs,
+    now,
+  });
+
   const app = express();
 
   app.disable("x-powered-by");
   app.use(createCorsMiddleware(config.corsOrigins));
-  app.use(express.json({ limit: "16kb", strict: true }));
 
   app.get("/", (_request, response) =>
     response.type("html").send(landing(config)));
@@ -312,6 +321,12 @@ export async function createMerchantApplication({
     response.json(openApi(config, routes)));
   app.get("/llms.txt", (_request, response) =>
     response.type("text/plain").send(llms(config)));
+  app.get("/pricing", (_request, response) =>
+    response.type("html").send(pricing(config, routes)));
+  app.get(["/terms", "/terms-of-service"], (_request, response) =>
+    response.type("html").send(terms(config)));
+  app.get("/robots.txt", (_request, response) =>
+    response.type("text/plain").send("User-agent: *\nAllow: /\n"));
   app.get("/favicon.ico", (_request, response) =>
     response.type("image/png").send(favicon));
   app.get("/.well-known/x402", (_request, response) => response.json({
@@ -322,14 +337,10 @@ export async function createMerchantApplication({
   app.get("/healthz", (_request, response) => response.json({
     ok: true,
     network: config.network,
-    activityIndex: activityStore.search({}).index,
+    activityIndex: activityStore.indexMetadata(),
   }));
   app.get("/readyz", async (_request, response) => {
-    const readiness = await dependencyReadiness(
-      reader,
-      probe,
-      initializePaymentServer,
-    );
+    const readiness = await checkDependencies();
     if (!readiness.ready) response.set("Retry-After", "1");
     response.status(readiness.ready ? 200 : 503).json(readiness);
   });
@@ -338,6 +349,12 @@ export async function createMerchantApplication({
   // visible to startup and readiness rather than becoming an untracked
   // middleware promise.
   app.use(paymentMiddlewareFactory(httpServer, undefined, undefined, false));
+  // The pinned x402 middleware and Bazaar extension inspect protected requests
+  // through method, path, and headers only. Keep parsing after payment so an
+  // unpaid malformed or oversized body receives its canonical 402 before
+  // application validation. Review this ordering if a body-aware hook is ever
+  // added to the protected-route path.
+  app.use(express.json({ limit: "16kb", strict: true }));
 
   app.post("/v1/evidence/account", async (request, response, next) => {
     try {
@@ -401,6 +418,18 @@ export async function createMerchantApplication({
         message: error.message,
       });
     }
+    if (error?.type === "entity.too.large" || error?.status === 413) {
+      return response.status(413).json({
+        error: "payload_too_large",
+        message: "request body exceeds the 16 KiB limit",
+      });
+    }
+    if (error?.type === "entity.parse.failed") {
+      return response.status(400).json({
+        error: "invalid_input",
+        message: "request body must be valid JSON",
+      });
+    }
     if (error?.status === 400) {
       return response.status(400).json({
         error: "invalid_input",
@@ -419,11 +448,7 @@ export async function createMerchantApplication({
     config,
     routes,
     checkDependencies: async () => {
-      const readiness = await dependencyReadiness(
-        reader,
-        probe,
-        initializePaymentServer,
-      );
+      const readiness = await checkDependencies();
       if (!readiness.ready) {
         throw new Error("merchant dependencies are not ready");
       }
@@ -454,10 +479,13 @@ async function dependencyReadiness(
   facilitatorProbe,
   initializePaymentServer,
 ) {
+  const checkRpc = typeof reader.checkReadiness === "function"
+    ? () => reader.checkReadiness()
+    : () => reader.checkIdentity();
   const [rpc, facilitator, payment] = await Promise.allSettled([
-    reader.checkIdentity(),
-    facilitatorProbe.check(),
-    initializePaymentServer(),
+    Promise.resolve().then(checkRpc),
+    Promise.resolve().then(() => facilitatorProbe.check()),
+    Promise.resolve().then(() => initializePaymentServer()),
   ]);
   const checks = {
     rpc: rpc.status === "fulfilled" ? "ready" : "not_ready",
@@ -536,9 +564,17 @@ function createApiSchemas(config) {
       required: ["address", "balanceWei", "isContract", "asset"],
       properties: {
         address: { type: "string", pattern: PATTERNS.evmAddress },
-        balanceWei: { type: "string", pattern: "^[0-9]+$" },
+        balanceWei: {
+          type: "string",
+          pattern: "^[0-9]+$",
+          description: "Native ETH balance in wei at the finalized block; it is not a USDC balance.",
+        },
         isContract: { type: "boolean" },
-        asset: { type: "string", const: config.asset },
+        asset: {
+          type: "string",
+          const: config.asset,
+          description: "Configured USDC payment asset; it does not denominate balanceWei.",
+        },
       },
     };
   const transaction = near
@@ -574,7 +610,10 @@ function createApiSchemas(config) {
       properties: {
         hash: { type: "string", pattern: PATTERNS.evmTransactionHash },
         from: { type: "string", pattern: PATTERNS.evmAddress },
-        to: { type: ["string", "null"] },
+        to: {
+          type: ["string", "null"],
+          description: "Transaction-envelope recipient. ERC-3009 USDC transfers normally target the token contract, not the payTo address.",
+        },
         blockNumber: { type: "string", pattern: "^[0-9]+$" },
         confirmationDepth: { type: "string", pattern: "^[0-9]+$" },
         success: { type: "boolean" },
@@ -652,7 +691,8 @@ function openApi(config, routes) {
       contact: config.contactEmail
         ? { email: config.contactEmail }
         : { url: "https://mikedotexe.com" },
-      description: "Paid, machine-readable chain evidence and bounded activity intelligence.",
+      termsOfService: `${config.resourceOrigin}/terms`,
+      description: "Paid, machine-readable chain evidence and an activity index whose availability is reported in every response.",
       "x-guidance": `Use POST /v1/evidence/account for ${near ? "a NEAR account id" : "an EVM address"}, POST /v1/evidence/transaction for ${near ? "a transaction hash plus signer account" : "an EVM transaction hash"}, or POST /v1/routes/usdc/quote for a dry Base-USDC-to-NEAR-USDC route quote. An unpaid request returns HTTP 402 with canonical x402 v2 requirements.`,
     },
     servers: [{ url: config.resourceOrigin }],
@@ -672,7 +712,86 @@ function openApi(config, routes) {
 }
 
 function llms(config) {
-  return `# ${config.network} Agent Evidence & Route API\n\nPaid x402 API for authoritative chain evidence and route intelligence.\n\n- POST /v1/evidence/account — inspect a finalized account.\n- POST /v1/evidence/transaction — inspect final or nonterminal transaction evidence.\n- POST /v1/activity/search — search the bounded final activity index.\n- GET /v1/entities/{identifier} — inspect indexed activity for an entity.\n- POST /v1/routes/usdc/quote — request a quote-only route with provider-supplied signature metadata from canonical Base USDC to canonical NEAR USDC. The signature is preserved as provenance; this service does not claim to verify it cryptographically. This dry route never returns a deposit address and never moves funds.\n\nCall a route without payment first. Read the PAYMENT-REQUIRED header, sign the exact requirement, and retry with PAYMENT-SIGNATURE. Prices are decimal USD in OpenAPI and atomic USDC units at runtime.\n`;
+  return `# ${config.network} Agent Evidence & Route API\n\nPaid x402 API for authoritative chain evidence and route intelligence.\n\n- POST /v1/evidence/account — inspect a finalized account.\n- POST /v1/evidence/transaction — inspect final or nonterminal transaction evidence.\n- POST /v1/activity/search — search the bounded activity index; inspect \`index.status\` because records may not yet be available.\n- GET /v1/entities/{identifier} — inspect indexed activity for an entity.\n- POST /v1/routes/usdc/quote — request a quote-only route with provider-supplied signature metadata from canonical Base USDC to canonical NEAR USDC. The signature is preserved as provenance; this service does not claim to verify it cryptographically. This dry route never returns a deposit address and never moves funds.\n- GET /pricing — read the exact configured price, network, asset, and recipient.\n- GET /terms — read the operational terms for this reference service.\n\nCall a route without payment first. Read the PAYMENT-REQUIRED header, sign the exact requirement, and retry with PAYMENT-SIGNATURE. Prices are decimal USD in OpenAPI and atomic USDC units at runtime.\n`;
+}
+
+function pricing(config, routes) {
+  const priceUsd = formatUsdc(config.amount);
+  const eip712 = config.eip712Name
+    ? `<dt>EIP-712 domain</dt><dd><code>${escapeHtml(config.eip712Name)}</code> / <code>${escapeHtml(config.eip712Version)}</code></dd>`
+    : "";
+  const routeRows = Object.entries(routes).map(([route, definition]) => {
+    const requirement = definition.accepts[0];
+    return `<tr><td><code>${escapeHtml(route)}</code></td><td><code>$${escapeHtml(priceUsd)}</code></td><td><code>${escapeHtml(requirement.network)}</code></td></tr>`;
+  }).join("\n");
+  return publicPage(
+    `${config.network} pricing`,
+    `Payment policy for ${config.network}`,
+    `<p>Each listed resource costs <strong>$${escapeHtml(priceUsd)}</strong> (${escapeHtml(config.amount)} atomic USDC) when its x402 requirement is accepted.</p>
+  <table>
+    <thead><tr><th>Resource</th><th>Price</th><th>Network</th></tr></thead>
+    <tbody>${routeRows}</tbody>
+  </table>
+  <h2>Exact payment policy</h2>
+  <dl>
+    <dt>Asset</dt><dd><code>${escapeHtml(config.asset)}</code></dd>
+    <dt>Recipient (payTo)</dt><dd><code>${escapeHtml(config.payTo)}</code></dd>
+    ${eip712}
+  </dl>
+  <p>Retrieve a resource without a payment header first. The resulting HTTP 402 response is the authoritative exact requirement; do not sign a requirement whose network, asset, recipient, or amount differs from this page.</p>`,
+  );
+}
+
+function terms(config) {
+  return publicPage(
+    `${config.network} operational terms`,
+    `Operational terms for ${config.network}`,
+    `<p>This is a reference x402 service for machine-readable chain evidence and quote-only routing on <code>${escapeHtml(config.network)}</code>.</p>
+  <ul>
+    <li>Each paid request is governed by the exact payment requirement returned in that resource's HTTP 402 response.</li>
+    <li>The service has no availability commitment. Chain, RPC, and facilitator outcomes are returned only when the service can observe authoritative evidence.</li>
+    <li>Never send API keys, private keys, or signed payment authorizations to public support channels.</li>
+    <li>Use the <a href="/openapi.json">OpenAPI contract</a>, <a href="/pricing">pricing</a>, and <a href="/.well-known/x402">x402 discovery document</a> before integrating.</li>
+  </ul>
+  <p>Security reports belong in the repository's <a href="https://github.com/fastnear/x402-facilitator/security/policy">private reporting process</a>.</p>`,
+  );
+}
+
+function publicPage(title, description, content) {
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${escapeHtml(title)}</title>
+  <meta name="description" content="${escapeHtml(description)}">
+  <style>
+    :root { color-scheme: dark; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    body { max-width: 58rem; margin: 0 auto; padding: 4rem 1.5rem; background: #0b0d10; color: #e8edf2; line-height: 1.6; }
+    a { color: #7dd3fc; }
+    code { color: #a7f3d0; overflow-wrap: anywhere; }
+    table { width: 100%; border-collapse: collapse; margin: 1.5rem 0; }
+    th, td { border: 1px solid #2d3640; padding: .75rem; text-align: left; vertical-align: top; }
+    dt { color: #a7f3d0; font-weight: bold; margin-top: .75rem; }
+    dd { margin-left: 0; }
+  </style>
+</head>
+<body>
+  <p><a href="/">mikedotexe.com / x402</a></p>
+  <h1>${escapeHtml(title)}</h1>
+  ${content}
+</body>
+</html>`;
+}
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, character => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+  })[character]);
 }
 
 function landing(config) {
@@ -704,6 +823,8 @@ function landing(config) {
       <li><a href="/openapi.json">OpenAPI contract</a></li>
       <li><a href="/llms.txt">llms.txt guidance</a></li>
       <li><a href="/.well-known/x402">x402 discovery</a></li>
+      <li><a href="/pricing">pricing and payment policy</a></li>
+      <li><a href="/terms">operational terms</a></li>
     </ul>
   </div>
   <p>Start with <code>POST /v1/evidence/account</code>, <code>POST /v1/evidence/transaction</code>, or the quote-only <code>POST /v1/routes/usdc/quote</code>. An unpaid valid request returns canonical x402 v2 payment requirements.</p>

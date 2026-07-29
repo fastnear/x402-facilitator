@@ -7,15 +7,21 @@ import {
   createEvmReader,
   createNearReader,
 } from "./chain-reader.mjs";
+import {
+  isNearCryptoHash,
+  isNearTransactionHash,
+  validateEvidenceInput,
+} from "./evidence-input.mjs";
 
 const REQUEST_HASH = `0x${"11".repeat(32)}`;
 const BLOCK_HASH = `0x${"22".repeat(32)}`;
 const FINAL_HASH = `0x${"33".repeat(32)}`;
 const SENDER = `0x${"44".repeat(20)}`;
-const NEAR_HASH = "11111111111111111111111111111111111111111111";
-const NEAR_BLOCK_HASH = "22222222222222222222222222222222222222222222";
-const NEAR_RECEIPT_ID = "33333333333333333333333333333333333333333333";
+const NEAR_HASH = "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi";
+const NEAR_BLOCK_HASH = "JEKNVnkbo3jma5nREBBJCDoXFVeKkD56V3xKrvRmWxFG";
+const NEAR_RECEIPT_ID = "8qbHbw2BbbTHBW1sbeqakYXVKRQM8Ne7pLK7m6CVfeR";
 const NEAR_NO_CODE_HASH = "11111111111111111111111111111111";
+const MALFORMED_NEAR_HASHES = ["1".repeat(43), "1".repeat(44)];
 
 function fakeRpc(responses) {
   return {
@@ -102,6 +108,34 @@ function nearTransaction({
   };
 }
 
+test("NEAR transaction hashes decode to exactly 32 bytes", () => {
+  for (const hash of [
+    NEAR_HASH,
+    NEAR_BLOCK_HASH,
+    NEAR_RECEIPT_ID,
+    NEAR_NO_CODE_HASH,
+  ]) {
+    assert.equal(isNearCryptoHash(hash), true);
+    assert.equal(isNearTransactionHash(hash), true);
+    assert.doesNotThrow(() => validateEvidenceInput("near:testnet", "transaction", {
+      transactionHash: hash,
+      signerId: "alice.testnet",
+    }));
+  }
+
+  for (const hash of MALFORMED_NEAR_HASHES) {
+    assert.equal(isNearCryptoHash(hash), false);
+    assert.equal(isNearTransactionHash(hash), false);
+    assert.throws(
+      () => validateEvidenceInput("near:testnet", "transaction", {
+        transactionHash: hash,
+        signerId: "alice.testnet",
+      }),
+      /32-byte NEAR CryptoHash/,
+    );
+  }
+});
+
 test("NEAR account evidence is pinned to one final block", async () => {
   let queryParams;
   const reader = nearReader({
@@ -165,6 +199,7 @@ test("NEAR final and transaction block headers require canonical identities", as
     { height: 1.5, hash: NEAR_BLOCK_HASH },
     { height: Number.MAX_SAFE_INTEGER + 1, hash: NEAR_BLOCK_HASH },
     { height: 1, hash: "not-a-valid-near-hash" },
+    ...MALFORMED_NEAR_HASHES.map(hash => ({ height: 1, hash })),
   ]) {
     const accountReader = nearReader({
       block: { header },
@@ -196,6 +231,22 @@ test("NEAR account input is rejected without an RPC call", async () => {
     () => reader.account("not valid"),
     error => error instanceof ChainEvidenceError && error.status === 400,
   );
+});
+
+test("NEAR transaction input rejects malformed base58 hashes without an RPC call", async () => {
+  const reader = createNearReader({
+    network: "near:testnet",
+    chainId: "testnet",
+    rpc: { request: async () => assert.fail("RPC must not be called") },
+  });
+  for (const hash of MALFORMED_NEAR_HASHES) {
+    await assert.rejects(
+      () => reader.transaction(hash, "alice.testnet"),
+      error => error instanceof ChainEvidenceError
+        && error.code === "invalid_input"
+        && error.status === 400,
+    );
+  }
 });
 
 test("chain readers reject explorer base URLs with query strings", () => {
@@ -232,6 +283,28 @@ test("NEAR RPC identity must match the configured network", async () => {
     () => wrong.checkIdentity(),
     error => error.code === "wrong_chain" && error.status === 503,
   );
+});
+
+test("NEAR readiness requires identity and a canonical final block", async () => {
+  const ready = nearReader({
+    status: { chain_id: "testnet" },
+    block: { header: { height: 42, hash: NEAR_BLOCK_HASH } },
+  });
+  assert.deepEqual(
+    await ready.checkReadiness(),
+    { network: "near:testnet", chainId: "testnet" },
+  );
+
+  for (const block of [
+    undefined,
+    { header: { height: -1, hash: NEAR_BLOCK_HASH } },
+    { header: { height: 42, hash: MALFORMED_NEAR_HASHES[0] } },
+  ]) {
+    await assert.rejects(
+      () => nearReader({ status: { chain_id: "testnet" }, block }).checkReadiness(),
+      error => error.code === "invalid_rpc",
+    );
+  }
 });
 
 test("NEAR transaction evidence accepts only canonical terminal statuses", async () => {
@@ -283,6 +356,18 @@ test("NEAR transaction requires a canonical final and transaction-outcome status
     nearTransaction({
       transactionOutcome: { outcome: { status: { Unknown: "" } } },
     }),
+    nearTransaction({
+      transactionOutcome: {
+        outcome: { status: { SuccessReceiptId: MALFORMED_NEAR_HASHES[0] } },
+      },
+    }),
+    nearTransaction({
+      receipts_outcome: [{
+        id: NEAR_RECEIPT_ID,
+        block_hash: NEAR_BLOCK_HASH,
+        outcome: { status: { SuccessReceiptId: MALFORMED_NEAR_HASHES[1] } },
+      }],
+    }),
     nearTransaction({ status: { SuccessReceiptId: NEAR_RECEIPT_ID } }),
   ];
 
@@ -301,14 +386,32 @@ test("NEAR transaction requires a canonical final and transaction-outcome status
 test("NEAR transaction evidence requires exact transaction and outcome identities", async () => {
   const cases = [
     nearTransaction({ transaction: { hash: undefined } }),
+    nearTransaction({ transaction: { hash: MALFORMED_NEAR_HASHES[0] } }),
     nearTransaction({ transaction: { signer_id: undefined } }),
     nearTransaction({ transactionOutcome: { id: undefined } }),
+    nearTransaction({ transactionOutcome: { id: MALFORMED_NEAR_HASHES[1] } }),
     nearTransaction({ transactionOutcome: { id: "44444444444444444444444444444444444444444444" } }),
     nearTransaction({ transactionOutcome: { block_hash: undefined } }),
+    nearTransaction({ transactionOutcome: { block_hash: MALFORMED_NEAR_HASHES[0] } }),
     nearTransaction({ transaction: { block_hash: "44444444444444444444444444444444444444444444" } }),
+    nearTransaction({ transaction: { block_hash: MALFORMED_NEAR_HASHES[1] } }),
     nearTransaction({
       receipts_outcome: [{
         block_hash: NEAR_BLOCK_HASH,
+        outcome: { status: { SuccessReceiptId: NEAR_RECEIPT_ID } },
+      }],
+    }),
+    nearTransaction({
+      receipts_outcome: [{
+        id: MALFORMED_NEAR_HASHES[0],
+        block_hash: NEAR_BLOCK_HASH,
+        outcome: { status: { SuccessReceiptId: NEAR_RECEIPT_ID } },
+      }],
+    }),
+    nearTransaction({
+      receipts_outcome: [{
+        id: NEAR_RECEIPT_ID,
+        block_hash: MALFORMED_NEAR_HASHES[1],
         outcome: { status: { SuccessReceiptId: NEAR_RECEIPT_ID } },
       }],
     }),
@@ -364,6 +467,31 @@ test("EVM RPC identity must match the configured chain id", async () => {
     () => evmReader({ eth_chainId: "0x2105" }).checkIdentity(),
     error => error.code === "wrong_chain" && error.status === 503,
   );
+});
+
+test("EVM readiness requires identity and a canonical finalized block", async () => {
+  const ready = evmReader({
+    eth_chainId: "0x14a34",
+    eth_getBlockByNumber: { number: "0x10", hash: FINAL_HASH },
+  });
+  assert.deepEqual(
+    await ready.checkReadiness(),
+    { network: "eip155:84532", chainId: "84532" },
+  );
+
+  for (const finalBlock of [
+    undefined,
+    { number: "0x10", hash: "0x1234" },
+    { number: "not-a-number", hash: FINAL_HASH },
+  ]) {
+    await assert.rejects(
+      () => evmReader({
+        eth_chainId: "0x14a34",
+        eth_getBlockByNumber: finalBlock,
+      }).checkReadiness(),
+      error => error.code === "invalid_rpc",
+    );
+  }
 });
 
 test("EVM transaction evidence reports pending state only for an unmined transaction", async () => {

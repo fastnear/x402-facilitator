@@ -281,6 +281,7 @@ canary_base_policy_two_accepts_header=$(printf '%s' "$canary_base_policy_two_acc
 printf '%s\n' \
   '#!/bin/bash' \
   'set -eu' \
+  '[ -n "${CANARY_CURL_CALLS:-}" ] && printf "%s\\n" "$*" >>"$CANARY_CURL_CALLS"' \
   'output=' \
   'headers=' \
   'url=' \
@@ -305,6 +306,13 @@ printf '%s\n' \
   '      ;;' \
   '    --connect-timeout)' \
   '      connect_time=${2-}' \
+  '      shift 2' \
+  '      ;;' \
+  '    --config)' \
+  '      [ "${2-}" = "-" ] || exit 96' \
+  '      IFS= read -r _config_line || exit 96' \
+  '      [ "${_config_line#header = \"X-API-Key: }" != "$_config_line" ] || exit 96' \
+  '      [ "${_config_line%\"}" != "$_config_line" ] || exit 96' \
   '      shift 2' \
   '      ;;' \
   '    -H)' \
@@ -396,9 +404,10 @@ printf '%s\n' \
 chmod 0755 "$canary_bin/curl" "$canary_bin/aws"
 
 run_canary() {
-  local scenario=$1 stdout=$2 stderr=$3 aws_calls=$4
+  local scenario=$1 stdout=$2 stderr=$3 aws_calls=$4 curl_calls=${5:-/dev/null}
   CANARY_SCENARIO="$scenario" \
     CANARY_AWS_CALLS="$aws_calls" \
+    CANARY_CURL_CALLS="$curl_calls" \
     CANARY_VERIFY_NEAR="$canary_verify_near" \
     CANARY_VERIFY_BASE="$canary_verify_base" \
     CANARY_DEMO_MAINNET_HEADER="$canary_demo_mainnet_header" \
@@ -420,15 +429,24 @@ run_canary() {
 canary_success_stdout="$work/canary-success.stdout"
 canary_success_stderr="$work/canary-success.stderr"
 canary_success_aws="$work/canary-success.aws"
+canary_success_curl="$work/canary-success.curl"
 : >"$canary_success_aws"
+: >"$canary_success_curl"
 run_canary success "$canary_success_stdout" "$canary_success_stderr" \
-  "$canary_success_aws"
+  "$canary_success_aws" "$canary_success_curl"
 grep -Fq 'MerchantApiOk network=mainnet value=1' "$canary_success_stdout" ||
   fail "healthy NEAR merchant policy did not publish success"
 grep -Fq 'MerchantApiOk network=base value=1' "$canary_success_stdout" ||
   fail "healthy Base merchant policy and EIP-712 domain did not publish success"
 grep -Fq -- '--metric-name MerchantApiOk' "$canary_success_aws" ||
   fail "merchant success did not publish its CloudWatch metric"
+grep -Fq -- '--config -' "$canary_success_curl" ||
+  fail "verify canary did not pass credentials through stdin curl configuration"
+if grep -Fq 'canary-api-key-must-not-escape' \
+  "$canary_success_curl" "$canary_success_stdout" \
+  "$canary_success_stderr" "$canary_success_aws"; then
+  fail "credential detail escaped curl arguments, canary output, or metric logs"
+fi
 
 canary_ready_failure_stdout="$work/canary-ready-failure.stdout"
 canary_ready_failure_stderr="$work/canary-ready-failure.stderr"

@@ -211,17 +211,20 @@ The facilitator service crate remains application-only.
 
 The Base merchant evidence API is a separate service-discovery candidate:
 
-- service: **Base x402 Merchant Evidence API**;
+- service: **Base Agent Evidence & Route API**;
 - URL and website: <https://merchant-base.mikedotexe.com/>;
 - category: **Blockchain**;
-- discovery: `/openapi.json`, `/llms.txt`, and `/.well-known/x402`;
+- discovery: `/openapi.json`, `/llms.txt`, `/.well-known/x402`, `/pricing`,
+  `/terms`, and `/robots.txt`;
 - first directory probe path:
   `/v1/entities/0x0000000000000000000000000000000000000000` (the public,
   paid `GET` entity operation, which returns a canonical 402 without a
   payment); the OpenAPI and Bazaar metadata advertise the additional paid
   `POST /v1/evidence/*`, `POST /v1/activity/search`, and
   `POST /v1/routes/usdc/quote` operations.
-- payment: canonical Base mainnet USDC, fixed `1000` atomic units.
+- payment: canonical Base mainnet USDC, fixed `1000` atomic units, to
+  `0x7Ff46ab88688D528bCE3e59c470240c6901cF88c`, with the required
+  `USD Coin` / `2` EIP-712 domain.
 - description: paid, finality-aware Base account/transaction evidence,
   bounded activity lookup, and dry Base-USDC-to-NEAR-USDC route quotes.
 
@@ -230,9 +233,33 @@ merged commit, and the unpaid production regression passes. Use the service
 submission form or API fields `url`, `email`, `service_name`, `description`,
 `website_url`, `category`, `endpoints`, and `notes`. Confirm the intended
 email immediately before sending and do not commit it in a reusable template.
-The first service submission is expected to be free; stop rather than pay if
-the service unexpectedly requests a fee. Record the response in a new dated
-evidence document.
+The registry accepts endpoint **paths** (not methods), so submit the following
+deployed path set, one per line, and state the method/body shape in `notes`:
+
+```text
+/v1/evidence/account
+/v1/evidence/transaction
+/v1/activity/search
+/v1/routes/usdc/quote
+/v1/entities/0x0000000000000000000000000000000000000000
+```
+
+Every listed path must return a canonical unpaid 402 when the registry probes
+it; do not include discovery, liveness, or readiness routes. The form's
+first-time service submission is free. A service resubmission rejected within
+14 days may instead challenge for payment; stop rather than pay, wait for the
+free window, and record the response in a new dated evidence document. The
+service and facilitator cooldowns are distinct, but each is still one
+submission per email in seven days.
+
+The zero-payment preflight is the deployed release's `npm run regression`: it
+checks both `/readyz` dependencies, the page/openapi/llms/robots/terms
+surfaces, the fixed six-decimal price, Base `USD Coin`/`2`, and the concrete
+entity-route 402. Record the merged SHA, immutable release pointer, archive
+checksum, and preflight output before asserting that the service is current.
+Do not create `/.well-known/x402list.txt` speculatively: if the registry later
+issues an ownership token, serve its exact one-line value from a root-owned
+file through nginx and record the registry request that authorized it.
 
 This operator-owned service can attract organic buyers, but its own payments
 do not establish an independent merchant for facilitator review.
@@ -246,6 +273,13 @@ usage, and an operational contact. Create one dedicated Base mainnet client
 with exact canonical USDC and recipient policy, default limits of 60 verify
 requests and 10 settle requests per minute, and the existing conservative gas
 cap. Do not raise sponsorship limits without a separate review.
+
+Start that client with `--daily-yocto-near 0` for verify-first onboarding.
+`/verify` remains read-only; a valid, allowlisted `/settle` then returns
+`429 sponsorship_budget_exhausted` before the broadcast phase. Raise the cap
+only with `client set-budget --daily-yocto-near <atomic-gas-cap>` after the
+out-of-band review and read-only verification have succeeded. The legacy
+`*_yocto_near` name denotes wei for this Base client.
 
 Deliver the raw key once out of band. Confirm `/supported` and `/readyz`, then
 exercise `/verify` before settlement is enabled. The merchant, not the

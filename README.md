@@ -34,6 +34,14 @@ been promoted. Dated launch and end-to-end records live in
 is the best starting point. Public reference endpoints have no availability
 SLA.
 
+The [2026-07-28 x402-list review](docs/evidence/2026-07-28-x402-list-review.md)
+found the implementation and submitted evidence technically sound, but did not
+find independently attributable Base adoption. Historical canary payments are
+not evidence of third-party merchant use. A future facilitator resubmission is
+therefore gated on an independent Base resource server, merchant-controlled
+recipient, and organic payer activity—not a price change or operator-funded
+traffic.
+
 | Network | Reference facilitator status | Wire dialects supported by the software |
 | --- | --- | --- |
 | `near:mainnet` | `https://x402.mikedotexe.com` | v2 |

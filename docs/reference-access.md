@@ -74,6 +74,12 @@ approved for that client.
    with exact network, canonical asset, and recipient rows. Every deployed
    resource-server instance and environment gets a distinct client and key;
    never share a production credential with staging or another merchant.
+   For verify-first onboarding, the client may start with
+   `--daily-yocto-near 0`: `/verify` remains read-only, while a valid,
+   allowlisted `/settle` returns `429 sponsorship_budget_exhausted` before the
+   broadcast phase. Set a positive cap only after the read-only checks and
+   settlement-approval gate; the legacy `*_yocto_near` name means the native
+   atomic gas unit (wei on Base).
 3. Receive the raw key exactly once through an authenticated private channel.
    Store it in a secret manager or mode-0600 credential file and configure the
    resource server, not browser or payer code.
