@@ -176,6 +176,14 @@ test("accepts only the expected systemd LoadCredential ACL-mask metadata", () =>
     isExpectedSystemdAclCredential(expectedPath, expectedPath, metadata),
     true,
   );
+  assert.equal(
+    isExpectedSystemdAclCredential(
+      "/tmp/facilitator-api-key",
+      "/tmp/facilitator-api-key",
+      metadata,
+    ),
+    false,
+  );
 
   for (const candidate of [
     { path: "/tmp/facilitator-api-key" },

@@ -213,6 +213,10 @@ export function isExpectedSystemdAclCredential(
     typeof expectedSystemdPath === "string"
     && typeof path === "string"
     && path === expectedSystemdPath
+    && expectedSystemdCredentialPath(
+      dirname(expectedSystemdPath),
+      basename(expectedSystemdPath),
+    ) === expectedSystemdPath
     // systemd v255's LoadCredential creates a root-owned 0400 file, then
     // grants the service user a read ACL. POSIX exposes that ACL mask as the
     // group-read bit in stat(2), even though the root group has no access.
