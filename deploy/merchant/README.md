@@ -79,16 +79,23 @@ test "$(readlink -f /opt/x402-merchant/current-near)" = \
   "/opt/x402-merchant/releases/$release_id"
 curl --fail --silent --show-error https://merchant-near.mikedotexe.com/readyz |
   jq -e '.ready == true and .checks.rpc == "ready" and .checks.facilitator == "ready" and .checks.payment == "ready"'
-npm --prefix /opt/x402-merchant/current-near run regression
+npm --prefix /opt/x402-merchant/current-near run regression -- --target near
 sudo journalctl -u x402-merchant-api@near --since "-5 min" --no-pager
 ```
 
-Repeat the same sequence for `base`, replacing `near` with `base` and
-`merchant-near.mikedotexe.com` with `merchant-base.mikedotexe.com`. Do not
-promote the second instance until the first post-promotion readiness,
-regression, pointer, and journal checks are satisfactory. For a first
-installation there is no pre-promotion release to test; enable each unit after
-its pointer is selected, then run the same post-promotion checks.
+Repeat the same sequence for `base`, replacing `near` with `base`,
+`merchant-near.mikedotexe.com` with `merchant-base.mikedotexe.com`, and the
+final regression command with `npm --prefix /opt/x402-merchant/current-base run regression -- --target base`. Do not promote the second instance until the
+first post-promotion readiness, regression, pointer, and journal checks are
+satisfactory. After both instances pass their independent gates, run the
+default full dual-origin check:
+
+```sh
+npm --prefix /opt/x402-merchant/current-base run regression
+```
+
+For a first installation there is no pre-promotion release to test; enable each
+unit after its pointer is selected, then run the same post-promotion checks.
 
 ## Operational sequence
 
@@ -131,7 +138,7 @@ affected instance, and rerun the unpaid regression gate:
 ```sh
 sudo /opt/x402-near-facilitator/releases/vX.Y.Z/deploy/merchant/rollback-release.sh near vPREVIOUS
 sudo systemctl restart x402-merchant-api@near
-npm --prefix /opt/x402-merchant/current-near run regression
+npm --prefix /opt/x402-merchant/current-near run regression -- --target near
 ```
 
 The rollback tool refuses an uninstalled target, a non-root-owned or writable

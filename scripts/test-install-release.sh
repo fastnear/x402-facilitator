@@ -127,6 +127,7 @@ test ! -e /opt/x402-near-facilitator/current-testnet
 # The finished release directory must be root-owned and traversable by the
 # unprivileged service users, without granting write to group or other.
 test "$(stat -c '%U:%G %a' "$destination")" = "root:root 755"
+echo "validated immutable facilitator package fixture"
 
 if [ ! -e "$merchant_install_root" ] && [ ! -L "$merchant_install_root" ]; then
   install -d -m 0755 "$work/unsafe-merchant-root"
@@ -137,8 +138,12 @@ if [ ! -e "$merchant_install_root" ] && [ ! -L "$merchant_install_root" ]; then
     echo "error: merchant installer accepted a linked release root" >&2
     exit 1
   fi
-  grep -Fq 'merchant installation directory is missing or unsafe' \
-    "$work/unsafe-merchant-root.out"
+  if ! grep -Fq 'merchant installation directory is missing or unsafe' \
+    "$work/unsafe-merchant-root.out"; then
+    echo "error: merchant installer rejected the linked release root unexpectedly" >&2
+    sed -n '1,40p' "$work/unsafe-merchant-root.out" >&2
+    exit 1
+  fi
   rm "$merchant_install_root"
   unsafe_merchant_root_link_created=false
 fi

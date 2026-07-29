@@ -142,7 +142,20 @@ root-owned or service-owned `PROOF_RESULT_FILE`.
 broadcasting a payment. It verifies public discovery documents, all ten unpaid
 402 challenges, canonical network/asset/payee/amount fields, the 12 KB upstream
 header safety margin, Bazaar/OpenAPI schema parity, validation ordering, and
-the production browser CORS allowlist. Run it before and after every promotion.
+the production browser CORS allowlist. Run that default full check before and
+after a complete promotion.
+
+During a one-instance-at-a-time rollout, use the exact target switch for the
+post-promotion gate so the newly promoted instance is not coupled to the other
+instance before it is upgraded:
+
+```sh
+npm run regression -- --target near
+npm run regression -- --target base
+```
+
+Only `near` and `base` are accepted. Each scoped check remains entirely unpaid;
+run the default no-argument command after both instances are promoted.
 
 ## Safety
 

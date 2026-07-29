@@ -32,6 +32,25 @@ export const deployments = [
   },
 ];
 
+export function selectRegressionTargets(argumentsList = []) {
+  if (argumentsList.length === 0) return deployments;
+  if (
+    argumentsList.length !== 2
+    || argumentsList[0] !== "--target"
+  ) {
+    throw new Error("usage: npm run regression [-- --target near|base]");
+  }
+
+  switch (argumentsList[1]) {
+    case "near":
+      return [deployments[0]];
+    case "base":
+      return [deployments[1]];
+    default:
+      throw new Error("usage: npm run regression [-- --target near|base]");
+  }
+}
+
 const routeDefinitions = [
   { method: "POST", path: "/v1/evidence/account", body: deployment => deployment.accountBody },
   { method: "POST", path: "/v1/evidence/transaction", body: deployment => deployment.transactionBody },
@@ -244,7 +263,15 @@ function normalize(value) {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  runRegressionCheck().catch(error => {
+  let targets;
+  try {
+    targets = selectRegressionTargets(process.argv.slice(2));
+  } catch (error) {
+    console.error(`regression check failed: ${error.message}`);
+    process.exitCode = 1;
+  }
+
+  if (targets) runRegressionCheck({ targets }).catch(error => {
     console.error(`regression check failed: ${error.message}`);
     process.exitCode = 1;
   });
