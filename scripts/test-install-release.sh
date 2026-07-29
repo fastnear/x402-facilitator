@@ -28,6 +28,8 @@ commit_release=git-$commit
 merchant_commit_destination=$merchant_release_root/$commit_release
 merchant_current=$merchant_install_root/current-near
 unsafe_merchant_root_link_created=false
+restore_opt_mode=false
+original_opt_mode=
 
 [ ! -e "$destination" ] || {
   echo "error: reserved installer-test destination already exists: $destination" >&2
@@ -65,6 +67,9 @@ cleanup() {
     rm "$merchant_install_root"
   fi
   rm -f "$merchant_current"
+  if [ "$restore_opt_mode" = true ]; then
+    chmod "$original_opt_mode" /opt
+  fi
 }
 trap cleanup EXIT HUP INT TERM
 
@@ -128,6 +133,27 @@ test ! -e /opt/x402-near-facilitator/current-testnet
 # unprivileged service users, without granting write to group or other.
 test "$(stat -c '%U:%G %a' "$destination")" = "root:root 755"
 echo "validated immutable facilitator package fixture"
+
+# GitHub's Ubuntu runner deliberately makes /opt group-writable for tooling.
+# Verify the production guard rejects that parent, then temporarily restore the
+# root-owned production mode so the remaining installer integration checks can
+# exercise a safe fixture. The EXIT trap restores the runner's exact mode.
+if find /opt -maxdepth 0 -perm /022 -print -quit | grep -q .; then
+  if "$destination/deploy/merchant/install-release.sh" \
+    "$version" >"$work/unsafe-opt.out" 2>&1; then
+    echo "error: merchant installer accepted a writable /opt parent" >&2
+    exit 1
+  fi
+  if ! grep -Fq 'merchant installation root must not be writable by group or other' \
+    "$work/unsafe-opt.out"; then
+    echo "error: merchant installer rejected writable /opt unexpectedly" >&2
+    sed -n '1,40p' "$work/unsafe-opt.out" >&2
+    exit 1
+  fi
+  original_opt_mode=$(stat -c '%a' /opt)
+  chmod go-w /opt
+  restore_opt_mode=true
+fi
 
 if [ ! -e "$merchant_install_root" ] && [ ! -L "$merchant_install_root" ]; then
   install -d -m 0755 "$work/unsafe-merchant-root"
