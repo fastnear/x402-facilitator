@@ -64,6 +64,9 @@ the current source tree rather than the state of a public deployment.
   deployed today.
 - [Agent merchant API deployment](evidence/2026-07-27-agent-merchant-deployment.md)
   — public origins, discovery verification, and paid-flow status.
+- [Merchant provenance rollout](evidence/2026-07-29-merchant-provenance-rollout.md)
+  — merged-SHA deployment, public provenance checks, canary, and rollback
+  checkpoint.
 - [x402-list facilitator review](evidence/2026-07-28-x402-list-review.md) —
   verified implementation, independent-usage rejection, and evidence gates
   for any resubmission.
