@@ -53,7 +53,7 @@ use crate::config::{
 };
 use crate::leadership::ReadinessState;
 use crate::store::{ApiClient, PgStore, SettlementState};
-use crate::telemetry::{Metrics, TelemetryGuard};
+use crate::telemetry::Metrics;
 
 type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -1556,8 +1556,8 @@ async fn run_official_client_if_requested(router: &Router, scenario: &Value) -> 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::too_many_lines)]
 async fn custom_http_surface_matches_x402_contract() -> TestResult {
-    let telemetry = TelemetryGuard::initialize(Environment::Testnet, None)?;
-    let metrics = telemetry.metrics();
+    // This test needs metric handles, not a process-global tracing subscriber.
+    let metrics = Metrics::for_tests();
     let payer = test_signer(TEST_PAYER)?;
 
     let public_application = build_application(disconnected_store(), metrics.clone())?;
