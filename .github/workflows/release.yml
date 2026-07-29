@@ -284,7 +284,35 @@ jobs:
         run: ./scripts/check.sh
 
       - name: Exercise packaged installer on the production OS baseline
-        run: sudo ./scripts/test-install-release.sh
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The unit and promotion guard intentionally require the production
+          # runtime path. setup-node keeps its managed runtime in the runner
+          # tool cache, so expose that exact binary at /usr/bin/node only for
+          # this disposable root-level integration fixture.
+          created_node_link=false
+          temporary_node_target=
+          cleanup_node_link() {
+            [ "$created_node_link" = true ] || return 0
+            [ -L /usr/bin/node ] &&
+              [ "$(readlink -f -- /usr/bin/node)" = "$temporary_node_target" ] || {
+              echo "error: temporary CI Node runtime changed unexpectedly" >&2
+              return 1
+            }
+            sudo rm -- /usr/bin/node
+          }
+          trap cleanup_node_link EXIT
+
+          if [ ! -e /usr/bin/node ] && [ ! -L /usr/bin/node ]; then
+            temporary_node_target="$(readlink -f -- "$(command -v node)")"
+            test -f "$temporary_node_target"
+            test -x "$temporary_node_target"
+            sudo ln -s -- "$temporary_node_target" /usr/bin/node
+            created_node_link=true
+          fi
+
+          sudo ./scripts/test-install-release.sh
 
       - name: Require and check TypeScript oracle fixtures
         run: |
