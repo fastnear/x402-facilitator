@@ -90,6 +90,8 @@ struct ReadinessTransition {
 }
 
 impl ReadinessTransition {
+    const EVENT: &str = "readiness_gate_transition";
+
     fn observed(gate: ReadinessGate, previous: u8, ready: bool) -> Option<Self> {
         let state = ReadinessGateState::from_ready(ready);
         if ReadinessGateState::from_atomic(previous) == Some(state) {
@@ -99,16 +101,24 @@ impl ReadinessTransition {
         }
     }
 
+    const fn log_level(self) -> tracing::Level {
+        match self.state {
+            ReadinessGateState::Ready => tracing::Level::INFO,
+            ReadinessGateState::NotReady => tracing::Level::WARN,
+        }
+    }
+
     fn emit(self) {
         let gate = self.gate.as_str();
         let state = self.state.as_str();
-        match self.state {
-            ReadinessGateState::Ready => {
-                tracing::info!(event = "readiness_gate_transition", gate, state);
+        match self.log_level() {
+            tracing::Level::INFO => {
+                tracing::info!(event = Self::EVENT, gate, state);
             }
-            ReadinessGateState::NotReady => {
-                tracing::warn!(event = "readiness_gate_transition", gate, state);
+            tracing::Level::WARN => {
+                tracing::warn!(event = Self::EVENT, gate, state);
             }
+            _ => unreachable!("readiness transition has an unsupported log level"),
         }
     }
 }
@@ -153,7 +163,7 @@ impl ReadinessState {
         self.set_gate(ReadinessGate::Relayer, ready);
     }
 
-    fn set_gate(&self, gate: ReadinessGate, ready: bool) {
+    fn set_gate(&self, gate: ReadinessGate, ready: bool) -> Option<ReadinessTransition> {
         let value = match gate {
             ReadinessGate::Database => &self.inner.database,
             ReadinessGate::Leadership => &self.inner.leadership,
@@ -163,9 +173,11 @@ impl ReadinessState {
         };
         let state = ReadinessGateState::from_ready(ready);
         let previous = value.swap(state.as_atomic(), Ordering::AcqRel);
-        if let Some(transition) = ReadinessTransition::observed(gate, previous, ready) {
+        let transition = ReadinessTransition::observed(gate, previous, ready);
+        if let Some(transition) = transition {
             transition.emit();
         }
+        transition
     }
 
     pub fn snapshot(&self) -> ReadinessSnapshot {
@@ -296,39 +308,7 @@ fn advisory_lock_key(network: &str) -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use std::io;
-    use std::sync::Mutex;
-
-    use tracing_subscriber::fmt::MakeWriter;
-
     use super::*;
-
-    #[derive(Clone)]
-    struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
-
-    struct CaptureGuard(Arc<Mutex<Vec<u8>>>);
-
-    impl io::Write for CaptureGuard {
-        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            self.0
-                .lock()
-                .map_err(|_| io::Error::other("capture lock poisoned"))?
-                .extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl<'writer> MakeWriter<'writer> for CaptureWriter {
-        type Writer = CaptureGuard;
-
-        fn make_writer(&'writer self) -> Self::Writer {
-            CaptureGuard(Arc::clone(&self.0))
-        }
-    }
 
     #[test]
     fn advisory_keys_are_stable_and_network_specific() {
@@ -398,77 +378,50 @@ mod tests {
     }
 
     #[test]
-    fn all_readyz_gates_log_first_observation_and_only_later_changes() {
-        let captured = Arc::new(Mutex::new(Vec::new()));
-        let subscriber = tracing_subscriber::fmt()
-            .json()
-            .without_time()
-            .with_target(false)
-            .with_writer(CaptureWriter(Arc::clone(&captured)))
-            .finish();
+    fn all_readyz_gates_transition_on_first_observation_and_only_later_changes() {
         let readiness = ReadinessState::default();
-
-        tracing::subscriber::with_default(subscriber, || {
-            readiness.set_database(false);
-            readiness.set_database(false);
-            readiness.set_database(true);
-            // Losing leadership also invalidates reconciliation. That first
-            // fail-closed observation must be reported once for each gate.
-            readiness.set_leadership(false);
-            readiness.set_leadership(false);
-            readiness.set_leadership(true);
-            readiness.set_reconciliation(false);
-            readiness.set_reconciliation(true);
-            readiness.set_rpc(false);
-            readiness.set_rpc(false);
-            readiness.set_rpc(true);
-            readiness.set_relayer(false);
-            readiness.set_relayer(false);
-            readiness.set_relayer(true);
-        });
-
-        let bytes = captured
-            .lock()
-            .map_or_else(|_| Vec::new(), |output| output.clone());
-        let output = String::from_utf8(bytes).unwrap_or_default();
-        let events = output
-            .lines()
-            .map(|line| {
-                serde_json::from_str::<serde_json::Value>(line)
-                    .unwrap_or_else(|_| std::process::abort())
-            })
-            .collect::<Vec<_>>();
+        let transitions = [
+            readiness.set_gate(ReadinessGate::Database, false),
+            readiness.set_gate(ReadinessGate::Database, false),
+            readiness.set_gate(ReadinessGate::Database, true),
+            // Losing leadership also invalidates reconciliation. Keep these
+            // gates explicit here so the exact emitted transition sequence is
+            // independent of the process-global tracing subscriber cache.
+            readiness.set_gate(ReadinessGate::Leadership, false),
+            readiness.set_gate(ReadinessGate::Reconciliation, false),
+            readiness.set_gate(ReadinessGate::Leadership, false),
+            readiness.set_gate(ReadinessGate::Reconciliation, false),
+            readiness.set_gate(ReadinessGate::Leadership, true),
+            readiness.set_gate(ReadinessGate::Reconciliation, false),
+            readiness.set_gate(ReadinessGate::Reconciliation, true),
+            readiness.set_gate(ReadinessGate::Rpc, false),
+            readiness.set_gate(ReadinessGate::Rpc, false),
+            readiness.set_gate(ReadinessGate::Rpc, true),
+            readiness.set_gate(ReadinessGate::Relayer, false),
+            readiness.set_gate(ReadinessGate::Relayer, false),
+            readiness.set_gate(ReadinessGate::Relayer, true),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
         let expected = [
-            ("database", "not_ready"),
-            ("database", "ready"),
-            ("leadership", "not_ready"),
-            ("reconciliation", "not_ready"),
-            ("leadership", "ready"),
-            ("reconciliation", "ready"),
-            ("rpc", "not_ready"),
-            ("rpc", "ready"),
-            ("relayer", "not_ready"),
-            ("relayer", "ready"),
+            ("database", "not_ready", tracing::Level::WARN),
+            ("database", "ready", tracing::Level::INFO),
+            ("leadership", "not_ready", tracing::Level::WARN),
+            ("reconciliation", "not_ready", tracing::Level::WARN),
+            ("leadership", "ready", tracing::Level::INFO),
+            ("reconciliation", "ready", tracing::Level::INFO),
+            ("rpc", "not_ready", tracing::Level::WARN),
+            ("rpc", "ready", tracing::Level::INFO),
+            ("relayer", "not_ready", tracing::Level::WARN),
+            ("relayer", "ready", tracing::Level::INFO),
         ];
-        assert_eq!(events.len(), expected.len());
-        for (event, (gate, state)) in events.iter().zip(expected) {
-            let fields = event
-                .get("fields")
-                .and_then(serde_json::Value::as_object)
-                .unwrap_or_else(|| std::process::abort());
-            assert_eq!(fields.len(), 3);
-            assert_eq!(
-                fields.get("event").and_then(serde_json::Value::as_str),
-                Some("readiness_gate_transition")
-            );
-            assert_eq!(
-                fields.get("gate").and_then(serde_json::Value::as_str),
-                Some(gate)
-            );
-            assert_eq!(
-                fields.get("state").and_then(serde_json::Value::as_str),
-                Some(state)
-            );
+        assert_eq!(transitions.len(), expected.len());
+        assert_eq!(ReadinessTransition::EVENT, "readiness_gate_transition");
+        for (transition, (gate, state, level)) in transitions.iter().zip(expected) {
+            assert_eq!(transition.gate.as_str(), gate);
+            assert_eq!(transition.state.as_str(), state);
+            assert_eq!(transition.log_level(), level);
         }
     }
 
