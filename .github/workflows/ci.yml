@@ -121,6 +121,7 @@ jobs:
           fi
 
           sudo ./scripts/test-install-release.sh
+          systemd-analyze verify deploy/merchant/x402-merchant-api@.service
 
       - name: Audit official HTTP client dependency
         run: npm --prefix conformance/http-client audit --audit-level=high
@@ -145,7 +146,6 @@ jobs:
           sh -n deploy/merchant/package-commit-release.sh
           sh -n deploy/merchant/promote-release.sh
           sh -n deploy/merchant/rollback-release.sh
-          systemd-analyze verify deploy/merchant/x402-merchant-api@.service
 
       - name: Lint OpenAPI
         run: npx --yes --package=@redocly/cli@1.34.5 redocly lint docs/openapi.yaml
