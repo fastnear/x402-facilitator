@@ -1,6 +1,7 @@
 name: Reference-instance access
 description: Request bounded access to a public NEAR or Base facilitator
 title: "access: "
+labels: ["question"]
 body:
   - type: markdown
     attributes:
@@ -13,12 +14,23 @@ body:
   - type: checkboxes
     id: networks
     attributes:
-      label: Requested networks
+      label: Active reference networks
+      description: Select only networks the integration will use now.
       options:
         - label: near:testnet
         - label: near:mainnet
-        - label: eip155:84532 (Base Sepolia rollout target)
-        - label: eip155:8453 (Base)
+        - label: eip155:8453 (Base mainnet)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: base_sepolia_interest
+    attributes:
+      label: Base Sepolia interest
+      description: Base Sepolia is not a live reference instance; this records rollout interest only.
+      options:
+        - No Base Sepolia access needed
+        - Notify me if a Base Sepolia reference instance becomes available
     validations:
       required: true
 
@@ -26,7 +38,16 @@ body:
     id: project
     attributes:
       label: Integration
-      description: Describe the resource server and link public source or documentation when available.
+      description: Describe the resource server, who operates it, and its intended users.
+    validations:
+      required: true
+
+  - type: input
+    id: public_url
+    attributes:
+      label: Public resource-server URL or documentation
+      description: Link the independently operated HTTPS service, public source, or integration documentation.
+      placeholder: https://merchant.example/x402
     validations:
       required: true
 
@@ -34,7 +55,7 @@ body:
     id: recipients
     attributes:
       label: Exact USDC recipients
-      description: List only public recipient accounts or addresses. Wildcards are not supported.
+      description: Map each active network to a public recipient account or address controlled by the resource-server operator. Wildcards are not supported.
     validations:
       required: true
 
@@ -62,6 +83,10 @@ body:
       label: Acknowledgements
       options:
         - label: This issue contains no secret or signed payment authorization.
+          required: true
+        - label: Each deployed resource-server instance and environment will use its own credential.
+          required: true
+        - label: I control, or am authorized to use, every listed recipient.
           required: true
         - label: I understand access is exact-policy, bounded, revocable, and has no SLA.
           required: true

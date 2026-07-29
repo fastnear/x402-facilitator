@@ -1,5 +1,5 @@
 [Unit]
-Description=x402 synthetic verify and demo canaries
+Description=x402 synthetic facilitator, demo, and merchant canaries
 After=network-online.target
 Wants=network-online.target
 OnFailure=x402-near-alert@%n.service
@@ -7,6 +7,7 @@ OnFailure=x402-near-alert@%n.service
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/x402-canary.sh
+TimeoutStartSec=240
 # The AWS CLI needs a writable HOME for its cache; keep it in the
 # unit-private /tmp so the sandbox stays read-only elsewhere.
 Environment=HOME=/tmp

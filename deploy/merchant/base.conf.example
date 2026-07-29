@@ -1,0 +1,18 @@
+# /etc/x402-merchant/base.conf — root-owned, mode 0640.
+# The dedicated facilitator API key is delivered separately through the
+# systemd LoadCredential directive.
+FACILITATOR_URL=https://base.x402.mikedotexe.com
+NETWORK=eip155:8453
+RPC_URL=https://base-mainnet.public.blastapi.io
+ASSET=0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913
+# Base mainnet Circle USDC signs ERC-3009 with name "USD Coin", version "2".
+# These optional assertions must exactly match the canonical network profile.
+ASSET_EIP712_NAME=USD Coin
+ASSET_EIP712_VERSION=2
+PAY_TO=0x7Ff46ab88688D528bCE3e59c470240c6901cF88c
+RESOURCE_ORIGIN=https://merchant-base.mikedotexe.com
+AMOUNT=1000
+PORT=4035
+EXPLORER_BASE_URL=https://basescan.org
+CORS_ORIGINS=https://js.fastnear.com
+ONE_CLICK_PROVIDER_ORIGIN=https://1click.chaindefuser.com

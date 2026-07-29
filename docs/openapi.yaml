@@ -28,6 +28,9 @@ info:
   contact:
     name: FastNEAR x402 facilitator maintainers
     url: https://github.com/fastnear/x402-facilitator
+externalDocs:
+  description: Reference-instance integration and access guide
+  url: https://github.com/fastnear/x402-facilitator/blob/main/docs/reference-access.md
 servers:
   - url: https://{host}
     description: Replace the reserved default with one facilitator instance
@@ -193,15 +196,20 @@ components:
       in: header
       name: X-API-Key
       description: |
-        Primary resource-server credential. If a Bearer credential is also
-        present, both values must be identical.
+        Primary per-instance resource-server credential. Request bounded
+        access through the public reference-access process linked by
+        `externalDocs`; approved raw keys are delivered once through an
+        authenticated private channel. Never place a key in browser or payer
+        code. If a Bearer credential is also present, both values must be
+        identical.
     Bearer:
       type: http
       scheme: bearer
       bearerFormat: x402 API key
       description: |
-        Alternative resource-server credential. If X-API-Key is also present,
-        both values must be identical.
+        Alternative presentation of the same per-instance resource-server
+        credential. If X-API-Key is also present, both values must be
+        identical.
   headers:
     RetryAfter:
       description: Suggested retry delay in seconds

@@ -18,6 +18,10 @@ the current source tree rather than the state of a public deployment.
   API-key-gated reference instances.
 - [Reference resource server](../examples/resource-server/README.md) — runnable
   Express workload for NEAR or EVM.
+- [Agent-facing merchant API](../examples/merchant-api/README.md) — companion
+  paid chain-evidence and bounded activity resource server.
+- [Merchant API deployment](../deploy/merchant/README.md) — two-process mainnet
+  deployment layout and operational sequence.
 
 ## Operate
 
@@ -48,6 +52,8 @@ the current source tree rather than the state of a public deployment.
 - [NEAR Intents research log](near-intents-x402-progress.md) — dated empirical
   work and open decisions.
 - [Distribution log](distribution.md) — dated registry and directory outreach.
+- [Agent-facing merchant API research](research/agent-facing-merchant-api.md) —
+  merchant examples, discovery compatibility, and x402 Scan evidence plan.
 - [Registry submissions](registry/README.md) — target-specific,
   submission-ready payloads.
 - [Reference deployment runbook snapshot](evidence/2026-07-26-reference-deployment-runbook-snapshot.md)
@@ -56,3 +62,8 @@ the current source tree rather than the state of a public deployment.
 - [`evidence/`](evidence/) — dated deployment, paid-flow, recovery, and
   hardening evidence. Evidence is never a promise that the same version remains
   deployed today.
+- [Agent merchant API deployment](evidence/2026-07-27-agent-merchant-deployment.md)
+  — public origins, discovery verification, and paid-flow status.
+- [x402-list facilitator review](evidence/2026-07-28-x402-list-review.md) —
+  verified implementation, independent-usage rejection, and evidence gates
+  for any resubmission.
