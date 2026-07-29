@@ -87,17 +87,28 @@ of final, normalized activity records. An empty index is valid and reports
 
 ## Discovery
 
-The server exposes `/openapi.json`, `/llms.txt`, and `/.well-known/x402`.
-Protected routes declare the official Bazaar discovery extension in their
-runtime x402 requirements as well as their OpenAPI schemas.
+The server exposes `/openapi.json`, `/llms.txt`, `/.well-known/x402`,
+`/pricing`, `/terms`, and `/robots.txt`. `/pricing` derives the exact
+six-decimal USD display price, network, asset, recipient, and (on EVM) EIP-712
+domain from the active configuration; `/terms` is a fetchable operational
+terms page linked from OpenAPI. Protected routes declare the official Bazaar
+discovery extension in their runtime x402 requirements as well as their
+OpenAPI schemas.
 
 `GET /` provides a small human-readable service page linking those discovery
 documents. It is informational only; paid operations remain under `/v1/`.
 `GET /healthz` is process liveness and never depends on an upstream.
-`GET /readyz` checks the configured RPC chain identity, the facilitator's
-readiness plus advertised canonical x402 v2 network, and successful payment
-server initialization. It returns HTTP 503 with `Retry-After: 1` if any check
-fails. Startup performs those same checks before listening.
+`GET /readyz` checks the configured RPC chain identity and a canonical
+final/finalized block, the facilitator's readiness plus advertised canonical
+x402 v2 network, and successful payment server initialization. Concurrent probes share a one-second completed
+snapshot, including a failed result, so readiness monitoring cannot amplify
+upstream RPC/facilitator work. It returns HTTP 503 with `Retry-After: 1` if any
+check fails. Startup performs those same checks before listening.
+
+The merchant-owned facilitator transport rejects redirects for every request,
+including payment-bearing `/verify` and `/settle` calls. It uses a bounded
+seven-second per-attempt deadline and 64 KiB response limit; the prescribed
+retry envelope remains within the reverse proxy timeout.
 
 `CORS_ORIGINS` is an optional comma-separated exact-origin allowlist for
 browser clients. Allowed preflights terminate with HTTP 204 before payment
@@ -143,11 +154,11 @@ root-owned or service-owned `PROOF_RESULT_FILE`.
 ## Public regression check
 
 `npm run regression` exercises both production origins without signing or
-broadcasting a payment. It verifies public discovery documents, all ten unpaid
-402 challenges, canonical network/asset/payee/amount fields, the 12 KB upstream
-header safety margin, Bazaar/OpenAPI schema parity, validation ordering, and
-the production browser CORS allowlist. Run that default full check before and
-after a complete promotion.
+broadcasting a payment. It verifies public discovery and listing-surface
+documents, all ten unpaid 402 challenges, canonical network/asset/payee/amount
+fields, the 12 KB upstream header safety margin, Bazaar/OpenAPI schema parity,
+validation ordering, and the production browser CORS allowlist. Run that
+default full check before and after a complete promotion.
 
 During a one-instance-at-a-time rollout, use the exact target switch for the
 post-promotion gate so the newly promoted instance is not coupled to the other

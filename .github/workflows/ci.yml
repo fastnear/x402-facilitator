@@ -170,9 +170,15 @@ jobs:
             >/dev/null 2>&1
           openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
             -subj /CN=merchant-near.mikedotexe.com \
+            -addext 'subjectAltName=DNS:merchant-near.mikedotexe.com,DNS:merchant-base.mikedotexe.com' \
             -keyout "$work/letsencrypt/live/merchant-near.mikedotexe.com/privkey.pem" \
             -out "$work/letsencrypt/live/merchant-near.mikedotexe.com/fullchain.pem" \
             >/dev/null 2>&1
+          merchant_certificate="$work/letsencrypt/live/merchant-near.mikedotexe.com/fullchain.pem"
+          openssl x509 -in "$merchant_certificate" -noout \
+            -checkhost merchant-near.mikedotexe.com
+          openssl x509 -in "$merchant_certificate" -noout \
+            -checkhost merchant-base.mikedotexe.com
           docker run --rm \
             --entrypoint nginx \
             -v "$work/conf.d:/etc/nginx/conf.d:ro" \

@@ -32,7 +32,7 @@ facilitator's own settlement idempotency is unaffected.
 
    ```sh
    x402-near-admin client create --name demo-resource-server \
-     --environment <env> --daily-budget-yocto-near <budget>
+     --environment <env> --daily-yocto-near <budget>
    x402-near-admin client allow-payee --client-id <id> \
      --network near:<env> --asset <usdc-account> --pay-to <merchant>
    ```

@@ -86,12 +86,45 @@ export async function runRegressionCheck({
     const openApi = await openApiResponse.json();
     assert.equal(openApi.openapi, "3.1.0");
     assert.equal(openApi.servers?.[0]?.url, deployment.origin);
+    assert.equal(openApi.info?.termsOfService, `${deployment.origin}/terms`);
 
-    for (const publicPath of ["/", "/llms.txt", "/.well-known/x402", "/healthz"]) {
+    for (const publicPath of [
+      "/",
+      "/llms.txt",
+      "/pricing",
+      "/terms",
+      "/robots.txt",
+      "/.well-known/x402",
+      "/healthz",
+    ]) {
       const response = await checkedFetch(fetchImpl, `${deployment.origin}${publicPath}`);
       assert.equal(response.status, 200, `${deployment.name} ${publicPath} must return 200`);
       assertSecurityHeaders(response, `${deployment.name} ${publicPath}`);
     }
+
+    const [landing, pricing, terms, robots, llms] = await Promise.all([
+      checkedFetch(fetchImpl, `${deployment.origin}/`),
+      checkedFetch(fetchImpl, `${deployment.origin}/pricing`),
+      checkedFetch(fetchImpl, `${deployment.origin}/terms`),
+      checkedFetch(fetchImpl, `${deployment.origin}/robots.txt`),
+      checkedFetch(fetchImpl, `${deployment.origin}/llms.txt`),
+    ]);
+    const landingText = await landing.text();
+    assert.match(landingText, /href="\/pricing"/);
+    assert.match(landingText, /href="\/terms"/);
+    const pricingText = await pricing.text();
+    assert.match(pricingText, /\$0\.001000/);
+    assert.ok(pricingText.includes(deployment.asset));
+    assert.ok(pricingText.includes(deployment.payTo));
+    if (deployment.network === "eip155:8453") {
+      assert.match(pricingText, /USD Coin/);
+      assert.match(pricingText, /EIP-712 domain/);
+    }
+    assert.match(await terms.text(), /operational terms/i);
+    assert.equal(await robots.text(), "User-agent: *\nAllow: /\n");
+    const llmsText = await llms.text();
+    assert.match(llmsText, /GET \/pricing/);
+    assert.match(llmsText, /GET \/terms/);
 
     const readiness = await checkedFetch(fetchImpl, `${deployment.origin}/readyz`);
     assert.equal(readiness.status, 200, `${deployment.name} /readyz must return exactly 200`);
@@ -118,6 +151,16 @@ export async function runRegressionCheck({
           requestInit("POST", {}),
         );
         assert.equal(invalid.status, 402, `${deployment.name} ${route.path} must require payment before application validation`);
+        const malformed = await checkedFetch(
+          fetchImpl,
+          `${deployment.origin}${requestPath}`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: "{",
+          },
+        );
+        assert.equal(malformed.status, 402, `${deployment.name} ${route.path} must require payment before JSON parsing`);
       }
 
       results.push({
@@ -128,7 +171,7 @@ export async function runRegressionCheck({
     }
 
     await validateCors(fetchImpl, deployment);
-    output(`ok ${deployment.name}: readiness, discovery, 5 unpaid challenges, schemas, and CORS`);
+    output(`ok ${deployment.name}: readiness, listing surface, discovery, 5 unpaid challenges, schemas, and CORS`);
   }
   output(`ok ${results.length} paid routes; no payment signature was created or sent`);
   return results;

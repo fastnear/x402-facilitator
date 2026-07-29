@@ -5,6 +5,13 @@ resource servers.
 
 Date: 2026-07-27
 
+> **Historical deployment note:** the deployment and paid-flow observations in
+> this dated research record describe the July 27 release only. They do not
+> prove that a later source revision is live. Re-run the unpaid regression and
+> record new evidence after every immutable promotion; see the
+> [x402-list review](../evidence/2026-07-28-x402-list-review.md) for the
+> independent-adoption boundary.
+
 ## Purpose
 
 The facilitator is settlement infrastructure. The merchant product belongs in a
@@ -109,8 +116,12 @@ The companion server serves:
 - `/` — a small human-readable service page linking the discovery surfaces;
 - `/openapi.json` — canonical OpenAPI 3.1 contract with `x-payment-info`,
   decimal USD pricing, request and response schemas, `402` responses, contact
-  metadata, and `info.x-guidance`;
+  metadata, `info.termsOfService`, and `info.x-guidance`;
 - `/llms.txt` — concise agent instructions;
+- `/pricing` — exact configured six-decimal price, network, asset, recipient,
+  and EIP-712 domain where applicable;
+- `/terms` — fetchable operational terms page;
+- `/robots.txt` — crawler policy; and
 - `/.well-known/x402` — compatibility fan-out for x402 Scan.
 
 Runtime payment requirements declare the official Bazaar discovery extension

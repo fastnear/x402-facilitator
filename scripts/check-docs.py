@@ -168,6 +168,32 @@ def registry_submission_errors() -> list[str]:
     return errors
 
 
+def admin_command_doc_errors() -> list[str]:
+    """Keep the demo's client-create flag aligned with the Clap parser."""
+    documentation_relative = Path("deploy/demo/README.md")
+    admin_relative = Path("crates/x402-near-facilitator/src/bin/admin.rs")
+    try:
+        documentation = (ROOT / documentation_relative).read_text(encoding="utf-8")
+        admin_source = (ROOT / admin_relative).read_text(encoding="utf-8")
+    except OSError as error:
+        return [f"admin command documentation: cannot read input: {error}"]
+
+    errors: list[str] = []
+    legacy_flag = "--daily-budget-yocto-near"
+    canonical_flag = "--daily-yocto-near"
+    if legacy_flag in documentation:
+        errors.append(f"{documentation_relative}: obsolete {legacy_flag} flag")
+    if canonical_flag not in documentation:
+        errors.append(f"{documentation_relative}: missing {canonical_flag} flag")
+    if re.search(
+        r"#\[arg\(long\)\]\s+daily_yocto_near: Option<String>", admin_source
+    ) is None:
+        errors.append(
+            f"{admin_relative}: client-create parser no longer exposes {canonical_flag}"
+        )
+    return errors
+
+
 def main() -> int:
     os.chdir(ROOT)
     paths = tracked_files()
@@ -175,11 +201,12 @@ def main() -> int:
         markdown_link_errors(paths)
         + secret_errors(paths)
         + registry_submission_errors()
+        + admin_command_doc_errors()
     )
     if errors:
         print("\n".join(errors), file=sys.stderr)
         return 1
-    print("documentation links, registry submission, and secret-file guard passed")
+    print("documentation links, registry submission, admin command, and secret-file guard passed")
     return 0
 
 

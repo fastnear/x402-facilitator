@@ -28,6 +28,11 @@ const config = {
 };
 
 const activity = {
+  indexMetadata: () => ({
+    status: "not_yet_indexed",
+    recordCount: 0,
+    indexedAt: null,
+  }),
   search: () => ({
     items: [],
     nextCursor: null,
@@ -136,6 +141,14 @@ async function serve(application) {
   };
 }
 
+async function waitFor(predicate, message) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (predicate()) return;
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  assert.fail(message);
+}
+
 test("health is liveness while readiness reflects both dependencies", async t => {
   const application = await createMerchantApplication({
     config,
@@ -156,6 +169,104 @@ test("health is liveness while readiness reflects both dependencies", async t =>
     ready: false,
     checks: { rpc: "ready", facilitator: "not_ready", payment: "ready" },
   });
+});
+
+test("health reads precomputed index metadata without searching activity", async t => {
+  let searches = 0;
+  const application = await createMerchantApplication({
+    config,
+    activity: {
+      indexMetadata: () => ({
+        status: "ready",
+        recordCount: 50_000,
+        indexedAt: "2026-07-29T00:00:00.000Z",
+      }),
+      search: () => {
+        searches += 1;
+        assert.fail("liveness must not scan the activity index");
+      },
+      entity: () => assert.fail("liveness must not inspect an entity"),
+    },
+    ...dependencies({ facilitatorReady: false }),
+  });
+  const server = await serve(application);
+  t.after(server.close);
+
+  const health = await fetch(`${server.origin}/healthz`);
+  assert.equal(health.status, 200);
+  assert.deepEqual((await health.json()).activityIndex, {
+    status: "ready",
+    recordCount: 50_000,
+    indexedAt: "2026-07-29T00:00:00.000Z",
+  });
+  assert.equal(searches, 0);
+});
+
+test("readiness coalesces dependency probes and bounds completed snapshots", async t => {
+  let now = 10_000;
+  let rpcCalls = 0;
+  let facilitatorCalls = 0;
+  const resolvers = [];
+  const waitForChecks = () => new Promise(resolve => resolvers.push(resolve));
+  const reader = {
+    async checkReadiness() {
+      rpcCalls += 1;
+      await waitForChecks();
+    },
+    async checkIdentity() {
+      assert.fail("readiness must use the reader capability probe when available");
+    },
+  };
+  const facilitatorProbe = {
+    async check() {
+      facilitatorCalls += 1;
+      await waitForChecks();
+    },
+  };
+  const application = await createMerchantApplication({
+    config,
+    activity,
+    reader,
+    facilitator: dependencies().facilitator,
+    facilitatorProbe,
+    paymentServerInitializer: async () => {
+      await waitForChecks();
+    },
+    paymentMiddlewareFactory: () => (_request, _response, next) => next(),
+    readinessCacheMs: 1_000,
+    now: () => now,
+  });
+  const server = await serve(application);
+  t.after(server.close);
+
+  const firstWave = Array.from({ length: 8 }, () => fetch(`${server.origin}/readyz`));
+  await waitFor(
+    () => rpcCalls === 1 && facilitatorCalls === 1 && resolvers.length === 3,
+    "concurrent readiness requests did not reach one shared dependency check",
+  );
+  assert.equal(rpcCalls, 1);
+  assert.equal(facilitatorCalls, 1);
+  assert.equal(resolvers.length, 3);
+  while (resolvers.length > 0) resolvers.shift()();
+  for (const response of await Promise.all(firstWave)) {
+    assert.equal(response.status, 200);
+  }
+
+  assert.equal((await fetch(`${server.origin}/readyz`)).status, 200);
+  assert.equal(rpcCalls, 1);
+  assert.equal(facilitatorCalls, 1);
+
+  now += 1_000;
+  const refreshed = fetch(`${server.origin}/readyz`);
+  await waitFor(
+    () => rpcCalls === 2 && facilitatorCalls === 2 && resolvers.length === 2,
+    "expired readiness snapshot did not refresh dependencies",
+  );
+  assert.equal(rpcCalls, 2);
+  assert.equal(facilitatorCalls, 2);
+  assert.equal(resolvers.length, 2);
+  while (resolvers.length > 0) resolvers.shift()();
+  assert.equal((await refreshed).status, 200);
 });
 
 test("readiness fails closed when payment initialization is delayed and then fails", async t => {
@@ -182,6 +293,7 @@ test("readiness fails closed when payment initialization is delayed and then fai
       middlewareSyncOnStart = args[3];
       return (_request, _response, next) => next();
     },
+    readinessCacheMs: 0,
   });
   const server = await serve(application);
   t.after(server.close);
@@ -240,10 +352,35 @@ test("discovery derives its price from the exact atomic amount", async t => {
 
   const landing = await (await fetch(`${server.origin}/`)).text();
   assert.match(landing, /\$1\.234567/);
+  assert.match(landing, /href="\/pricing"/);
+  assert.match(landing, /href="\/terms"/);
+  const pricing = await (await fetch(`${server.origin}/pricing`)).text();
+  assert.match(pricing, /\$1\.234567/);
+  assert.match(pricing, new RegExp(config.asset));
+  assert.match(pricing, new RegExp(config.payTo));
+  assert.match(pricing, /USD Coin/);
+  assert.match(pricing, /EIP-712 domain/);
+  const terms = await (await fetch(`${server.origin}/terms`)).text();
+  assert.match(terms, /operational terms/i);
+  assert.match(terms, /HTTP 402/);
+  assert.equal((await fetch(`${server.origin}/terms-of-service`)).status, 200);
+  const robots = await (await fetch(`${server.origin}/robots.txt`)).text();
+  assert.equal(robots, "User-agent: *\nAllow: /\n");
   const openApi = await (await fetch(`${server.origin}/openapi.json`)).json();
+  assert.equal(openApi.info.termsOfService, `${config.resourceOrigin}/terms`);
   assert.equal(
     openApi.paths["/v1/evidence/account"].post["x-payment-info"].price.amount,
     "1.234567",
+  );
+  assert.equal(
+    openApi.paths["/v1/evidence/transaction"].post.responses["200"]
+      .content["application/json"].schema.example.transaction.to,
+    config.asset,
+  );
+  assert.match(
+    openApi.paths["/v1/evidence/account"].post.responses["200"]
+      .content["application/json"].schema.properties.account.properties.balanceWei.description,
+    /Native ETH balance/,
   );
 
   const challengeResponse = await fetch(
@@ -299,6 +436,60 @@ test("application handlers are independently testable after payment authorizatio
     kind: "account",
     address: "0x2222222222222222222222222222222222222222",
   });
+});
+
+test("JSON parser failures are client errors rather than unavailable evidence", async t => {
+  const application = await createMerchantApplication({
+    config,
+    activity,
+    ...dependencies(),
+    paymentMiddlewareFactory: () => (_request, _response, next) => next(),
+  });
+  const server = await serve(application);
+  t.after(server.close);
+
+  const oversized = await fetch(`${server.origin}/v1/evidence/account`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ padding: "x".repeat(17 * 1024) }),
+  });
+  assert.equal(oversized.status, 413);
+  assert.deepEqual(await oversized.json(), {
+    error: "payload_too_large",
+    message: "request body exceeds the 16 KiB limit",
+  });
+
+  const malformed = await fetch(`${server.origin}/v1/evidence/account`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: "{",
+  });
+  assert.equal(malformed.status, 400);
+  assert.deepEqual(await malformed.json(), {
+    error: "invalid_input",
+    message: "request body must be valid JSON",
+  });
+});
+
+test("unpaid malformed bodies receive x402 requirements before JSON parsing", async t => {
+  const application = await createMerchantApplication({
+    config,
+    activity,
+    ...dependencies(),
+  });
+  await application.checkDependencies();
+  const server = await serve(application);
+  t.after(server.close);
+
+  for (const body of ["{", JSON.stringify({ padding: "x".repeat(17 * 1024) })]) {
+    const response = await fetch(`${server.origin}/v1/evidence/account`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body,
+    });
+    assert.equal(response.status, 402);
+    assert.ok(response.headers.get("payment-required"));
+  }
 });
 
 test("every advertised discovery input passes its shared pre-RPC validation", async t => {

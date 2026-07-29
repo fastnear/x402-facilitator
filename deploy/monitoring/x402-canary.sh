@@ -52,8 +52,8 @@ publish() {
 
 # POST the stored fixture to the facilitator's /verify with the demo's API key
 # and require the exact deterministic rejection. Anything else (5xx, timeout,
-# auth failure, unexpected reason) fails the canary. The API key is read into
-# the curl argument list only; it is never echoed.
+# auth failure, unexpected reason) fails the canary. The API key reaches curl
+# through its stdin configuration, never the process argument list or output.
 verify_canary() {
   local network=$1 base_url=$2 expected_reason=$3
   local fixture="$FIXTURE_DIR/$network-verify.json"
@@ -64,11 +64,19 @@ verify_canary() {
     return 1
   fi
   body=$(mktemp)
-  status=$(curl -sS -o "$body" -w "%{http_code}" --max-time "$CURL_MAX_TIME" \
-    -X POST "$base_url/verify" \
-    -H "Content-Type: application/json" \
-    -H "X-API-Key: $(tr -d '\n' <"$key_file")" \
-    --data-binary @"$fixture" || echo "000")
+  status=$(
+    {
+      printf 'header = "X-API-Key: '
+      # Quote for curl's configuration grammar without placing the resulting
+      # credential in this process's argv or output.
+      tr -d '\r\n' <"$key_file" | sed 's/\\/\\\\/g; s/"/\\"/g'
+      printf '"\n'
+    } | curl --config - -sS -o "$body" -w "%{http_code}" \
+      --max-time "$CURL_MAX_TIME" \
+      -X POST "$base_url/verify" \
+      -H "Content-Type: application/json" \
+      --data-binary @"$fixture" || echo "000"
+  )
   local reason is_valid
   is_valid=$(jq -r '.isValid' "$body" 2>/dev/null || echo parse-error)
   reason=$(jq -r '.invalidReason' "$body" 2>/dev/null || echo parse-error)

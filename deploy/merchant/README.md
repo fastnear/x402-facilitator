@@ -21,12 +21,36 @@ only the exact `CREDENTIALS_DIRECTORY/facilitator-api-key` path with that
 metadata as systemd's ACL mask. Every other credential path remains strictly
 owner-only.
 
-The public API serves `/openapi.json`, `/llms.txt`, `/.well-known/x402`, the
-paid evidence/activity routes, and the quote-only
+The public API serves `/openapi.json`, `/llms.txt`, `/.well-known/x402`,
+`/pricing`, `/terms`, `/robots.txt`, the paid evidence/activity routes, and the quote-only
 `POST /v1/routes/usdc/quote` route. That route makes an outbound HTTPS request
 to NEAR Intents 1Click but never returns a deposit address or moves funds. The
 nginx configuration expects a single certificate lineage named
 `merchant-near.mikedotexe.com` covering both hostnames.
+
+Before enabling the Base TLS server, and after every certificate renewal or
+nginx reload, verify the certificate presented by each public origin. This
+uses SNI and the system trust store only; it sends no payment or credential:
+
+```sh
+set -euo pipefail
+for host in merchant-near.mikedotexe.com merchant-base.mikedotexe.com; do
+  printf '' |
+    openssl s_client -connect "$host:443" -servername "$host" \
+      -verify_hostname "$host" -verify_return_error 2>/dev/null |
+    openssl x509 -noout -checkhost "$host"
+done
+```
+
+Both checks must succeed before the unpaid regression gate or any directory
+preflight. A certificate valid only for the lineage's near hostname is not
+sufficient for the Base origin.
+
+Each merchant-to-facilitator HTTP attempt has a seven-second deadline. The
+bounded verify retry can take at most fifteen seconds; the three settle
+attempts and prescribed 1.5/3-second waits can take at most 25.5 seconds.
+That envelope intentionally remains below nginx's 30-second upstream timeout.
+Do not raise either limit independently.
 
 Tagged native releases contain both `examples/resource-server/` and
 `examples/merchant-api/`, plus an `examples-assets.sha256` manifest. The

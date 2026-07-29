@@ -233,9 +233,13 @@ export function readCredential(
 ) {
   let descriptor;
   try {
+    const noFollow = fsConstants.O_NOFOLLOW;
+    if (!Number.isInteger(noFollow)) {
+      throw new Error(`${label} file cannot be opened safely on this platform`);
+    }
     descriptor = openSync(
       path,
-      fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0),
+      fsConstants.O_RDONLY | noFollow,
     );
     const metadata = fstatSync(descriptor);
     if (!metadata.isFile()) {
