@@ -61,6 +61,7 @@ release_id=$1
 merchant_install_root=/opt/x402-merchant
 merchant_release_root=$merchant_install_root/releases
 destination=$merchant_release_root/$release_id
+release_metadata_name=.x402-merchant-release-id
 source_staging=
 app_staging=
 manifest_files=
@@ -237,6 +238,11 @@ fi
   echo "error: merchant source must not contain node_modules" >&2
   exit 1
 }
+[ ! -e "$source_app/$release_metadata_name" ] &&
+  [ ! -L "$source_app/$release_metadata_name" ] || {
+  echo "error: merchant source must not contain installer release metadata" >&2
+  exit 1
+}
 if find "$source_app" ! -type d ! -type f -print -quit | grep -q .; then
   echo "error: merchant application contains a link or special file" >&2
   exit 1
@@ -257,6 +263,13 @@ if find "$app_staging" ! -type d ! -type f -print -quit | grep -q .; then
   exit 1
 fi
 npm --prefix "$app_staging" run check
+[ ! -e "$app_staging/$release_metadata_name" ] &&
+  [ ! -L "$app_staging/$release_metadata_name" ] || {
+  echo "error: merchant staging unexpectedly contains installer release metadata" >&2
+  exit 1
+}
+printf '%s\n' "$release_id" >"$app_staging/$release_metadata_name"
+chmod 0444 "$app_staging/$release_metadata_name"
 
 chown -R root:root "$app_staging"
 chmod -R go-w "$app_staging"

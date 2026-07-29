@@ -17,6 +17,7 @@ import {
   isExpectedSystemdAclCredential,
   loadConfig,
   readCredential,
+  readInstalledReleaseId,
 } from "./config.mjs";
 
 const PAYEES = {
@@ -40,6 +41,7 @@ function environment(network, overrides = {}) {
 }
 
 const credentialReader = () => "test-credential";
+const RELEASE_ID = "git-0123456789abcdef0123456789abcdef01234567";
 
 test("loads each exact supported network profile", () => {
   for (const [network, profile] of Object.entries(NETWORK_PROFILES)) {
@@ -51,7 +53,38 @@ test("loads each exact supported network profile", () => {
     assert.equal(config.eip712Version, profile.eip712Version);
     assert.equal(config.amount, "1000");
     assert.equal(config.priceUsd, "0.001000");
+    assert.equal(config.releaseId, undefined);
   }
+});
+
+test("records an installed immutable release ID and requires it only in production", () => {
+  const releaseIdReader = () => RELEASE_ID;
+  const config = loadConfig(
+    environment("eip155:8453", {
+      MERCHANT_RELEASE_METADATA_REQUIRED: "1",
+    }),
+    { credentialReader, releaseIdReader },
+  );
+  assert.equal(config.releaseId, RELEASE_ID);
+
+  assert.throws(
+    () => loadConfig(
+      environment("eip155:8453", {
+        MERCHANT_RELEASE_METADATA_REQUIRED: "1",
+      }),
+      { credentialReader, releaseIdReader: () => undefined },
+    ),
+    /installed merchant release metadata is required/,
+  );
+  assert.throws(
+    () => loadConfig(
+      environment("eip155:8453", {
+        MERCHANT_RELEASE_METADATA_REQUIRED: "true",
+      }),
+      { credentialReader, releaseIdReader },
+    ),
+    /MERCHANT_RELEASE_METADATA_REQUIRED must be 1/,
+  );
 });
 
 test("binds the facilitator key to systemd's exact credential path", () => {
@@ -227,5 +260,83 @@ test("rejects credential symlinks, extra lines, whitespace, and oversized files"
   ]) {
     writeFileSync(target, contents, { mode: 0o600 });
     assert.throws(() => readCredential(target, "test credential"), pattern);
+  }
+});
+
+test("reads only a root-owned immutable release metadata sidecar", () => {
+  const contents = `${RELEASE_ID}\n`;
+  const metadata = {
+    isFile: () => true,
+    uid: 0,
+    gid: 0,
+    mode: 0o100444,
+    size: Buffer.byteLength(contents),
+  };
+  let openedPath;
+  let closed = false;
+  assert.equal(
+    readInstalledReleaseId({
+      moduleUrl: "file:///unused/config.mjs",
+      moduleUrlToPath: () => "/opt/x402-merchant/releases/current/config.mjs",
+      openFile: path => {
+        openedPath = path;
+        return 7;
+      },
+      fstat: () => metadata,
+      readFile: () => contents,
+      close: descriptor => {
+        assert.equal(descriptor, 7);
+        closed = true;
+      },
+    }),
+    RELEASE_ID,
+  );
+  assert.equal(
+    openedPath,
+    "/opt/x402-merchant/releases/current/.x402-merchant-release-id",
+  );
+  assert.equal(closed, true);
+});
+
+test("fails closed on malformed, unsafe, or missing required release metadata", () => {
+  const safeMetadata = {
+    isFile: () => true,
+    uid: 0,
+    gid: 0,
+    mode: 0o100444,
+    size: Buffer.byteLength(`${RELEASE_ID}\n`),
+  };
+  const reader = ({ metadata = safeMetadata, contents = `${RELEASE_ID}\n`, openError } = {}) => () => readInstalledReleaseId({
+    moduleUrl: "file:///unused/config.mjs",
+    moduleUrlToPath: () => "/opt/x402-merchant/releases/current/config.mjs",
+    openFile: () => {
+      if (openError) throw openError;
+      return 7;
+    },
+    fstat: () => metadata,
+    readFile: () => contents,
+    close: () => {},
+  });
+
+  const missing = new Error("missing");
+  missing.code = "ENOENT";
+  assert.equal(reader({ openError: missing })(), undefined);
+
+  const symlink = new Error("link");
+  symlink.code = "ELOOP";
+  assert.throws(reader({ openError: symlink }), /symbolic link/);
+
+  for (const [metadata, contents, pattern] of [
+    [{ ...safeMetadata, isFile: () => false }, `${RELEASE_ID}\n`, /regular file/],
+    [{ ...safeMetadata, uid: 1000 }, `${RELEASE_ID}\n`, /root-owned and immutable/],
+    [{ ...safeMetadata, gid: 1000 }, `${RELEASE_ID}\n`, /root-owned and immutable/],
+    [{ ...safeMetadata, mode: 0o100644 }, `${RELEASE_ID}\n`, /root-owned and immutable/],
+    [{ ...safeMetadata, mode: 0o100664 }, `${RELEASE_ID}\n`, /root-owned and immutable/],
+    [{ ...safeMetadata, size: 129 }, `${RELEASE_ID}\n`, /1 through 128 bytes/],
+    [safeMetadata, "git-not-a-commit\n", /invalid release ID/],
+    [safeMetadata, `${RELEASE_ID}\nextra\n`, /exactly one nonempty line/],
+    [safeMetadata, ` ${RELEASE_ID}\n`, /invalid release ID/],
+  ]) {
+    assert.throws(reader({ metadata, contents }), pattern);
   }
 });

@@ -91,7 +91,10 @@ sudo /usr/local/libexec/x402-merchant/install-release.sh \
 The installer copies the untrusted inputs into a root-only staging directory,
 checks the exact filename and one-line checksum, rejects unexpected paths,
 links, special files, and bundled dependencies, runs the locked application
-checks, and only then publishes the release directory.
+checks, and only then publishes the release directory. At that point it writes
+the reserved root-owned mode-0444 `.x402-merchant-release-id` sidecar from the
+already validated `release_id`; the source bundle may not supply that file.
+Production systemd units require it at startup.
 
 For an upgrade of an already live instance, use this unpaid gate one instance
 at a time. `release_id` must be `git-$commit` from the merged `origin/main`
@@ -110,6 +113,10 @@ test "$(readlink -f /opt/x402-merchant/current-near)" = \
   "/opt/x402-merchant/releases/$release_id"
 curl --fail --silent --show-error https://merchant-near.mikedotexe.com/readyz |
   jq -e '.ready == true and .checks.rpc == "ready" and .checks.facilitator == "ready" and .checks.payment == "ready"'
+curl --fail --silent --show-error https://merchant-near.mikedotexe.com/healthz |
+  jq -e --arg id "$release_id" '.release.id == $id'
+curl --fail --silent --show-error https://merchant-near.mikedotexe.com/openapi.json |
+  jq -e --arg id "$release_id" '.info["x-x402-merchant-release-id"] == $id'
 npm --prefix /opt/x402-merchant/current-near run regression -- --target near
 sudo journalctl -u x402-merchant-api@near --since "-5 min" --no-pager
 ```
@@ -124,6 +131,12 @@ default full dual-origin check:
 ```sh
 npm --prefix /opt/x402-merchant/current-base run regression
 ```
+
+The final regression is run from an installed release, so it requires both
+origins to expose the same release ID in `/healthz` and OpenAPI. Record that
+public value with the merged SHA, archive checksum, immutable pointers, and
+dated rollout evidence; it is provenance rather than a cryptographic
+attestation.
 
 For a first installation there is no pre-promotion release to test; enable each
 unit after its pointer is selected, then run the same post-promotion checks.

@@ -141,12 +141,28 @@ async function serve(application) {
   };
 }
 
-async function waitFor(predicate, message) {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
-    if (predicate()) return;
-    await new Promise(resolve => setImmediate(resolve));
+function deferred() {
+  let resolve;
+  return {
+    promise: new Promise(resolvePromise => {
+      resolve = resolvePromise;
+    }),
+    resolve: value => resolve(value),
+  };
+}
+
+async function awaitDeferred(deferredResult, message) {
+  let timer;
+  try {
+    await Promise.race([
+      deferredResult.promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), 1_000);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
   }
-  assert.fail(message);
 }
 
 test("health is liveness while readiness reflects both dependencies", async t => {
@@ -202,12 +218,50 @@ test("health reads precomputed index metadata without searching activity", async
   assert.equal(searches, 0);
 });
 
-test("readiness coalesces dependency probes and bounds completed snapshots", async t => {
+test("health and OpenAPI expose only validated installed release provenance", async t => {
+  const releaseId = "git-0123456789abcdef0123456789abcdef01234567";
+  const application = await createMerchantApplication({
+    config: { ...config, releaseId },
+    activity,
+    ...dependencies(),
+  });
+  const server = await serve(application);
+  t.after(server.close);
+
+  const health = await (await fetch(`${server.origin}/healthz`)).json();
+  assert.deepEqual(health.release, { id: releaseId });
+  const openApi = await (await fetch(`${server.origin}/openapi.json`)).json();
+  assert.equal(openApi.info["x-x402-merchant-release-id"], releaseId);
+
+  const localApplication = await createMerchantApplication({
+    config,
+    activity,
+    ...dependencies(),
+  });
+  const localServer = await serve(localApplication);
+  t.after(localServer.close);
+  const localHealth = await (await fetch(`${localServer.origin}/healthz`)).json();
+  assert.equal(localHealth.release, undefined);
+  const localOpenApi = await (await fetch(`${localServer.origin}/openapi.json`)).json();
+  assert.equal(localOpenApi.info["x-x402-merchant-release-id"], undefined);
+});
+
+test("readiness coalesces dependency probes and bounds completed snapshots", async () => {
   let now = 10_000;
   let rpcCalls = 0;
   let facilitatorCalls = 0;
   const resolvers = [];
-  const waitForChecks = () => new Promise(resolve => resolvers.push(resolve));
+  const initialDependenciesStarted = deferred();
+  const refreshedDependenciesStarted = deferred();
+  const waitForChecks = () => new Promise(resolve => {
+    resolvers.push(resolve);
+    if (rpcCalls === 1 && facilitatorCalls === 1 && resolvers.length === 3) {
+      initialDependenciesStarted.resolve();
+    }
+    if (rpcCalls === 2 && facilitatorCalls === 2 && resolvers.length === 2) {
+      refreshedDependenciesStarted.resolve();
+    }
+  });
   const reader = {
     async checkReadiness() {
       rpcCalls += 1;
@@ -236,37 +290,35 @@ test("readiness coalesces dependency probes and bounds completed snapshots", asy
     readinessCacheMs: 1_000,
     now: () => now,
   });
-  const server = await serve(application);
-  t.after(server.close);
 
-  const firstWave = Array.from({ length: 8 }, () => fetch(`${server.origin}/readyz`));
-  await waitFor(
-    () => rpcCalls === 1 && facilitatorCalls === 1 && resolvers.length === 3,
+  const firstWave = Array.from({ length: 8 }, () => application.checkDependencies());
+  await awaitDeferred(
+    initialDependenciesStarted,
     "concurrent readiness requests did not reach one shared dependency check",
   );
   assert.equal(rpcCalls, 1);
   assert.equal(facilitatorCalls, 1);
   assert.equal(resolvers.length, 3);
   while (resolvers.length > 0) resolvers.shift()();
-  for (const response of await Promise.all(firstWave)) {
-    assert.equal(response.status, 200);
+  for (const readiness of await Promise.all(firstWave)) {
+    assert.equal(readiness.ready, true);
   }
 
-  assert.equal((await fetch(`${server.origin}/readyz`)).status, 200);
+  assert.equal((await application.checkDependencies()).ready, true);
   assert.equal(rpcCalls, 1);
   assert.equal(facilitatorCalls, 1);
 
   now += 1_000;
-  const refreshed = fetch(`${server.origin}/readyz`);
-  await waitFor(
-    () => rpcCalls === 2 && facilitatorCalls === 2 && resolvers.length === 2,
+  const refreshed = application.checkDependencies();
+  await awaitDeferred(
+    refreshedDependenciesStarted,
     "expired readiness snapshot did not refresh dependencies",
   );
   assert.equal(rpcCalls, 2);
   assert.equal(facilitatorCalls, 2);
   assert.equal(resolvers.length, 2);
   while (resolvers.length > 0) resolvers.shift()();
-  assert.equal((await refreshed).status, 200);
+  assert.equal((await refreshed).ready, true);
 });
 
 test("readiness fails closed when payment initialization is delayed and then fails", async t => {
@@ -354,6 +406,7 @@ test("discovery derives its price from the exact atomic amount", async t => {
   assert.match(landing, /\$1\.234567/);
   assert.match(landing, /href="\/pricing"/);
   assert.match(landing, /href="\/terms"/);
+  assert.match(landing, /GET .*\/v1\/entities\/0x0000000000000000000000000000000000000000/);
   const pricing = await (await fetch(`${server.origin}/pricing`)).text();
   assert.match(pricing, /\$1\.234567/);
   assert.match(pricing, new RegExp(config.asset));

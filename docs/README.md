@@ -54,8 +54,8 @@ the current source tree rather than the state of a public deployment.
 - [Distribution log](distribution.md) — dated registry and directory outreach.
 - [Agent-facing merchant API research](research/agent-facing-merchant-api.md) —
   merchant examples, discovery compatibility, and x402 Scan evidence plan.
-- [Registry submissions](registry/README.md) — target-specific,
-  submission-ready payloads.
+- [Registry submissions](registry/README.md) — target-specific historical
+  records; never reuse a prior payload for a new submission.
 - [Reference deployment runbook snapshot](evidence/2026-07-26-reference-deployment-runbook-snapshot.md)
   — the original operator-specific topology and version procedures, retained
   as history rather than current defaults or go-live evidence.

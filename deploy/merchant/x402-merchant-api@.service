@@ -15,6 +15,7 @@ ExecStart=/usr/bin/node /opt/x402-merchant/current-%i/server.mjs
 EnvironmentFile=/etc/x402-merchant/%i.conf
 LoadCredential=facilitator-api-key:/etc/x402-merchant/credentials/%i/api-key
 Environment=FACILITATOR_API_KEY_FILE=%d/facilitator-api-key
+Environment=MERCHANT_RELEASE_METADATA_REQUIRED=1
 Environment=NODE_ENV=production
 
 Restart=on-failure

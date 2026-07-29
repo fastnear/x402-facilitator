@@ -12,6 +12,7 @@ import {
   join,
   normalize,
 } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { parseAllowedOrigins } from "./cors.mjs";
 import {
@@ -21,8 +22,11 @@ import {
 } from "./evidence-input.mjs";
 
 const MAX_CREDENTIAL_BYTES = 4096;
+const MAX_RELEASE_METADATA_BYTES = 128;
 const SYSTEMD_CREDENTIALS_ROOT = "/run/credentials";
 const FACILITATOR_CREDENTIAL_NAME = "facilitator-api-key";
+const RELEASE_METADATA_FILE = ".x402-merchant-release-id";
+const RELEASE_ID_PATTERN = /^(?:git-[0-9a-f]{40}|v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?)$/;
 
 export const NETWORK_PROFILES = Object.freeze({
   "near:mainnet": Object.freeze({
@@ -51,7 +55,10 @@ export const NETWORK_PROFILES = Object.freeze({
 
 export function loadConfig(
   environment = process.env,
-  { credentialReader = readCredential } = {},
+  {
+    credentialReader = readCredential,
+    releaseIdReader = readInstalledReleaseId,
+  } = {},
 ) {
   const network = required(environment, "NETWORK");
   const profile = NETWORK_PROFILES[network];
@@ -149,6 +156,17 @@ export function loadConfig(
   const oneClickJwt = environment.ONE_CLICK_JWT_FILE
     ? credentialReader(environment.ONE_CLICK_JWT_FILE, "1Click JWT")
     : undefined;
+  const releaseMetadataRequired = environment.MERCHANT_RELEASE_METADATA_REQUIRED;
+  if (
+    releaseMetadataRequired !== undefined
+    && releaseMetadataRequired !== "1"
+  ) {
+    throw new Error("MERCHANT_RELEASE_METADATA_REQUIRED must be 1 when set");
+  }
+  const releaseId = releaseIdReader();
+  if (releaseMetadataRequired === "1" && releaseId === undefined) {
+    throw new Error("installed merchant release metadata is required");
+  }
 
   return {
     network,
@@ -170,6 +188,7 @@ export function loadConfig(
     oneClickJwt,
     activityIndexFile: environment.ACTIVITY_INDEX_FILE,
     contactEmail: environment.CONTACT_EMAIL,
+    releaseId,
   };
 }
 
@@ -275,6 +294,71 @@ export function readCredential(
     throw error;
   } finally {
     if (descriptor !== undefined) closeSync(descriptor);
+  }
+}
+
+export function readInstalledReleaseId({
+  moduleUrl = import.meta.url,
+  moduleUrlToPath = fileURLToPath,
+  openFile = openSync,
+  fstat = fstatSync,
+  readFile = readFileSync,
+  close = closeSync,
+} = {}) {
+  const metadataPath = join(
+    dirname(moduleUrlToPath(moduleUrl)),
+    RELEASE_METADATA_FILE,
+  );
+  let descriptor;
+  try {
+    const noFollow = fsConstants.O_NOFOLLOW;
+    if (!Number.isInteger(noFollow)) {
+      throw new Error("merchant release metadata cannot be opened safely on this platform");
+    }
+    descriptor = openFile(metadataPath, fsConstants.O_RDONLY | noFollow);
+    const metadata = fstat(descriptor);
+    if (!metadata.isFile()) {
+      throw new Error("merchant release metadata must be a regular file");
+    }
+    if (
+      metadata.uid !== 0
+      || metadata.gid !== 0
+      || (metadata.mode & 0o222) !== 0
+    ) {
+      throw new Error("merchant release metadata must be root-owned and immutable");
+    }
+    if (metadata.size < 1 || metadata.size > MAX_RELEASE_METADATA_BYTES) {
+      throw new Error(
+        `merchant release metadata must contain from 1 through ${MAX_RELEASE_METADATA_BYTES} bytes`,
+      );
+    }
+    const contents = readFile(descriptor, "utf8");
+    if (
+      Buffer.byteLength(contents) < 1
+      || Buffer.byteLength(contents) > MAX_RELEASE_METADATA_BYTES
+      ||
+      contents.includes("\0")
+      || !/^[^\r\n]+(?:\n)?$/.test(contents)
+    ) {
+      throw new Error(
+        "merchant release metadata must contain exactly one nonempty line within its size bound",
+      );
+    }
+    const releaseId = contents.endsWith("\n")
+      ? contents.slice(0, -1)
+      : contents;
+    if (releaseId !== releaseId.trim() || !RELEASE_ID_PATTERN.test(releaseId)) {
+      throw new Error("merchant release metadata contains an invalid release ID");
+    }
+    return releaseId;
+  } catch (error) {
+    if (error?.code === "ENOENT") return undefined;
+    if (error?.code === "ELOOP") {
+      throw new Error("merchant release metadata must not be a symbolic link");
+    }
+    throw error;
+  } finally {
+    if (descriptor !== undefined) close(descriptor);
   }
 }
 

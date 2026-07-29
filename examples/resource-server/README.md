@@ -72,6 +72,14 @@ service does not accept the key directly in an environment variable and does
 not log it. Provision a separate key for every deployed resource-server
 instance and environment; never copy a production key into a test deployment.
 
+This is a reference integration, not a complete independently attributable
+merchant listing surface. `RESOURCE_URL` is optional in this sample and the
+sample does not itself serve OpenAPI or `/.well-known/x402`. Before using a
+deployment as a Base merchant pilot, add a public paid HTTPS method/path that
+returns an unpaid 402, public discovery naming that operation and its `PAY_TO`,
+and public evidence tying the recipient to the merchant operator. Do not put a
+credential, signed authorization, or payment in a public pilot request.
+
 ## Exercise
 
 An unpaid request returns `402 Payment Required`:

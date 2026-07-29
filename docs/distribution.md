@@ -24,9 +24,12 @@ The registry decision and evidence gates are recorded in the
 - The public demo resource server returns a valid 402 with a base64
   `PAYMENT-REQUIRED` requirements header at
   `https://x402-demo.mikedotexe.com/work` (mainnet) and
-  `https://x402-demo-test.mikedotexe.com/work` (testnet), and settles
-  real payments end to end (see the
-  [real-traffic evidence](evidence/2026-07-23-real-traffic-and-recovery.md)).
+  `https://x402-demo-test.mikedotexe.com/work` (testnet). Historical
+  operator-controlled paid-flow and canary records demonstrate end-to-end
+  behavior (see the [real-traffic evidence](evidence/2026-07-23-real-traffic-and-recovery.md)),
+  but do not demonstrate independently attributable merchant adoption; the
+  [2026-07-28 review](evidence/2026-07-28-x402-list-review.md) controls for
+  facilitator-listing purposes.
 
 ## Reusable submission identity
 
@@ -113,9 +116,11 @@ The facilitator service crate remains application-only.
   `transferWithAuthorization` transactions (nonces 0–3), first on
   2026-07-26. The dashboard additionally suppresses entries below 100
   transactions.
-- Wait for six more authentic settlements before opening the PR. Never
-  manufacture transfers merely to clear a directory or ranking threshold.
-  NEAR support remains tracked in
+- This transaction-count snapshot is dated and requires revalidation before
+  action. Do not open a listing PR merely because a count is reached; require
+  independently attributable Base merchant/payee evidence and organic payer
+  activity. Never manufacture transfers merely to clear a directory or ranking
+  threshold. NEAR support remains tracked in
   <https://github.com/Merit-Systems/x402scan/issues/1040>.
 
 ### 2. x402 Foundation repo — facilitators table (PR)
@@ -192,9 +197,10 @@ The facilitator service crate remains application-only.
   `settler_addresses`, and one to 25 `networks`. Optional fields are
   `description`, `facilitator_id_slug`, `token_claims`,
   `claimed_volume_usd`, and `notes`.
-- The prepared body is
+- The historical submission record is
   [`registry/x402-list-submission.json`](registry/x402-list-submission.json).
-  It was revalidated against the live OpenAPI immediately before submission.
+  It was revalidated against the live OpenAPI immediately before the 2026-07-26
+  submission; never reuse it for a future submission.
 - **Submitted once on 2026-07-26:** ID
   `925e62da-75e7-49f5-adca-57762b835966`. The automatic Base probe found the
   submitted settler with four transactions and no errors.
@@ -233,14 +239,11 @@ merged commit, and the unpaid production regression passes. Use the service
 submission form or API fields `url`, `email`, `service_name`, `description`,
 `website_url`, `category`, `endpoints`, and `notes`. Confirm the intended
 email immediately before sending and do not commit it in a reusable template.
-The registry accepts endpoint **paths** (not methods), so submit the following
-deployed path set, one per line, and state the method/body shape in `notes`:
+The registry accepts endpoint **paths** (not methods) and may issue a `GET`.
+Until it confirms method-aware probing, submit only this concrete unpaid `GET`
+operation; put the POST operations and body shapes in `notes` and OpenAPI:
 
 ```text
-/v1/evidence/account
-/v1/evidence/transaction
-/v1/activity/search
-/v1/routes/usdc/quote
 /v1/entities/0x0000000000000000000000000000000000000000
 ```
 
@@ -256,7 +259,9 @@ The zero-payment preflight is the deployed release's `npm run regression`: it
 checks both `/readyz` dependencies, the page/openapi/llms/robots/terms
 surfaces, the fixed six-decimal price, Base `USD Coin`/`2`, and the concrete
 entity-route 402. Record the merged SHA, immutable release pointer, archive
-checksum, and preflight output before asserting that the service is current.
+checksum, public `/healthz.release.id`, matching OpenAPI
+`info.x-x402-merchant-release-id`, and preflight output before asserting that
+the service is current.
 Do not create `/.well-known/x402list.txt` speculatively: if the registry later
 issues an ownership token, serve its exact one-line value from a root-owned
 file through nginx and record the registry request that authorized it.
@@ -267,12 +272,16 @@ do not establish an independent merchant for facilitator review.
 #### Independent Base pilot
 
 Re-engage the known external integrator only through the operator's existing
-private channel. Before provisioning anything, require a public HTTPS
-resource-server URL, an independently controlled Base recipient, expected
-usage, and an operational contact. Create one dedicated Base mainnet client
-with exact canonical USDC and recipient policy, default limits of 60 verify
-requests and 10 settle requests per minute, and the existing conservative gas
-cap. Do not raise sponsorship limits without a separate review.
+private channel. Before provisioning anything, require the public HTTPS paid
+method/path that returns an unpaid 402, public OpenAPI or discovery naming that
+operation and its `payTo`, an independently controlled Base recipient with
+public operator-control evidence, expected usage, and an operational contact.
+Use the [Base merchant-pilot issue template](../.github/ISSUE_TEMPLATE/base_merchant_pilot.yml)
+for the public non-secret record. Create one dedicated Base mainnet client with
+exact `eip155:8453`, canonical USDC, and recipient policy, default limits of 60
+verify requests and 10 settle requests per minute, and the existing
+conservative gas cap. Do not raise sponsorship limits without a separate
+review.
 
 Start that client with `--daily-yocto-near 0` for verify-first onboarding.
 `/verify` remains read-only; a valid, allowlisted `/settle` then returns
@@ -281,9 +290,10 @@ only with `client set-budget --daily-yocto-near <atomic-gas-cap>` after the
 out-of-band review and read-only verification have succeeded. The legacy
 `*_yocto_near` name denotes wei for this Base client.
 
-Deliver the raw key once out of band. Confirm `/supported` and `/readyz`, then
-exercise `/verify` before settlement is enabled. The merchant, not the
-facilitator operator, must initiate and fund any real payments. Never fund
+Deliver the raw key once out of band. Confirm `/supported`, `/readyz`, public
+discovery, and read-only `/verify` before settlement is enabled. The public
+request requires no funded payer, signature, or transaction. The merchant, not
+the facilitator operator, must initiate and fund any real payments. Never fund
 payer wallets, self-pay, split payments, or raise prices to create registry
 volume.
 
