@@ -12,7 +12,9 @@ import test from "node:test";
 
 import {
   NETWORK_PROFILES,
+  expectedSystemdCredentialPath,
   formatUsdc,
+  isExpectedSystemdAclCredential,
   loadConfig,
   readCredential,
 } from "./config.mjs";
@@ -50,6 +52,29 @@ test("loads each exact supported network profile", () => {
     assert.equal(config.amount, "1000");
     assert.equal(config.priceUsd, "0.001000");
   }
+});
+
+test("binds the facilitator key to systemd's exact credential path", () => {
+  const credentialsDirectory = "/run/credentials/x402-merchant-api@near.service";
+  const apiKeyPath = `${credentialsDirectory}/facilitator-api-key`;
+  let observed;
+  loadConfig(
+    environment("near:mainnet", {
+      CREDENTIALS_DIRECTORY: credentialsDirectory,
+      FACILITATOR_API_KEY_FILE: apiKeyPath,
+    }),
+    {
+      credentialReader: (...arguments_) => {
+        observed = arguments_;
+        return "test-credential";
+      },
+    },
+  );
+  assert.deepEqual(observed, [
+    apiKeyPath,
+    "facilitator API key",
+    { expectedSystemdPath: apiKeyPath },
+  ]);
 });
 
 test("rejects unsupported networks and noncanonical network fields", () => {
@@ -116,6 +141,74 @@ test("reads an owner-only, bounded, single-line credential", t => {
     () => readCredential(path, "test credential"),
     /group or others/,
   );
+
+  chmodSync(path, 0o440);
+  assert.throws(
+    () => readCredential(path, "test credential", { expectedSystemdPath: path }),
+    /group or others/,
+  );
+});
+
+test("accepts only the expected systemd LoadCredential ACL-mask metadata", () => {
+  const directory = "/run/credentials/x402-merchant-api@near.service";
+  const expectedPath = expectedSystemdCredentialPath(
+    directory,
+    "facilitator-api-key",
+  );
+  const metadata = {
+    mode: 0o100440,
+    uid: 0,
+    gid: 0,
+  };
+
+  assert.equal(
+    expectedPath,
+    "/run/credentials/x402-merchant-api@near.service/facilitator-api-key",
+  );
+  assert.equal(
+    expectedSystemdCredentialPath("/tmp/credentials", "facilitator-api-key"),
+    undefined,
+  );
+  assert.equal(expectedSystemdCredentialPath(directory, ""), undefined);
+  assert.equal(expectedSystemdCredentialPath(directory, ".."), undefined);
+  assert.equal(expectedSystemdCredentialPath(directory, "nested/key"), undefined);
+  assert.equal(
+    isExpectedSystemdAclCredential(expectedPath, expectedPath, metadata),
+    true,
+  );
+  assert.equal(
+    isExpectedSystemdAclCredential(
+      "/tmp/facilitator-api-key",
+      "/tmp/facilitator-api-key",
+      metadata,
+    ),
+    false,
+  );
+
+  for (const candidate of [
+    { path: "/tmp/facilitator-api-key" },
+    { expectedSystemdPath: undefined },
+    { metadata: { ...metadata, mode: 0o100444 } },
+    { metadata: { ...metadata, mode: 0o100460 } },
+    { metadata: { ...metadata, mode: 0o100640 } },
+    { metadata: { ...metadata, uid: 1000 } },
+    { metadata: { ...metadata, gid: 1000 } },
+  ]) {
+    const candidateExpectedSystemdPath = Object.hasOwn(
+      candidate,
+      "expectedSystemdPath",
+    )
+      ? candidate.expectedSystemdPath
+      : expectedPath;
+    assert.equal(
+      isExpectedSystemdAclCredential(
+        candidate.path ?? expectedPath,
+        candidateExpectedSystemdPath,
+        candidate.metadata ?? metadata,
+      ),
+      false,
+    );
+  }
 });
 
 test("rejects credential symlinks, extra lines, whitespace, and oversized files", t => {

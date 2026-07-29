@@ -2,7 +2,7 @@
 set -eu
 
 usage() {
-  echo "usage: $0 <near|base> <previous-vX.Y.Z[-prerelease]|git-40hex>" >&2
+  echo "usage: $0 <near|base> <previous-vX.Y.Z[-prerelease]|git-40hex|legacy-YYYYMMDD-id>" >&2
   exit 2
 }
 
@@ -19,7 +19,7 @@ case "$network" in
   *) usage ;;
 esac
 printf '%s\n' "$version" | grep -Eq \
-  '^(v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?|git-[0-9a-f]{40})$' ||
+  '^(v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?|git-[0-9a-f]{40}|[0-9]{8}-[0-9A-Za-z][0-9A-Za-z.-]*)$' ||
   usage
 
 root=/opt/x402-merchant

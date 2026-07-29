@@ -14,6 +14,13 @@ small daily sponsorship budgets, and rate limits. Do not reuse the demo
 credentials. The service itself is read-only: it queries chain RPC and never
 creates keys or broadcasts transactions.
 
+Credential source files are root-owned, mode 0600 regular files. systemd
+delivers each one through `LoadCredential`; on systemd v255 its named-user ACL
+can appear as root-owned mode 0440 to `stat(2)`. The application recognizes
+only the exact `CREDENTIALS_DIRECTORY/facilitator-api-key` path with that
+metadata as systemd's ACL mask. Every other credential path remains strictly
+owner-only.
+
 The public API serves `/openapi.json`, `/llms.txt`, `/.well-known/x402`, the
 paid evidence/activity routes, and the quote-only
 `POST /v1/routes/usdc/quote` route. That route makes an outbound HTTPS request
@@ -133,7 +140,12 @@ unit after its pointer is selected, then run the same post-promotion checks.
    `npm run proof` as a promotion or deployment check.
 
 For rollback, select an already-installed prior version, restart only the
-affected instance, and rerun the unpaid regression gate:
+affected instance, and rerun the unpaid regression gate. The helper accepts
+semantic tags, immutable `git-<sha>` IDs, and existing legacy `YYYYMMDD-...`
+release IDs. Current installs contain no symlinks. The only compatibility
+exception is the four root-owned, in-tree npm command shims in the historical
+`20260727-regression-audit-v4` release; the helper verifies each exact link
+and target before it can be selected.
 
 ```sh
 sudo /opt/x402-near-facilitator/releases/vX.Y.Z/deploy/merchant/rollback-release.sh near vPREVIOUS

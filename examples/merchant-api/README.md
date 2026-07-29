@@ -68,9 +68,13 @@ Payees, ports, and amounts are validated before any listener starts.
 
 Credential paths must resolve directly to owner-only regular files of at most
 4 KiB containing exactly one nonempty line. Symbolic links and
-group/world-readable files are rejected. Give each resource-server instance a
-separate facilitator API key restricted to its exact network, asset, and
-payee.
+group/world-readable files are rejected. The sole deployment exception is
+systemd v255's `LoadCredential` ACL representation: the exact
+`CREDENTIALS_DIRECTORY/facilitator-api-key` path may appear root-owned mode
+0440 because its group bit is the named-service-user ACL mask, not group
+access. No other mode-0440 credential is accepted. Give each resource-server
+instance a separate facilitator API key restricted to its exact network,
+asset, and payee.
 
 `ONE_CLICK_PROVIDER_ORIGIN` defaults to
 `https://1click.chaindefuser.com`. `ONE_CLICK_JWT_FILE` is optional and, when
