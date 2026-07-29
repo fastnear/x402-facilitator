@@ -4,6 +4,7 @@ set -euo pipefail
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 metrics_script="$repo_root/deploy/monitoring/x402-near-metrics.sh"
 metrics_unit="$repo_root/deploy/monitoring/x402-near-metrics.service"
+canary_script="$repo_root/deploy/monitoring/x402-canary.sh"
 retired_logrotate="$repo_root/deploy/logrotate/x402-near-facilitator"
 
 fail() {
@@ -12,6 +13,7 @@ fail() {
 }
 
 bash -n "$metrics_script"
+bash -n "$canary_script"
 if grep -Eq '^[[:space:]]*OnFailure=' "$metrics_unit"; then
   fail "metrics unit must rely on debounced missing-data alarms"
 fi
@@ -237,4 +239,251 @@ if grep -Fq 'provider-credential-' "$failed_stdout" "$failed_stderr"; then
   fail "failed RPC URL escaped into metrics output"
 fi
 
-echo "monitoring RPC fallback, redaction, dead-man, and packaging checks passed"
+# The merchant canary must stay a bounded, unpaid probe. Its mocked transport
+# makes the happy path, dependency failure, and a policy-shaped secret
+# deterministic without reaching public endpoints or signing a payment.
+canary_fixture_dir="$work/canary-fixtures"
+canary_credential_dir="$work/canary-credentials"
+canary_bin="$work/canary-bin"
+mkdir -p \
+  "$canary_fixture_dir" \
+  "$canary_credential_dir/mainnet" \
+  "$canary_credential_dir/testnet" \
+  "$canary_credential_dir/base" \
+  "$canary_bin"
+for network in mainnet testnet base; do
+  printf '%s\n' '{}' >"$canary_fixture_dir/$network-verify.json"
+  printf '%s\n' 'canary-api-key-must-not-escape' \
+    >"$canary_credential_dir/$network/api-key"
+done
+
+canary_verify_near='{"isValid":false,"invalidReason":"invalid_exact_near_payload_signed_delegate_action"}'
+canary_verify_base='{"isValid":false,"invalidReason":"insufficient_funds"}'
+canary_demo_mainnet='{"accepts":[{"network":"near:mainnet"}]}'
+canary_demo_testnet='{"accepts":[{"network":"near:testnet"}]}'
+canary_demo_base='{"accepts":[{"network":"eip155:8453"}]}'
+canary_ready_healthy='{"ready":true,"checks":{"rpc":"ready","facilitator":"ready","payment":"ready"}}'
+canary_ready_string='{"ready":"true","checks":{"rpc":"ready","facilitator":"ready","payment":"ready"},"debug":"merchant-response-secret"}'
+canary_ready_missing_payment='{"ready":true,"checks":{"rpc":"ready","facilitator":"ready"}}'
+canary_near_policy='{"x402Version":2,"accepts":[{"scheme":"exact","network":"near:mainnet","asset":"17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1","payTo":"count.mike.near","amount":"1000","extra":{}}]}'
+canary_base_policy='{"x402Version":2,"accepts":[{"scheme":"exact","network":"eip155:8453","asset":"0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913","payTo":"0x7Ff46ab88688D528bCE3e59c470240c6901cF88c","amount":"1000","extra":{"name":"USD Coin","version":"2"}}]}'
+canary_base_policy_extra='{"x402Version":2,"accepts":[{"scheme":"exact","network":"eip155:8453","asset":"0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913","payTo":"0x7Ff46ab88688D528bCE3e59c470240c6901cF88c","amount":"1000","extra":{"name":"USD Coin","version":"2","unexpected":"merchant-response-secret"}}]}'
+canary_base_policy_two_accepts=$(printf '%s' "$canary_base_policy" |
+  jq -c '.accepts += [.accepts[0]]')
+canary_demo_mainnet_header=$(printf '%s' "$canary_demo_mainnet" | base64 | tr -d '\n')
+canary_demo_testnet_header=$(printf '%s' "$canary_demo_testnet" | base64 | tr -d '\n')
+canary_demo_base_header=$(printf '%s' "$canary_demo_base" | base64 | tr -d '\n')
+canary_near_policy_header=$(printf '%s' "$canary_near_policy" | base64 | tr -d '\n')
+canary_base_policy_header=$(printf '%s' "$canary_base_policy" | base64 | tr -d '\n')
+canary_base_policy_extra_header=$(printf '%s' "$canary_base_policy_extra" | base64 | tr -d '\n')
+canary_base_policy_two_accepts_header=$(printf '%s' "$canary_base_policy_two_accepts" | base64 | tr -d '\n')
+
+printf '%s\n' \
+  '#!/bin/bash' \
+  'set -eu' \
+  'output=' \
+  'headers=' \
+  'url=' \
+  'max_time=' \
+  'connect_time=' \
+  'while [ "$#" -gt 0 ]; do' \
+  '  case "$1" in' \
+  '    -o)' \
+  '      output=${2-}' \
+  '      shift 2' \
+  '      ;;' \
+  '    -D)' \
+  '      headers=${2-}' \
+  '      shift 2' \
+  '      ;;' \
+  '    -w)' \
+  '      shift 2' \
+  '      ;;' \
+  '    --max-time)' \
+  '      max_time=${2-}' \
+  '      shift 2' \
+  '      ;;' \
+  '    --connect-timeout)' \
+  '      connect_time=${2-}' \
+  '      shift 2' \
+  '      ;;' \
+  '    -H)' \
+  '      case ${2-} in' \
+  '        PAYMENT-SIGNATURE:*) exit 97 ;;' \
+  '      esac' \
+  '      shift 2' \
+  '      ;;' \
+  '    -X | --data | --data-binary)' \
+  '      shift 2' \
+  '      ;;' \
+  '    http://* | https://*)' \
+  '      url=$1' \
+  '      shift' \
+  '      ;;' \
+  '    *)' \
+  '      shift' \
+  '      ;;' \
+  '  esac' \
+  'done' \
+  'write_body() {' \
+  '  [ "$output" = /dev/null ] || printf "%s\\n" "$1" >"$output"' \
+  '}' \
+  'write_header() {' \
+  '  [ -z "$headers" ] || printf "PAYMENT-REQUIRED: %s\\r\\n" "$1" >"$headers"' \
+  '}' \
+  'case "$url" in' \
+  '  https://merchant-near.mikedotexe.com/* | https://merchant-base.mikedotexe.com/*)' \
+  '    [ "$max_time" = 20 ] && [ "$connect_time" = 5 ] || exit 98' \
+  '    ;;' \
+  'esac' \
+  'case "$url" in' \
+  '  https://x402.mikedotexe.com/verify | https://test.x402.mikedotexe.com/verify)' \
+  '    write_body "$CANARY_VERIFY_NEAR"' \
+  '    printf 200' \
+  '    ;;' \
+  '  https://base.x402.mikedotexe.com/verify)' \
+  '    write_body "$CANARY_VERIFY_BASE"' \
+  '    printf 200' \
+  '    ;;' \
+  '  https://x402-demo.mikedotexe.com/work)' \
+  '    write_header "$CANARY_DEMO_MAINNET_HEADER"' \
+  '    printf 402' \
+  '    ;;' \
+  '  https://x402-demo-test.mikedotexe.com/work)' \
+  '    write_header "$CANARY_DEMO_TESTNET_HEADER"' \
+  '    printf 402' \
+  '    ;;' \
+  '  https://x402-demo-base.mikedotexe.com/work)' \
+  '    write_header "$CANARY_DEMO_BASE_HEADER"' \
+  '    printf 402' \
+  '    ;;' \
+  '  https://merchant-near.mikedotexe.com/readyz)' \
+  '    write_body "$CANARY_READY_HEALTHY"' \
+  '    printf 200' \
+  '    ;;' \
+  '  https://merchant-base.mikedotexe.com/readyz)' \
+  '    if [ "${CANARY_SCENARIO:-success}" = base-ready-string ]; then' \
+  '      write_body "$CANARY_READY_STRING"' \
+  '    elif [ "${CANARY_SCENARIO:-success}" = base-payment-missing ]; then' \
+  '      write_body "$CANARY_READY_MISSING_PAYMENT"' \
+  '    else' \
+  '      write_body "$CANARY_READY_HEALTHY"' \
+  '    fi' \
+  '    printf 200' \
+  '    ;;' \
+  '  https://merchant-near.mikedotexe.com/v1/evidence/account)' \
+  '    write_header "$CANARY_NEAR_POLICY_HEADER"' \
+  '    printf 402' \
+  '    ;;' \
+  '  https://merchant-base.mikedotexe.com/v1/evidence/account)' \
+  '    if [ "${CANARY_SCENARIO:-success}" = base-extra-field ]; then' \
+  '      write_header "$CANARY_BASE_POLICY_EXTRA_HEADER"' \
+  '    elif [ "${CANARY_SCENARIO:-success}" = base-two-accepts ]; then' \
+  '      write_header "$CANARY_BASE_POLICY_TWO_ACCEPTS_HEADER"' \
+  '    else' \
+  '      write_header "$CANARY_BASE_POLICY_HEADER"' \
+  '    fi' \
+  '    printf 402' \
+  '    ;;' \
+  '  *)' \
+  '    exit 2' \
+  '    ;;' \
+  'esac' >"$canary_bin/curl"
+printf '%s\n' \
+  '#!/bin/bash' \
+  'set -eu' \
+  'printf "%s\\n" "$*" >>"$CANARY_AWS_CALLS"' >"$canary_bin/aws"
+chmod 0755 "$canary_bin/curl" "$canary_bin/aws"
+
+run_canary() {
+  local scenario=$1 stdout=$2 stderr=$3 aws_calls=$4
+  CANARY_SCENARIO="$scenario" \
+    CANARY_AWS_CALLS="$aws_calls" \
+    CANARY_VERIFY_NEAR="$canary_verify_near" \
+    CANARY_VERIFY_BASE="$canary_verify_base" \
+    CANARY_DEMO_MAINNET_HEADER="$canary_demo_mainnet_header" \
+    CANARY_DEMO_TESTNET_HEADER="$canary_demo_testnet_header" \
+    CANARY_DEMO_BASE_HEADER="$canary_demo_base_header" \
+    CANARY_READY_HEALTHY="$canary_ready_healthy" \
+    CANARY_READY_STRING="$canary_ready_string" \
+    CANARY_READY_MISSING_PAYMENT="$canary_ready_missing_payment" \
+    CANARY_NEAR_POLICY_HEADER="$canary_near_policy_header" \
+    CANARY_BASE_POLICY_HEADER="$canary_base_policy_header" \
+    CANARY_BASE_POLICY_EXTRA_HEADER="$canary_base_policy_extra_header" \
+    CANARY_BASE_POLICY_TWO_ACCEPTS_HEADER="$canary_base_policy_two_accepts_header" \
+    X402_CANARY_FIXTURE_DIR="$canary_fixture_dir" \
+    X402_CANARY_CREDENTIAL_DIR="$canary_credential_dir" \
+    PATH="$canary_bin:$PATH" \
+    bash "$canary_script" >"$stdout" 2>"$stderr"
+}
+
+canary_success_stdout="$work/canary-success.stdout"
+canary_success_stderr="$work/canary-success.stderr"
+canary_success_aws="$work/canary-success.aws"
+: >"$canary_success_aws"
+run_canary success "$canary_success_stdout" "$canary_success_stderr" \
+  "$canary_success_aws"
+grep -Fq 'MerchantApiOk network=mainnet value=1' "$canary_success_stdout" ||
+  fail "healthy NEAR merchant policy did not publish success"
+grep -Fq 'MerchantApiOk network=base value=1' "$canary_success_stdout" ||
+  fail "healthy Base merchant policy and EIP-712 domain did not publish success"
+grep -Fq -- '--metric-name MerchantApiOk' "$canary_success_aws" ||
+  fail "merchant success did not publish its CloudWatch metric"
+
+canary_ready_failure_stdout="$work/canary-ready-failure.stdout"
+canary_ready_failure_stderr="$work/canary-ready-failure.stderr"
+canary_ready_failure_aws="$work/canary-ready-failure.aws"
+: >"$canary_ready_failure_aws"
+if run_canary base-ready-string "$canary_ready_failure_stdout" \
+  "$canary_ready_failure_stderr" "$canary_ready_failure_aws"; then
+  fail "string readiness must not satisfy the merchant readiness gate"
+fi
+grep -Fq 'MerchantApiOk network=mainnet value=1' "$canary_ready_failure_stdout" ||
+  fail "a Base readiness failure stopped the independent NEAR merchant probe"
+grep -Fq 'MerchantApiOk network=base value=0' "$canary_ready_failure_stdout" ||
+  fail "invalid Base readiness did not publish MerchantApiOk=0"
+grep -Fq 'readiness check failed (status=200)' "$canary_ready_failure_stderr" ||
+  fail "Base readiness failure was not classified safely"
+
+canary_payment_failure_stdout="$work/canary-payment-failure.stdout"
+canary_payment_failure_stderr="$work/canary-payment-failure.stderr"
+canary_payment_failure_aws="$work/canary-payment-failure.aws"
+: >"$canary_payment_failure_aws"
+if run_canary base-payment-missing "$canary_payment_failure_stdout" \
+  "$canary_payment_failure_stderr" "$canary_payment_failure_aws"; then
+  fail "missing payment initialization must not satisfy merchant readiness"
+fi
+grep -Fq 'MerchantApiOk network=base value=0' "$canary_payment_failure_stdout" ||
+  fail "missing payment initialization did not publish MerchantApiOk=0"
+
+canary_policy_failure_stdout="$work/canary-policy-failure.stdout"
+canary_policy_failure_stderr="$work/canary-policy-failure.stderr"
+canary_policy_failure_aws="$work/canary-policy-failure.aws"
+: >"$canary_policy_failure_aws"
+if run_canary base-extra-field "$canary_policy_failure_stdout" \
+  "$canary_policy_failure_stderr" "$canary_policy_failure_aws"; then
+  fail "Base EIP-712 domain with an unexpected field must fail closed"
+fi
+grep -Fq 'MerchantApiOk network=base value=0' "$canary_policy_failure_stdout" ||
+  fail "invalid Base payment policy did not publish MerchantApiOk=0"
+grep -Fq 'unexpected unpaid challenge policy (status=402)' \
+  "$canary_policy_failure_stderr" ||
+  fail "Base payment-policy failure was not classified safely"
+
+canary_two_accepts_stdout="$work/canary-two-accepts.stdout"
+canary_two_accepts_stderr="$work/canary-two-accepts.stderr"
+canary_two_accepts_aws="$work/canary-two-accepts.aws"
+: >"$canary_two_accepts_aws"
+if run_canary base-two-accepts "$canary_two_accepts_stdout" \
+  "$canary_two_accepts_stderr" "$canary_two_accepts_aws"; then
+  fail "a second x402 acceptance must fail the canonical merchant policy gate"
+fi
+grep -Fq 'MerchantApiOk network=base value=0' "$canary_two_accepts_stdout" ||
+  fail "multiple Base acceptances did not publish MerchantApiOk=0"
+if grep -Fq 'merchant-response-secret\|canary-api-key-must-not-escape' \
+  "$canary_ready_failure_stdout" "$canary_ready_failure_stderr" \
+  "$canary_policy_failure_stdout" "$canary_policy_failure_stderr"; then
+  fail "merchant response or credential detail escaped canary output"
+fi
+
+echo "monitoring RPC fallback, redaction, dead-man, and merchant canary checks passed"

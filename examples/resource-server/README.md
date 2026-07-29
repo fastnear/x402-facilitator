@@ -35,8 +35,21 @@ exact payee authorized for your facilitator API client.
 | `ASSET` | canonical testnet USDC account | canonical Base Sepolia USDC address |
 | `PAY_TO` | exact NEAR recipient | exact EVM recipient |
 | `AMOUNT` | `1000` | `1000` |
+| `ASSET_EIP712_NAME` | unset | `USDC` on Base Sepolia; `USD Coin` on Base mainnet |
+| `ASSET_EIP712_VERSION` | unset | `2` |
 | `PORT` | `4021` | `4021` |
 | `RESOURCE_URL` | public HTTPS `/work` URL | public HTTPS `/work` URL |
+
+Canonical EVM profiles are:
+
+| Network | Circle USDC asset | EIP-712 name / version |
+| --- | --- | --- |
+| `eip155:84532` (Base Sepolia) | `0x036CbD53842c5426634e7929541eC2318f3dCF7e` | `USDC` / `2` |
+| `eip155:8453` (Base mainnet) | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` | `USD Coin` / `2` |
+
+The EIP-712 name is the token contract's real domain name, not its display
+symbol. The public reference deployment has Base mainnet, but does not
+currently claim a live Base Sepolia instance.
 
 The API key must be stored in a mode-0600 regular file:
 
@@ -51,9 +64,13 @@ export PORT=4021
 npm start
 ```
 
+For EVM, also export the matching `ASSET_EIP712_NAME` and
+`ASSET_EIP712_VERSION` from the table above.
+
 `FACILITATOR_API_KEY_FILE` must contain exactly one newline-terminated key. The
 service does not accept the key directly in an environment variable and does
-not log it.
+not log it. Provision a separate key for every deployed resource-server
+instance and environment; never copy a production key into a test deployment.
 
 ## Exercise
 

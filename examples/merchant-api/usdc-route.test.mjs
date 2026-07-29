@@ -153,7 +153,7 @@ test("fails closed when the provider response conflicts with the requested route
   );
 });
 
-test("fails closed on malformed amounts and missing signed provenance", async () => {
+test("fails closed on malformed amounts and missing provider provenance", async () => {
   for (const fixture of [
     providerFixture({ quote: { amountOut: "0.998898" } }),
     providerFixture({ quote: { amountOut: "10", minAmountOut: "11" } }),

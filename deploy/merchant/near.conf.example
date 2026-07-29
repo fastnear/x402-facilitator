@@ -1,0 +1,14 @@
+# /etc/x402-merchant/near.conf — root-owned, mode 0640.
+# The dedicated facilitator API key is delivered separately through the
+# systemd LoadCredential directive.
+FACILITATOR_URL=https://x402.mikedotexe.com
+NETWORK=near:mainnet
+RPC_URL=https://rpc.mainnet.fastnear.com
+ASSET=17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1
+PAY_TO=count.mike.near
+RESOURCE_ORIGIN=https://merchant-near.mikedotexe.com
+AMOUNT=1000
+PORT=4034
+EXPLORER_BASE_URL=https://nearblocks.io
+CORS_ORIGINS=https://js.fastnear.com
+ONE_CLICK_PROVIDER_ORIGIN=https://1click.chaindefuser.com

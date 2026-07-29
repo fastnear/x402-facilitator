@@ -1,6 +1,6 @@
 [Unit]
 Description=x402 agent merchant API (%i)
-Documentation=https://github.com/fastnear/x402-near-facilitator
+Documentation=https://github.com/fastnear/x402-facilitator
 Wants=network-online.target
 After=network-online.target
 StartLimitIntervalSec=300

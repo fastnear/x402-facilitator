@@ -1,0 +1,138 @@
+import assert from "node:assert/strict";
+import {
+  chmodSync,
+  mkdtempSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+
+import {
+  NETWORK_PROFILES,
+  formatUsdc,
+  loadConfig,
+  readCredential,
+} from "./config.mjs";
+
+const PAYEES = {
+  "near:mainnet": "merchant.near",
+  "near:testnet": "merchant.testnet",
+  "eip155:8453": "0x1111111111111111111111111111111111111111",
+  "eip155:84532": "0x2222222222222222222222222222222222222222",
+};
+
+function environment(network, overrides = {}) {
+  return {
+    NETWORK: network,
+    FACILITATOR_URL: "https://facilitator.example",
+    FACILITATOR_API_KEY_FILE: "/credential",
+    RPC_URL: "https://rpc.example/v1?provider=test",
+    RESOURCE_ORIGIN: "https://merchant.example",
+    ASSET: NETWORK_PROFILES[network].asset,
+    PAY_TO: PAYEES[network],
+    ...overrides,
+  };
+}
+
+const credentialReader = () => "test-credential";
+
+test("loads each exact supported network profile", () => {
+  for (const [network, profile] of Object.entries(NETWORK_PROFILES)) {
+    const config = loadConfig(environment(network), { credentialReader });
+    assert.equal(config.network, network);
+    assert.equal(config.asset, profile.asset);
+    assert.equal(config.chainId, profile.chainId);
+    assert.equal(config.eip712Name, profile.eip712Name);
+    assert.equal(config.eip712Version, profile.eip712Version);
+    assert.equal(config.amount, "1000");
+    assert.equal(config.priceUsd, "0.001000");
+  }
+});
+
+test("rejects unsupported networks and noncanonical network fields", () => {
+  const invalid = [
+    environment("near:mainnet", { NETWORK: "near:custom" }),
+    environment("near:mainnet", { ASSET: "not-usdc" }),
+    environment("near:mainnet", { PAY_TO: "INVALID.NEAR" }),
+    environment("near:mainnet", { ASSET_EIP712_NAME: "USD Coin" }),
+    environment("eip155:8453", { PAY_TO: "0x1234" }),
+    environment("eip155:8453", { ASSET_EIP712_NAME: "USDC" }),
+    environment("eip155:8453", { ASSET_EIP712_VERSION: "1" }),
+  ];
+  for (const candidate of invalid) {
+    assert.throws(
+      () => loadConfig(candidate, { credentialReader }),
+      /NETWORK|ASSET|PAY_TO|EIP712/,
+    );
+  }
+});
+
+test("validates URLs, amount, and port before startup", () => {
+  const invalid = [
+    { FACILITATOR_URL: "http://facilitator.example" },
+    { FACILITATOR_URL: "https://user:secret@facilitator.example" },
+    { RESOURCE_ORIGIN: "https://merchant.example/path" },
+    { RPC_URL: "https://rpc.example/#fragment" },
+    { ONE_CLICK_PROVIDER_ORIGIN: "https://quotes.example/v1" },
+    { EXPLORER_BASE_URL: "javascript:alert(1)" },
+    { EXPLORER_BASE_URL: "https://basescan.org/?tracking=untrusted" },
+    { AMOUNT: "0" },
+    { AMOUNT: "1.0" },
+    { AMOUNT: "12345678901234567" },
+    { PORT: "0" },
+    { PORT: "65536" },
+    { PORT: "4031.5" },
+  ];
+  for (const overrides of invalid) {
+    assert.throws(
+      () => loadConfig(
+        environment("eip155:8453", overrides),
+        { credentialReader },
+      ),
+    );
+  }
+});
+
+test("formats atomic USDC without floating point conversion", () => {
+  assert.equal(formatUsdc("1"), "0.000001");
+  assert.equal(formatUsdc("1000"), "0.001000");
+  assert.equal(formatUsdc("1000000"), "1.000000");
+  assert.equal(formatUsdc("123456789"), "123.456789");
+  assert.throws(() => formatUsdc("1.5"), /positive atomic/);
+});
+
+test("reads an owner-only, bounded, single-line credential", t => {
+  const directory = mkdtempSync(join(tmpdir(), "x402-merchant-config-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const path = join(directory, "credential");
+  writeFileSync(path, "secret-value\n", { mode: 0o600 });
+  assert.equal(readCredential(path, "test credential"), "secret-value");
+
+  chmodSync(path, 0o640);
+  assert.throws(
+    () => readCredential(path, "test credential"),
+    /group or others/,
+  );
+});
+
+test("rejects credential symlinks, extra lines, whitespace, and oversized files", t => {
+  const directory = mkdtempSync(join(tmpdir(), "x402-merchant-config-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const target = join(directory, "target");
+  const link = join(directory, "link");
+  writeFileSync(target, "secret\n", { mode: 0o600 });
+  symlinkSync(target, link);
+  assert.throws(() => readCredential(link, "test credential"), /symbolic link/);
+
+  for (const [contents, pattern] of [
+    ["first\nsecond\n", /exactly one/],
+    [" secret\n", /surrounding whitespace/],
+    ["x".repeat(4097), /4096/],
+  ]) {
+    writeFileSync(target, contents, { mode: 0o600 });
+    assert.throws(() => readCredential(target, "test credential"), pattern);
+  }
+});

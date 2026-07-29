@@ -243,6 +243,7 @@ jobs:
           cache-dependency-path: |
             conformance/http-client/package-lock.json
             crates/x402-chain-near/fixtures/package-lock.json
+            examples/merchant-api/package-lock.json
             examples/resource-server/package-lock.json
 
       - name: Cache Cargo
@@ -297,11 +298,27 @@ jobs:
       - name: Audit official HTTP client dependency
         run: npm --prefix conformance/http-client audit --audit-level=high
 
-      - name: Check runnable NEAR resource workload
+      - name: Check runnable resource workloads
         run: |
           npm --prefix examples/resource-server ci
           npm --prefix examples/resource-server run check
           npm --prefix examples/resource-server audit --audit-level=high
+          npm --prefix examples/merchant-api ci
+          npm --prefix examples/merchant-api run check
+          npm --prefix examples/merchant-api audit --audit-level=high
+
+      - name: Validate merchant deployment assets
+        run: |
+          set -euo pipefail
+          test -x deploy/merchant/install-release.sh
+          test -x deploy/merchant/package-commit-release.sh
+          test -x deploy/merchant/promote-release.sh
+          test -x deploy/merchant/rollback-release.sh
+          sh -n deploy/merchant/install-release.sh
+          sh -n deploy/merchant/package-commit-release.sh
+          sh -n deploy/merchant/promote-release.sh
+          sh -n deploy/merchant/rollback-release.sh
+          systemd-analyze verify deploy/merchant/x402-merchant-api@.service
 
       - name: Lint OpenAPI
         run: npx --yes --package=@redocly/cli@1.34.5 redocly lint docs/openapi.yaml
@@ -312,15 +329,22 @@ jobs:
           work="$(mktemp -d)"
           trap 'rm -rf "$work"' EXIT
           mkdir -p "$work/conf.d" "$work/snippets" \
-            "$work/letsencrypt/live/x402.mikedotexe.com"
+            "$work/letsencrypt/live/x402.mikedotexe.com" \
+            "$work/letsencrypt/live/merchant-near.mikedotexe.com"
           cp deploy/nginx/x402-near-facilitator.conf "$work/conf.d/default.conf"
           cp deploy/nginx/x402-base.conf "$work/conf.d/base.conf"
           cp deploy/nginx/x402-base-sepolia.conf "$work/conf.d/base-sepolia.conf"
+          cp deploy/merchant/x402-merchant.conf "$work/conf.d/merchant.conf"
           cp deploy/nginx/x402-near-proxy.conf "$work/snippets/"
           openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
             -subj /CN=x402.mikedotexe.com \
             -keyout "$work/letsencrypt/live/x402.mikedotexe.com/privkey.pem" \
             -out "$work/letsencrypt/live/x402.mikedotexe.com/fullchain.pem" \
+            >/dev/null 2>&1
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+            -subj /CN=merchant-near.mikedotexe.com \
+            -keyout "$work/letsencrypt/live/merchant-near.mikedotexe.com/privkey.pem" \
+            -out "$work/letsencrypt/live/merchant-near.mikedotexe.com/fullchain.pem" \
             >/dev/null 2>&1
           docker run --rm \
             --entrypoint nginx \
@@ -436,11 +460,33 @@ jobs:
           install -m 0755 target/release/x402-near-facilitator "$stage/"
           install -m 0755 target/release/x402-near-admin "$stage/"
           cp -R migrations deploy docs "$stage/"
+          git archive --format=tar HEAD -- \
+            examples/resource-server \
+            examples/merchant-api |
+            tar -xf - -C "$stage"
           cp LICENSE NOTICE README.md "$stage/"
 
           diff -qr migrations "$stage/migrations"
           diff -qr deploy "$stage/deploy"
           diff -qr docs "$stage/docs"
+          test ! -e "$stage/examples/resource-server/node_modules"
+          test ! -e "$stage/examples/merchant-api/node_modules"
+          if find "$stage/examples" ! -type f ! -type d -print -quit |
+            grep -q .; then
+            echo "error: release examples contain a link or special file" >&2
+            exit 1
+          fi
+
+          source_examples_manifest="$(mktemp)"
+          git ls-files -z -- \
+            examples/resource-server \
+            examples/merchant-api |
+            LC_ALL=C sort -z |
+            xargs -0 sha256sum >"$source_examples_manifest"
+          (
+            cd "$stage"
+            sha256sum --check "$source_examples_manifest" >/dev/null
+          )
 
           (
             cd "$stage"
@@ -450,8 +496,10 @@ jobs:
             find docs -type f -print0 |
               LC_ALL=C sort -z |
               xargs -0 sha256sum >docs-assets.sha256
+            cp "$source_examples_manifest" examples-assets.sha256
             sha256sum --check deploy-assets.sha256 >/dev/null
             sha256sum --check docs-assets.sha256 >/dev/null
+            sha256sum --check examples-assets.sha256 >/dev/null
           )
 
           echo "directory=${name}" >>"$GITHUB_OUTPUT"
@@ -1011,6 +1059,7 @@ jobs:
             cd "$archive_root"
             sha256sum --check deploy-assets.sha256
             sha256sum --check docs-assets.sha256
+            sha256sum --check examples-assets.sha256
           )
           cmp "dist/${NATIVE_SBOM}" "$archive_root/SBOM.cdx.json"
 

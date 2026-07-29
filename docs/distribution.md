@@ -1,14 +1,17 @@
 # Distribution: registry submissions
 
-Status (2026-07-27): the original x402 Foundation entry **merged** as #2941,
+Status (2026-07-28): the original x402 Foundation entry **merged** as #2941,
 and its NEAR-and-Base follow-up **merged** as #2960.
 awesome-agentic-commerce #510, x402facilitators #15, Pay.sh #1020, and
-Gold-402 #64 remain open. The
-x402-list submission is pending manual review, and the Base demo resource is
-registered on x402scan. NEAR discovery remains tracked in x402scan #1040.
+Gold-402 #64 remain open. x402-list declined the facilitator pending
+independently attributable settlement activity; the implementation and
+identity checks passed. The Base demo resource is registered on x402scan.
+NEAR discovery remains tracked in x402scan #1040.
 v0.5.3 is deployed across the three live reference instances; its public
 landing pages and Base `payment-identifier` advertisement are visible in the
 [dated rollout evidence](evidence/2026-07-27-v053-rpc-readiness-rollout.md).
+The registry decision and evidence gates are recorded in the
+[2026-07-28 review](evidence/2026-07-28-x402-list-review.md).
 
 ## Readiness facts registries key off
 
@@ -180,7 +183,7 @@ The facilitator service crate remains application-only.
 - Open the PR from
   <https://github.com/near/awesome-near/compare/main...mikedotexe:awesome-near:x402-near-facilitator-listing>
 
-### 8. x402-list.com — facilitator registry (pending review)
+### 8. x402-list.com — facilitator registry (adoption gate)
 
 - Submit through <https://x402-list.com/submit> or
   `POST https://x402-list.com/api/v1/submit`.
@@ -193,13 +196,74 @@ The facilitator service crate remains application-only.
   [`registry/x402-list-submission.json`](registry/x402-list-submission.json).
   It was revalidated against the live OpenAPI immediately before submission.
 - **Submitted once on 2026-07-26:** ID
-  `925e62da-75e7-49f5-adca-57762b835966`, status `pending`. The automatic
-  Base probe found the submitted settler with four transactions and no
-  errors.
+  `925e62da-75e7-49f5-adca-57762b835966`. The automatic Base probe found the
+  submitted settler with four transactions and no errors.
 - The body declares both `base` and `near`; the NEAR named account is in
   `notes` because the automatic address probe accepts EVM and Solana formats.
-  Every entry is manually reviewed. Do not resubmit while this review is
-  pending.
+  Every entry is manually reviewed.
+- **Declined on 2026-07-28:** the registry verified the implementation,
+  evidence, and operator identity, but found no independently attributable
+  settlement activity. Its Base view showed four `$0.001` transfers with
+  canary-shaped payer histories; NEAR is outside its measurement registry.
+  See the [dated review](evidence/2026-07-28-x402-list-review.md).
+
+#### Service submission
+
+The Base merchant evidence API is a separate service-discovery candidate:
+
+- service: **Base x402 Merchant Evidence API**;
+- URL and website: <https://merchant-base.mikedotexe.com/>;
+- category: **Blockchain**;
+- discovery: `/openapi.json`, `/llms.txt`, and `/.well-known/x402`;
+- first directory probe path:
+  `/v1/entities/0x0000000000000000000000000000000000000000` (the public,
+  paid `GET` entity operation, which returns a canonical 402 without a
+  payment); the OpenAPI and Bazaar metadata advertise the additional paid
+  `POST /v1/evidence/*`, `POST /v1/activity/search`, and
+  `POST /v1/routes/usdc/quote` operations.
+- payment: canonical Base mainnet USDC, fixed `1000` atomic units.
+- description: paid, finality-aware Base account/transaction evidence,
+  bounded activity lookup, and dry Base-USDC-to-NEAR-USDC route quotes.
+
+Submit it only after the merchant changes are merged, promoted from that
+merged commit, and the unpaid production regression passes. Use the service
+submission form or API fields `url`, `email`, `service_name`, `description`,
+`website_url`, `category`, `endpoints`, and `notes`. Confirm the intended
+email immediately before sending and do not commit it in a reusable template.
+The first service submission is expected to be free; stop rather than pay if
+the service unexpectedly requests a fee. Record the response in a new dated
+evidence document.
+
+This operator-owned service can attract organic buyers, but its own payments
+do not establish an independent merchant for facilitator review.
+
+#### Independent Base pilot
+
+Re-engage the known external integrator only through the operator's existing
+private channel. Before provisioning anything, require a public HTTPS
+resource-server URL, an independently controlled Base recipient, expected
+usage, and an operational contact. Create one dedicated Base mainnet client
+with exact canonical USDC and recipient policy, default limits of 60 verify
+requests and 10 settle requests per minute, and the existing conservative gas
+cap. Do not raise sponsorship limits without a separate review.
+
+Deliver the raw key once out of band. Confirm `/supported` and `/readyz`, then
+exercise `/verify` before settlement is enabled. The merchant, not the
+facilitator operator, must initiate and fund any real payments. Never fund
+payer wallets, self-pay, split payments, or raise prices to create registry
+volume.
+
+#### Facilitator resubmission
+
+Do not resubmit before August 3, 2026, the conservative end of the seven-day
+per-email cooldown. Even then, require an independent public Base
+resource-server and recipient, multiple organic settlements from established
+payer histories, and public evidence that ties the merchant and transactions
+together. Prefer activity above the reviewer's approximately `$2.80`
+comparison point, but do not treat it as a guaranteed threshold or alter
+prices to reach it. Omit unsupported claimed volume and describe NEAR
+settlements as supplementary because this registry does not currently measure
+them.
 
 ### 9. Pay.sh awesome-x402 — hosted-facilitator list (PR)
 

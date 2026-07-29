@@ -19,7 +19,7 @@ topic `arn:aws:sns:us-east-1:341982967115:x402-facilitator-alerts`.
 | `x402-near-alert.sh` | `/usr/local/bin/` | Publish a unit failure to SNS |
 | `x402-near-alert@.service` | `/etc/systemd/system/` | `OnFailure=` target for units that need immediate notification |
 | `certbot-onfailure.conf` | `/etc/systemd/system/certbot.service.d/x402-near-onfailure.conf` | Alert on failed certificate renewal |
-| `x402-canary.sh` | `/usr/local/bin/` | Synthetic `/verify` + demo `/work` canaries every 5 minutes |
+| `x402-canary.sh` | `/usr/local/bin/` | Synthetic `/verify`, demo `/work`, and unpaid merchant canaries every 5 minutes |
 | `x402-canary.{service,timer}` | `/etc/systemd/system/` | Drive the canaries (offset 2 minutes from the metrics timer) |
 | `x402-ebs-snapshot.sh` | `/usr/local/bin/` | Daily EBS snapshot + prune (installed but disabled until the IAM grant below) |
 | `x402-ebs-snapshot.{service,timer}` | `/etc/systemd/system/` | Drive the snapshot |
@@ -91,7 +91,14 @@ definitive rejection (tracked as a known defect).
 
 The API keys come from the demo credentials already on the host
 (`/etc/x402-demo/credentials/<instance>/api-key`); the canary introduces no
-new secrets.
+new secrets. The two merchant checks send valid account-evidence request
+bodies without a payment header. They first require `/readyz` to confirm the
+configured chain RPC, facilitator dependency, and x402 payment-server
+initialization, then require one canonical v2 `exact` acceptance with the exact
+production network, asset, payee, and 1,000-atomic-unit amount. NEAR must
+carry an empty `extra` object; the Base acceptance must carry only Circle
+USDC's `USD Coin`/`2` domain. They do not sign an authorization, invoke
+application work, or move funds.
 
 ## Instance-role policy
 
@@ -162,7 +169,30 @@ itself.
 | `x402-backup-missing` | `BackupSuccess` (Sum, 1-day period) | `< 1` | 1 × 1 day |
 | `x402-<inst>-verify-canary-failing` | `VerifyCanaryOk{Network=<inst>}` | `< 1` | 2 of 3 × 5 min |
 | `x402-demo-<inst>-work-canary-failing` | `DemoWorkOk{Network=<inst>}` | `< 1` | 2 of 3 × 5 min |
+| `x402-merchant-<inst>-api-canary-failing` | `MerchantApiOk{Network=<inst>}` | `< 1` | 2 of 3 × 5 min |
 | `x402-<inst>-readyz-flapping` | `HealthCheckPercentageHealthy` (Average, 1 h) | `< 90` % | 1 × 1 h |
+
+Install or refresh the two merchant alarms after the updated canary is active:
+
+```sh
+for network in mainnet base; do
+  aws cloudwatch put-metric-alarm \
+    --region us-east-1 \
+    --alarm-name "x402-merchant-${network}-api-canary-failing" \
+    --namespace x402near \
+    --metric-name MerchantApiOk \
+    --dimensions "Name=Network,Value=${network}" \
+    --statistic Minimum \
+    --period 300 \
+    --evaluation-periods 3 \
+    --datapoints-to-alarm 2 \
+    --threshold 1 \
+    --comparison-operator LessThanThreshold \
+    --treat-missing-data breaching \
+    --alarm-actions arn:aws:sns:us-east-1:341982967115:x402-facilitator-alerts \
+    --ok-actions arn:aws:sns:us-east-1:341982967115:x402-facilitator-alerts
+done
+```
 
 The metrics script emits one `CertDaysRemaining` datapoint per Let's
 Encrypt lineage; when a new lineage is issued (for example a demo
@@ -195,8 +225,11 @@ starts warning, and well before the hard-stop halts settlement.
 - Service unhealthy → the existing Route 53 `/readyz` health-check alarms.
 - Verify path broken while `/readyz` stays green (auth, parser, chain
   mechanism, RPC, or a crashed demo) → `VerifyCanaryOk` / `DemoWorkOk` drop
-  to 0 → canary alarms within 15 minutes; a stopped canary timer breaches
-  via missing data.
+  to 0 → canary alarms within 15 minutes.
+- Merchant origin, nginx response-header handling, payment middleware, or
+  configured production policy broken → `MerchantApiOk` drops to 0 without
+  making a payment. A stopped canary timer breaches every canary alarm via
+  missing data.
 - `/readyz` flapping without sustained failure → hourly
   `HealthCheckPercentageHealthy` alarms.
 - Demo endpoints down at the static layer → the Route 53 demo `/` checks.

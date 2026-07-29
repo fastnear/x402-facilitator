@@ -21,6 +21,75 @@ to NEAR Intents 1Click but never returns a deposit address or moves funds. The
 nginx configuration expects a single certificate lineage named
 `merchant-near.mikedotexe.com` covering both hostnames.
 
+Tagged native releases contain both `examples/resource-server/` and
+`examples/merchant-api/`, plus an `examples-assets.sha256` manifest. The
+merchant installer verifies that manifest, installs production dependencies
+and runs the application checks in a private staging directory, then publishes
+a root-owned immutable directory under `/opt/x402-merchant/releases/`.
+
+An immediate post-merge deployment does not require an unrelated facilitator
+release. From a clean checkout whose `HEAD` and fetched `origin/main` are the
+same merged commit, package the exact Git object:
+
+```sh
+commit=$(git rev-parse HEAD)
+mkdir -p dist/merchant
+deploy/merchant/package-commit-release.sh "$commit" dist/merchant
+```
+
+The packager uses `git archive`, so untracked files and `node_modules` cannot
+enter the bundle. It produces `x402-merchant-git-$commit.tar.gz` and an exact
+SHA-256 sidecar. Transfer those two files and the checked-in merchant deployment
+scripts over the operator's authenticated channel. Install the scripts
+root-owned before invoking them, then install and select the immutable commit:
+
+```sh
+release_id="git-$commit"
+sudo install -d -m 0755 /usr/local/libexec/x402-merchant
+sudo install -o root -g root -m 0755 \
+  deploy/merchant/install-release.sh \
+  deploy/merchant/promote-release.sh \
+  deploy/merchant/rollback-release.sh \
+  /usr/local/libexec/x402-merchant/
+sudo /usr/local/libexec/x402-merchant/install-release.sh \
+  "$release_id" \
+  "x402-merchant-$release_id.tar.gz" \
+  "x402-merchant-$release_id.tar.gz.sha256"
+```
+
+The installer copies the untrusted inputs into a root-only staging directory,
+checks the exact filename and one-line checksum, rejects unexpected paths,
+links, special files, and bundled dependencies, runs the locked application
+checks, and only then publishes the release directory.
+
+For an upgrade of an already live instance, use this unpaid gate one instance
+at a time. `release_id` must be `git-$commit` from the merged `origin/main`
+SHA above. The pointer check therefore verifies the exact deployed commit
+without relying on an editable checkout.
+
+```sh
+# First prove the currently serving immutable release is healthy.
+npm --prefix /opt/x402-merchant/current-near run regression
+
+# Move only NEAR, then restart the process that still has the old code mapped.
+sudo /usr/local/libexec/x402-merchant/promote-release.sh near "$release_id"
+sudo systemctl restart x402-merchant-api@near
+sudo systemctl is-active --quiet x402-merchant-api@near
+test "$(readlink -f /opt/x402-merchant/current-near)" = \
+  "/opt/x402-merchant/releases/$release_id"
+curl --fail --silent --show-error https://merchant-near.mikedotexe.com/readyz |
+  jq -e '.ready == true and .checks.rpc == "ready" and .checks.facilitator == "ready" and .checks.payment == "ready"'
+npm --prefix /opt/x402-merchant/current-near run regression
+sudo journalctl -u x402-merchant-api@near --since "-5 min" --no-pager
+```
+
+Repeat the same sequence for `base`, replacing `near` with `base` and
+`merchant-near.mikedotexe.com` with `merchant-base.mikedotexe.com`. Do not
+promote the second instance until the first post-promotion readiness,
+regression, pointer, and journal checks are satisfactory. For a first
+installation there is no pre-promotion release to test; enable each unit after
+its pointer is selected, then run the same post-promotion checks.
+
 ## Operational sequence
 
 1. Create the two Route 53 A/AAAA records and preview the change batch.
@@ -28,17 +97,46 @@ nginx configuration expects a single certificate lineage named
 3. Create `x402-merchant-near` and `x402-merchant-base` users and credential
    directories.
 4. Create dedicated facilitator clients and exact payee policies.
-5. Install non-secret process settings in root-owned, mode-0640
-   `/etc/x402-merchant/near.conf` and `/etc/x402-merchant/base.conf`. Keep all
-   keys out of these files and deliver them only through `LoadCredential`.
-6. Install the application release and run `npm ci --omit=dev`.
-7. Install the systemd unit and nginx site, validate both, then enable the two
+5. Copy `near.conf.example` and `base.conf.example` to root-owned, mode-0640
+   `/etc/x402-merchant/near.conf` and `/etc/x402-merchant/base.conf`. Review
+   every public setting against the intended deployment. Keep all keys out of
+   these files and deliver them only through `LoadCredential`.
+6. For a later tagged rollout, install a previously verified facilitator
+   release's merchant application:
+
+   ```sh
+   sudo /opt/x402-near-facilitator/releases/vX.Y.Z/deploy/merchant/install-release.sh vX.Y.Z
+   ```
+
+7. Atomically select that immutable release for each process:
+
+   ```sh
+   sudo /opt/x402-near-facilitator/releases/vX.Y.Z/deploy/merchant/promote-release.sh near vX.Y.Z
+   sudo /opt/x402-near-facilitator/releases/vX.Y.Z/deploy/merchant/promote-release.sh base vX.Y.Z
+   ```
+
+   Promotion changes only the `current-near` or `current-base` symlink. It
+   deliberately does not restart a process, so the per-instance restart and
+   post-promotion unpaid gate above are mandatory for an upgrade.
+8. Install the systemd unit and nginx site, validate both, then enable the two
    merchant services and reload nginx.
-8. Run `npm run regression` from the release to verify both public origins,
+9. Run `npm run regression` from the release to verify both public origins,
    discovery schemas, CORS, and unpaid x402 challenges without signing or
-   broadcasting anything. Then verify paid flows. A funded test
-   must display the network, asset, amount, payer, payee, relayer/signer, and
-   maximum sponsored gas immediately before broadcast.
+   broadcasting anything. This rollout stops at that unpaid gate. Do not run
+   `npm run proof` as a promotion or deployment check.
+
+For rollback, select an already-installed prior version, restart only the
+affected instance, and rerun the unpaid regression gate:
+
+```sh
+sudo /opt/x402-near-facilitator/releases/vX.Y.Z/deploy/merchant/rollback-release.sh near vPREVIOUS
+sudo systemctl restart x402-merchant-api@near
+npm --prefix /opt/x402-merchant/current-near run regression
+```
+
+The rollback tool refuses an uninstalled target, a non-root-owned or writable
+release, an unsafe pointer, or a target whose server entrypoint does not parse.
+Use the same sequence with `base` for the Base instance.
 
 Set `CORS_ORIGINS` to the exact production browser origins that may invoke the
 merchant, for example `https://js.fastnear.com`. Do not use `*`. Verify an
@@ -46,9 +144,18 @@ allowed OPTIONS request returns 204 without payment and exposes the canonical
 x402 request/response headers; verify an unlisted origin receives 403 on
 preflight.
 
-For repeatable paid-flow evidence, create a per-network directory under
+## Optional paid proof — separate authorization required
+
+Paid proof is not part of deployment, promotion, rollback, or the unpaid
+regression gate above. This guide authorizes no funded broadcast. If evidence
+is needed later, obtain a new human confirmation immediately before each
+broadcast; it must show the network, asset contract and atomic amount, payer,
+recipient/payee, relayer or signer, and maximum sponsored gas. A confirmation
+cannot be reused for a retry or a later proof.
+
+Only after that separate confirmation, create a per-network directory under
 `/var/lib/x402-merchant-proof/`, owned by the corresponding merchant service
-account and mode 0700. Run `npm run proof` as that account with
+account and mode 0700, then run `npm run proof` as that account with
 `PROOF_RESULT_FILE` inside the directory. The proof runner records a sanitized
 pre-broadcast checkpoint and final result atomically; it does not run as part
 of the long-lived API service and it never stores a signed payment

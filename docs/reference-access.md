@@ -24,7 +24,10 @@ The reference instances implement the `exact` scheme and prefer canonical
 x402 v2. They charge no facilitator fee; gas sponsorship is bounded by the
 client's policy and daily budget. NEAR accepts classic NEP-366 delegated
 NEP-141 transfers. Base accepts EOAs and deployed EIP-1271 wallets and rejects
-counterfactual EIP-6492 authorizations as unsupported.
+counterfactual EIP-6492 authorizations as unsupported. Base mainnet USDC's
+real EIP-712 domain is name **`USD Coin`**, version **`2`**; do not substitute
+the `USDC` token symbol. Base Sepolia uses a different contract and domain and
+is not a live public reference instance.
 
 Each base URL exposes:
 
@@ -44,9 +47,9 @@ Open a
 [reference-access request](https://github.com/fastnear/x402-facilitator/issues/new?template=access_request.yml)
 with:
 
-- the NEAR or Base network and environment;
-- a public description or repository for the resource server;
-- each exact USDC recipient account or address that must be allowed;
+- one or more active NEAR mainnet, NEAR testnet, or Base mainnet networks;
+- a public HTTPS resource-server URL, repository, or integration document;
+- each exact USDC recipient controlled by that resource-server operator;
 - expected verification and settlement rates, daily settlement count, and
   evaluation duration; and
 - whether the integration uses canonical x402 v2 or needs the gated EVM v1
@@ -62,16 +65,49 @@ Keys expire or are reviewed, may be revoked for abuse or inactivity, and are
 valid only for the exact network, canonical USDC asset, and recipient policy
 approved for that client.
 
+## Integrate end to end
+
+1. Inspect the chosen instance's `/supported` response and confirm its
+   canonical v2 network, signer, and `payment-identifier` extension. Require
+   `/readyz` to return HTTP 200 before an integration test.
+2. Submit the public access request. The operator creates a dedicated client
+   with exact network, canonical asset, and recipient rows. Every deployed
+   resource-server instance and environment gets a distinct client and key;
+   never share a production credential with staging or another merchant.
+3. Receive the raw key exactly once through an authenticated private channel.
+   Store it in a secret manager or mode-0600 credential file and configure the
+   resource server, not browser or payer code.
+4. Configure canonical payment requirements. For Base mainnet use network
+   `eip155:8453`, asset
+   `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`, and EIP-712 domain
+   `USD Coin` / `2`. Use the exact payee approved in the access request.
+5. Start with `/verify`, which never broadcasts. Confirm malformed and invalid
+   requests fail closed, then validate one real signed request before enabling
+   `/settle`.
+6. Enable settlement only after delivery idempotency is durable. Retry
+   transient facilitator errors with bounded backoff using the byte-identical
+   signed payload; never create a replacement payment for an indeterminate
+   submission.
+7. Monitor `/readyz`, bounded error metrics, settlement outcomes, and the
+   merchant's own delivery journal. Rotate or revoke the per-instance key if
+   it is exposed or the approved recipient changes.
+
+The runnable [Express resource server](../examples/resource-server/README.md)
+shows the environment contract, official middleware, bounded retries, and
+payment-identifier delivery behavior. The
+[OpenAPI contract](openapi.yaml) defines the exact facilitator request and
+response shapes.
+
 ## Use the credential
 
 Send the issued secret in `X-API-Key` on `/verify` and `/settle`.
 `Authorization: Bearer` is supported as an alternative. If both headers are
 present, they must carry the identical value.
 
-Store the secret in a secret manager or a mode-0600 credential file. Do not put
-it in source control, browser code, logs, command-line arguments, screenshots,
-or issue text. The key authenticates the resource server to the facilitator; it
-is not a payer credential.
+Do not put the key in source control, browser code, logs, command-line
+arguments, screenshots, or issue text. It authenticates one resource-server
+instance to the facilitator; it is not a payer credential and must not be
+copied into payer software.
 
 Operators and self-hosters should follow the full
 [API-key administration policy](api-keys.md). Teams that need independent

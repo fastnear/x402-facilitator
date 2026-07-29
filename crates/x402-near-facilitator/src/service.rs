@@ -65,39 +65,6 @@ use crate::v1_compat::{self, WireVersion};
 
 const SERVICE_NAME: &str = "x402-near-facilitator";
 const RETRY_SECONDS: &str = "1";
-const LANDING_PAGE: &str = concat!(
-    r#"<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Open-source x402 exact-payment facilitator for Circle USDC on NEAR and Base.">
-  <title>x402 facilitator for NEAR and Base</title>
-</head>
-<body>
-  <main>
-    <h1>x402 facilitator for NEAR and Base</h1>
-    <p>Open-source, API-key-gated settlement for x402 <code>exact</code>
-    payments in Circle USDC, with sponsored gas and durable recovery.</p>
-    <p>This hostname is one network-pinned facilitator instance. Inspect its
-    live protocol capabilities at <a href="/supported">/supported</a>.</p>
-    <p>The reference deployment serves NEAR mainnet, NEAR testnet, and Base
-    mainnet. Canonical x402 v2 is preferred; the scheme is <code>exact</code>,
-    the asset is Circle USDC, the facilitator fee is zero, and sponsored gas
-    is bounded by per-client policy.</p>
-    <ul>
-      <li><a href="https://github.com/fastnear/x402-facilitator">Source and documentation</a></li>
-      <li><a href="https://github.com/fastnear/x402-facilitator/blob/main/docs/reference-access.md">Request reference-instance access</a></li>
-      <li><a href="https://github.com/fastnear/x402-facilitator/security/policy">Security policy</a></li>
-    </ul>
-    <p>Service version <code>"#,
-    env!("CARGO_PKG_VERSION"),
-    r#"</code>.</p>
-  </main>
-</body>
-</html>
-"#
-);
 
 #[derive(Clone)]
 #[allow(missing_debug_implementations)]
@@ -401,8 +368,61 @@ struct ReadyChecks {
     relayer: &'static str,
 }
 
-async fn landing() -> Html<&'static str> {
-    Html(LANDING_PAGE)
+async fn landing(State(state): State<AppState>) -> Html<String> {
+    Html(landing_page(&state.config.network, &state.config.asset))
+}
+
+fn landing_page(network: &str, asset: &str) -> String {
+    let network = escape_html_text(network);
+    let asset = escape_html_text(asset);
+    format!(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Open-source x402 exact-payment facilitator for Circle USDC on NEAR and Base.">
+  <title>x402 facilitator for NEAR and Base</title>
+</head>
+<body>
+  <main>
+    <h1>x402 facilitator for NEAR and Base</h1>
+    <p>Open-source, API-key-gated settlement for x402 <code>exact</code>
+    payments in Circle USDC, with sponsored gas and durable recovery.</p>
+    <p>This hostname is pinned to one configured network and asset:</p>
+    <dl>
+      <dt>Network</dt><dd><code id="instance-network">{network}</code></dd>
+      <dt>Asset</dt><dd><code id="instance-asset">{asset}</code></dd>
+    </dl>
+    <p>Canonical x402 v2 is preferred, the scheme is <code>exact</code>, the
+    facilitator fee is zero, and sponsored gas is bounded by exact per-client
+    policy.</p>
+    <ul>
+      <li><a href="/supported">Live capabilities</a></li>
+      <li><a href="/readyz">Sanitized readiness</a></li>
+      <li><a href="https://github.com/fastnear/x402-facilitator/issues/new?template=access_request.yml">Request reference-instance access</a></li>
+      <li><a href="https://github.com/fastnear/x402-facilitator/blob/main/docs/reference-access.md">Integration and access guide</a></li>
+      <li><a href="https://github.com/fastnear/x402-facilitator/blob/main/docs/openapi.yaml">OpenAPI 3.1 contract</a></li>
+      <li><a href="https://github.com/fastnear/x402-facilitator/tree/main/examples/resource-server">Runnable resource-server example</a></li>
+      <li><a href="https://github.com/fastnear/x402-facilitator">Source and documentation</a></li>
+      <li><a href="https://github.com/fastnear/x402-facilitator/security/policy">Security policy</a></li>
+    </ul>
+    <p>The public reference deployment currently serves NEAR mainnet, NEAR
+    testnet, and Base mainnet. Base Sepolia is not a live reference instance.</p>
+    <p>Service version <code>{version}</code>.</p>
+  </main>
+</body>
+</html>
+"#,
+        version = env!("CARGO_PKG_VERSION"),
+    )
+}
+
+fn escape_html_text(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 async fn health() -> axum::Json<HealthResponse<'static>> {
@@ -3002,8 +3022,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn landing_page_identifies_the_service_and_public_next_steps() {
-        let response = landing().await.into_response();
+    async fn landing_page_identifies_the_instance_and_public_next_steps() {
+        let response = Html(landing_page(
+            "eip155:8453",
+            "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        ))
+        .into_response();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
             response
@@ -3018,9 +3042,24 @@ mod tests {
         let body = String::from_utf8_lossy(&bytes);
         assert!(body.contains("x402 facilitator for NEAR and Base"));
         assert!(body.contains("href=\"/supported\""));
+        assert!(body.contains("href=\"/readyz\""));
+        assert!(body.contains("issues/new?template=access_request.yml"));
         assert!(body.contains("docs/reference-access.md"));
+        assert!(body.contains("docs/openapi.yaml"));
+        assert!(body.contains("examples/resource-server"));
         assert!(body.contains("security/policy"));
+        assert!(body.contains(r#"id="instance-network">eip155:8453"#));
+        assert!(body.contains(r#"id="instance-asset">0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"#));
+        assert!(body.contains("Base Sepolia is not a live reference instance"));
         assert!(body.contains(VERSION));
+    }
+
+    #[test]
+    fn landing_page_escapes_instance_values() {
+        let body = landing_page("near:<mainnet>", "asset&account");
+        assert!(body.contains("near:&lt;mainnet&gt;"));
+        assert!(body.contains("asset&amp;account"));
+        assert!(!body.contains("near:<mainnet>"));
     }
 
     #[test]

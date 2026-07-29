@@ -1,5 +1,23 @@
 import { readFile } from "node:fs/promises";
 
+export const ACTIVITY_SEARCH_INPUT_SCHEMA = Object.freeze({
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    query: { type: "string" },
+    account: { type: "string" },
+    contract: { type: "string" },
+    limit: { type: "integer", minimum: 1, maximum: 100 },
+    cursor: { type: "string" },
+  },
+});
+
+export const ENTITY_IDENTIFIER_SCHEMA = Object.freeze({
+  type: "string",
+  minLength: 1,
+  maxLength: 256,
+});
+
 export class ActivityStore {
   constructor(records = []) {
     const ids = new Set();
@@ -19,19 +37,8 @@ export class ActivityStore {
   }
 
   search(input = {}) {
-    if (!input || typeof input !== "object" || Array.isArray(input)) {
-      throw invalidInput("request body must be an object");
-    }
-    const allowed = new Set(["query", "account", "contract", "limit", "cursor"]);
-    for (const key of Object.keys(input)) {
-      if (!allowed.has(key)) throw invalidInput(`unexpected request field: ${key}`);
-    }
-    const { query, account, contract, limit = 25, cursor } = input;
-    if (query !== undefined && typeof query !== "string") throw invalidInput("query must be a string");
-    if (account !== undefined && typeof account !== "string") throw invalidInput("account must be a string");
-    if (contract !== undefined && typeof contract !== "string") throw invalidInput("contract must be a string");
-    if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw invalidInput("limit must be an integer from 1 to 100");
-    if (cursor !== undefined && typeof cursor !== "string") throw invalidInput("cursor must be a string");
+    const validated = validateActivitySearchInput(input);
+    const { query, account, contract, limit, cursor } = validated;
     const normalizedQuery = typeof query === "string" ? query.toLowerCase() : undefined;
     const offset = decodeCursor(cursor);
     const filtered = this.records.filter(record => {
@@ -54,11 +61,12 @@ export class ActivityStore {
   }
 
   entity(identifier) {
+    const validated = validateEntityIdentifier(identifier);
     const match = this.records.filter(record =>
-      record.account === identifier || record.contract === identifier || record.entity === identifier,
+      record.account === validated || record.contract === validated || record.entity === validated,
     );
     return {
-      identifier,
+      identifier: validated,
       status: match.length === 0 ? "not_yet_indexed" : "indexed",
       records: match.slice(0, 100),
       index: {
@@ -68,6 +76,40 @@ export class ActivityStore {
       },
     };
   }
+}
+
+export function validateActivitySearchInput(input = {}) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    throw invalidInput("request body must be an object");
+  }
+  const allowed = new Set(Object.keys(ACTIVITY_SEARCH_INPUT_SCHEMA.properties));
+  for (const key of Object.keys(input)) {
+    if (!allowed.has(key)) throw invalidInput(`unexpected request field: ${key}`);
+  }
+  const { query, account, contract, limit = 25, cursor } = input;
+  if (query !== undefined && typeof query !== "string") throw invalidInput("query must be a string");
+  if (account !== undefined && typeof account !== "string") throw invalidInput("account must be a string");
+  if (contract !== undefined && typeof contract !== "string") throw invalidInput("contract must be a string");
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw invalidInput("limit must be an integer from 1 to 100");
+  if (cursor !== undefined && typeof cursor !== "string") throw invalidInput("cursor must be a string");
+  return {
+    query,
+    account,
+    contract,
+    limit,
+    cursor,
+  };
+}
+
+export function validateEntityIdentifier(identifier) {
+  if (
+    typeof identifier !== "string"
+    || identifier.length < ENTITY_IDENTIFIER_SCHEMA.minLength
+    || identifier.length > ENTITY_IDENTIFIER_SCHEMA.maxLength
+  ) {
+    throw invalidInput("identifier must be a nonempty string of at most 256 characters");
+  }
+  return identifier;
 }
 
 function invalidInput(message) {

@@ -41,6 +41,23 @@ SLA.
 | `eip155:8453` | `https://base.x402.mikedotexe.com` | v2; gated legacy v1 |
 | `eip155:84532` | configured target: `base-test.x402.mikedotexe.com` (not claimed live) | v2; gated legacy v1 |
 
+## Integrate with a reference instance
+
+Start by reading the target's public `/supported` and `/readyz` endpoints,
+then follow the [end-to-end access guide](docs/reference-access.md). Reference
+credentials are manually approved, restricted to an exact network, canonical
+USDC asset, and payee, and issued separately for every resource-server
+instance and environment. Open a
+[public access request](https://github.com/fastnear/x402-facilitator/issues/new?template=access_request.yml)
+only after you have an independently operated resource-server URL and payee;
+never include credentials or signed payments in the issue.
+
+The [runnable Express example](examples/resource-server/) shows official x402
+middleware, bounded retries, and delivery idempotency. Base mainnet
+integrations must use Circle USDC's real EIP-712 domain `USD Coin` / `2`.
+Base Sepolia is supported by the software but is not a live public reference
+instance.
+
 ## Deliberate scope
 
 - Scheme `exact` only; one pinned network and one canonical Circle USDC

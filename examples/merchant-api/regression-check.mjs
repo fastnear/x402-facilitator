@@ -74,6 +74,14 @@ export async function runRegressionCheck({
       assertSecurityHeaders(response, `${deployment.name} ${publicPath}`);
     }
 
+    const readiness = await checkedFetch(fetchImpl, `${deployment.origin}/readyz`);
+    assert.equal(readiness.status, 200, `${deployment.name} /readyz must return exactly 200`);
+    assertSecurityHeaders(readiness, `${deployment.name} /readyz`);
+    assert.deepEqual(await readiness.json(), {
+      ready: true,
+      checks: { rpc: "ready", facilitator: "ready", payment: "ready" },
+    }, `${deployment.name} /readyz dependencies must be ready`);
+
     const unknown = await checkedFetch(fetchImpl, `${deployment.origin}/v1/not-a-route`);
     assert.equal(unknown.status, 404, `${deployment.name} unknown routes must return 404`);
 
@@ -101,7 +109,7 @@ export async function runRegressionCheck({
     }
 
     await validateCors(fetchImpl, deployment);
-    output(`ok ${deployment.name}: discovery, 5 unpaid challenges, schemas, and CORS`);
+    output(`ok ${deployment.name}: readiness, discovery, 5 unpaid challenges, schemas, and CORS`);
   }
   output(`ok ${results.length} paid routes; no payment signature was created or sent`);
   return results;

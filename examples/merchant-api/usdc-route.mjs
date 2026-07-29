@@ -1,3 +1,10 @@
+import {
+  PATTERNS,
+  isAtomicUsdcAmount,
+  isEvmAddress,
+  isNearAccountId,
+} from "./evidence-input.mjs";
+
 export const BASE_USDC = Object.freeze({
   network: "eip155:8453",
   asset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
@@ -18,9 +25,37 @@ const DEFAULT_PROVIDER_ORIGIN = "https://1click.chaindefuser.com";
 const DEFAULT_SLIPPAGE_BASIS_POINTS = 100;
 const QUOTE_LIFETIME_MS = 5 * 60 * 1000;
 const PROVIDER_TIMEOUT_MS = 12 * 1000;
-const NEAR_ACCOUNT_PATTERN = /^(?=.{2,64}$)[a-z0-9]+(?:[._-][a-z0-9]+)*$/;
-const BASE_ADDRESS_PATTERN = /^0x[0-9a-fA-F]{40}$/;
-const ATOMIC_AMOUNT_PATTERN = /^[1-9][0-9]{0,15}$/;
+
+export const USDC_ROUTE_INPUT_SCHEMA = Object.freeze({
+  type: "object",
+  additionalProperties: false,
+  required: ["amountAtomic", "recipient", "refundTo"],
+  properties: {
+    amountAtomic: {
+      type: "string",
+      pattern: PATTERNS.atomicUsdcAmount,
+      description: "Base USDC amount in 6-decimal atomic units",
+    },
+    recipient: {
+      type: "string",
+      minLength: 2,
+      maxLength: 64,
+      pattern: PATTERNS.nearAccountId,
+      description: "Destination NEAR account id",
+    },
+    refundTo: {
+      type: "string",
+      pattern: PATTERNS.evmAddress,
+      description: "Base address for a failed-route refund",
+    },
+    slippageBasisPoints: {
+      type: "integer",
+      minimum: 0,
+      maximum: 1000,
+      default: 100,
+    },
+  },
+});
 
 export class UsdcRouteQuoteError extends Error {
   constructor(code, message, status = 503) {
@@ -43,7 +78,7 @@ export function createUsdcRouteQuoter({
 
   return {
     async quote(input) {
-      const normalized = normalizeInput(input);
+      const normalized = validateUsdcRouteInput(input);
       const deadline = new Date(now() + QUOTE_LIFETIME_MS).toISOString();
       const providerRequest = {
         dry: true,
@@ -104,7 +139,7 @@ export function createUsdcRouteQuoter({
   };
 }
 
-function normalizeInput(value) {
+export function validateUsdcRouteInput(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw invalidInput("request body must be an object");
   }
@@ -114,13 +149,13 @@ function normalizeInput(value) {
     if (!allowed.has(key)) throw invalidInput(`unexpected request field: ${key}`);
   }
 
-  if (typeof value.amountAtomic !== "string" || !ATOMIC_AMOUNT_PATTERN.test(value.amountAtomic)) {
+  if (!isAtomicUsdcAmount(value.amountAtomic)) {
     throw invalidInput("amountAtomic must be a positive USDC atomic-unit string of at most 16 digits");
   }
-  if (typeof value.recipient !== "string" || !NEAR_ACCOUNT_PATTERN.test(value.recipient)) {
+  if (!isNearAccountId(value.recipient)) {
     throw invalidInput("recipient must be a valid lowercase NEAR account id");
   }
-  if (typeof value.refundTo !== "string" || !BASE_ADDRESS_PATTERN.test(value.refundTo)) {
+  if (!isEvmAddress(value.refundTo)) {
     throw invalidInput("refundTo must be a 20-byte Base address");
   }
 
@@ -141,7 +176,7 @@ function normalizeProviderQuote(value, expectedRequest, quoteUrl) {
   const quote = value?.quote;
   const request = value?.quoteRequest;
   if (!quote || !request || typeof value.signature !== "string" || !value.signature) {
-    throw invalidQuote("The route provider response omitted signed quote metadata");
+    throw invalidQuote("The route provider response omitted quote provenance metadata");
   }
 
   const exactFields = [

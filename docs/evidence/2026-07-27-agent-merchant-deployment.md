@@ -196,6 +196,12 @@ refund address, deadline, and slippage fields before returning a normalized
 response. Conflicting, malformed, timed-out, and non-success provider
 responses fail closed.
 
+> Correction — 2026-07-29: "validates the provider's signed route" above
+> means validating the provider response's required fields and preserving its
+> supplied signature as provenance. The merchant does **not** claim
+> cryptographic verification of that signature because the provider has not
+> published a verification scheme for it.
+
 The first public challenge exposed an nginx integration defect:
 schema-complete Bazaar metadata produced a roughly 6.7 KB encoded
 `PAYMENT-REQUIRED` header, larger than the platform-default upstream response

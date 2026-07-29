@@ -35,10 +35,15 @@ import sys
 body = sys.stdin.read()
 assert "<title>x402 facilitator for NEAR and Base</title>" in body
 assert "href=\"/supported\"" in body
+assert "href=\"/readyz\"" in body
+assert "issues/new?template=access_request.yml" in body
 assert "docs/reference-access.md" in body
+assert "docs/openapi.yaml" in body
+assert "examples/resource-server" in body
 '
 
-printf '%s' "$supported" | python3 -c '
+printf '%s' "$supported" | LANDING="$landing" python3 -c '
+import os
 import json
 import sys
 
@@ -60,6 +65,17 @@ if len(kinds) == 2:
     assert legacy["network"] in {"base", "base-sepolia"}
 assert "payment-identifier" in body["extensions"]
 assert isinstance(body["signers"], dict)
+
+assets = {
+    "near:mainnet": "17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1",
+    "near:testnet": "3e2210e1184b45b64c8a434c0a7e7b23cc04ea7eb7a6c3c32520d03d4afcb8af",
+    "eip155:8453": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    "eip155:84532": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+}
+landing = os.environ["LANDING"]
+network = kind["network"]
+assert f"id=\"instance-network\">{network}</code>" in landing
+assert f"id=\"instance-asset\">{assets[network]}</code>" in landing
 '
 
 unauthenticated_status=$(

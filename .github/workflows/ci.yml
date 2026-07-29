@@ -51,6 +51,7 @@ jobs:
           cache: npm
           cache-dependency-path: |
             conformance/http-client/package-lock.json
+            examples/merchant-api/package-lock.json
             examples/resource-server/package-lock.json
 
       - name: Cache Cargo
@@ -96,11 +97,27 @@ jobs:
       - name: Audit official HTTP client dependency
         run: npm --prefix conformance/http-client audit --audit-level=high
 
-      - name: Check runnable NEAR resource workload
+      - name: Check runnable resource workloads
         run: |
           npm --prefix examples/resource-server ci
           npm --prefix examples/resource-server run check
           npm --prefix examples/resource-server audit --audit-level=high
+          npm --prefix examples/merchant-api ci
+          npm --prefix examples/merchant-api run check
+          npm --prefix examples/merchant-api audit --audit-level=high
+
+      - name: Validate merchant deployment assets
+        run: |
+          set -euo pipefail
+          test -x deploy/merchant/install-release.sh
+          test -x deploy/merchant/package-commit-release.sh
+          test -x deploy/merchant/promote-release.sh
+          test -x deploy/merchant/rollback-release.sh
+          sh -n deploy/merchant/install-release.sh
+          sh -n deploy/merchant/package-commit-release.sh
+          sh -n deploy/merchant/promote-release.sh
+          sh -n deploy/merchant/rollback-release.sh
+          systemd-analyze verify deploy/merchant/x402-merchant-api@.service
 
       - name: Lint OpenAPI
         run: npx --yes --package=@redocly/cli@1.34.5 redocly lint docs/openapi.yaml
@@ -111,15 +128,22 @@ jobs:
           work="$(mktemp -d)"
           trap 'rm -rf "$work"' EXIT
           mkdir -p "$work/conf.d" "$work/snippets" \
-            "$work/letsencrypt/live/x402.mikedotexe.com"
+            "$work/letsencrypt/live/x402.mikedotexe.com" \
+            "$work/letsencrypt/live/merchant-near.mikedotexe.com"
           cp deploy/nginx/x402-near-facilitator.conf "$work/conf.d/default.conf"
           cp deploy/nginx/x402-base.conf "$work/conf.d/base.conf"
           cp deploy/nginx/x402-base-sepolia.conf "$work/conf.d/base-sepolia.conf"
+          cp deploy/merchant/x402-merchant.conf "$work/conf.d/merchant.conf"
           cp deploy/nginx/x402-near-proxy.conf "$work/snippets/"
           openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
             -subj /CN=x402.mikedotexe.com \
             -keyout "$work/letsencrypt/live/x402.mikedotexe.com/privkey.pem" \
             -out "$work/letsencrypt/live/x402.mikedotexe.com/fullchain.pem" \
+            >/dev/null 2>&1
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+            -subj /CN=merchant-near.mikedotexe.com \
+            -keyout "$work/letsencrypt/live/merchant-near.mikedotexe.com/privkey.pem" \
+            -out "$work/letsencrypt/live/merchant-near.mikedotexe.com/fullchain.pem" \
             >/dev/null 2>&1
           docker run --rm \
             --entrypoint nginx \
