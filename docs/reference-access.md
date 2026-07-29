@@ -65,6 +65,27 @@ Keys expire or are reviewed, may be revoked for abuse or inactivity, and are
 valid only for the exact network, canonical USDC asset, and recipient policy
 approved for that client.
 
+### Base merchant pilot
+
+The [Base merchant-pilot request](https://github.com/fastnear/x402-facilitator/issues/new?template=base_merchant_pilot.yml)
+is stricter than a general evaluation request. It is for one public
+`eip155:8453` resource-server deployment that can be independently attributed:
+
+- name the exact public HTTPS paid method and path that returns an unpaid 402;
+- link public OpenAPI or discovery that names that operation and its `payTo`;
+- give the Base mainnet recipient and public evidence that the merchant controls
+  it (for example, a service page, public source/configuration, or explorer
+  profile); and
+- state expected use and accept the default 60 `/verify` and 10 `/settle`
+  requests per minute, the existing gas cap, and a zero daily sponsorship
+  budget until the verify-first gate completes.
+
+The public request never needs a funded payer, signed authorization, API key,
+or transaction. If approved, one per-instance key is delivered exactly once by
+an authenticated out-of-band channel. The operator then confirms public
+discovery and performs read-only verification before a positive settlement
+budget can be enabled.
+
 ## Integrate end to end
 
 1. Inspect the chosen instance's `/supported` response and confirm its
@@ -88,8 +109,10 @@ approved for that client.
    `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`, and EIP-712 domain
    `USD Coin` / `2`. Use the exact payee approved in the access request.
 5. Start with `/verify`, which never broadcasts. Confirm malformed and invalid
-   requests fail closed, then validate one real signed request before enabling
-   `/settle`.
+   requests fail closed. The public request never contains a signed
+   authorization; any valid verification occurs privately only after the
+   out-of-band key delivery and policy review. Do not enable `/settle` until
+   that read-only gate is complete.
 6. Enable settlement only after delivery idempotency is durable. Retry
    transient facilitator errors with bounded backoff using the byte-identical
    signed payload; never create a replacement payment for an indeterminate

@@ -344,11 +344,12 @@ Host-state boxes verified live 2026-07-24
       environments run v0.1.3; the public demo workload runs the example
       from the v0.1.3 source tag; docs changed since the tag are evidence
       and checklist records only.
-- [x] A real reference workload settles repeatedly and measurable activity is
-      recorded without customer-identifying data. — 2026-07-23, three
-      public testnet settles and two mainnet settles with replay and
-      conflict proofs
-      ([evidence](evidence/2026-07-23-real-traffic-and-recovery.md))
+- [x] An operator-controlled reference workload produced paid-flow/canary
+      evidence without customer-identifying data. — 2026-07-23, three public
+      testnet settles and two mainnet settles with replay and conflict proofs
+      ([evidence](evidence/2026-07-23-real-traffic-and-recovery.md)). This is
+      interoperability evidence, not independently attributable merchant
+      adoption for a future x402-list facilitator submission.
 - [x] Repository, endpoints, release, owner, transaction evidence, current
       phase, and remaining work are added to the NEAR integrations coordination
       hub on a separate clean branch. — 2026-07-24: folded into hub Program 04

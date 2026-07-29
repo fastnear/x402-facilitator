@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { pathToFileURL } from "node:url";
 
+import { readInstalledReleaseId } from "./config.mjs";
+
 const ALLOWED_BROWSER_ORIGIN = "https://js.fastnear.com";
 const MAX_PAYMENT_REQUIRED_BYTES = 12_000;
 
@@ -75,6 +77,7 @@ export async function runRegressionCheck({
   fetchImpl = globalThis.fetch,
   targets = deployments,
   output = console.log,
+  expectedReleaseId = readInstalledReleaseId(),
 } = {}) {
   assert.equal(typeof fetchImpl, "function", "fetch implementation is required");
   const results = [];
@@ -95,12 +98,19 @@ export async function runRegressionCheck({
       "/terms",
       "/robots.txt",
       "/.well-known/x402",
-      "/healthz",
     ]) {
       const response = await checkedFetch(fetchImpl, `${deployment.origin}${publicPath}`);
       assert.equal(response.status, 200, `${deployment.name} ${publicPath} must return 200`);
       assertSecurityHeaders(response, `${deployment.name} ${publicPath}`);
     }
+
+    const healthResponse = await checkedFetch(fetchImpl, `${deployment.origin}/healthz`);
+    assert.equal(healthResponse.status, 200, `${deployment.name} /healthz must return 200`);
+    assertSecurityHeaders(healthResponse, `${deployment.name} /healthz`);
+    const health = await healthResponse.json();
+    assert.equal(health.ok, true, `${deployment.name} /healthz must report liveness`);
+    assert.equal(health.network, deployment.network, `${deployment.name} /healthz reported the wrong network`);
+    assertPublicReleaseProvenance({ health, openApi, expectedReleaseId });
 
     const [landing, pricing, terms, robots, llms] = await Promise.all([
       checkedFetch(fetchImpl, `${deployment.origin}/`),
@@ -175,6 +185,22 @@ export async function runRegressionCheck({
   }
   output(`ok ${results.length} paid routes; no payment signature was created or sent`);
   return results;
+}
+
+export function assertPublicReleaseProvenance({
+  health,
+  openApi,
+  expectedReleaseId,
+}) {
+  const openApiReleaseId = openApi.info?.["x-x402-merchant-release-id"];
+  if (expectedReleaseId === undefined) {
+    // A checkout is not a deployment authority. It can exercise a deployed
+    // service without a sidecar, but only an installed immutable release may
+    // compare that service to its own expected release ID.
+    return;
+  }
+  assert.deepEqual(health.release, { id: expectedReleaseId });
+  assert.equal(openApiReleaseId, expectedReleaseId);
 }
 
 function requestInit(method, body) {

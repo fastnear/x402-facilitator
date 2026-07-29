@@ -58,7 +58,9 @@ USDC asset, and payee, and issued separately for every resource-server
 instance and environment. Open a
 [public access request](https://github.com/fastnear/x402-facilitator/issues/new?template=access_request.yml)
 only after you have an independently operated resource-server URL and payee;
-never include credentials or signed payments in the issue.
+never include credentials or signed payments in the issue. A prospective Base
+mainnet merchant should instead use the dedicated
+[Base merchant-pilot request](https://github.com/fastnear/x402-facilitator/issues/new?template=base_merchant_pilot.yml), which asks for a live paid method/path, public discovery, and public evidence of payee control without requesting a payment.
 
 The [runnable Express example](examples/resource-server/) shows official x402
 middleware, bounded retries, and delivery idempotency. Base mainnet

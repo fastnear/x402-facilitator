@@ -98,6 +98,11 @@ OpenAPI schemas.
 `GET /` provides a small human-readable service page linking those discovery
 documents. It is informational only; paid operations remain under `/v1/`.
 `GET /healthz` is process liveness and never depends on an upstream.
+When installed by the production merchant installer, `/healthz.release.id` and
+OpenAPI `info.x-x402-merchant-release-id` publish the same validated immutable
+release ID. Local checkouts intentionally omit both fields. The identifier is
+deployment provenance, not an integrity signature; compare it with the merged
+commit, archived SHA-256, immutable release pointer, and dated rollout record.
 `GET /readyz` checks the configured RPC chain identity and a canonical
 final/finalized block, the facilitator's readiness plus advertised canonical
 x402 v2 network, and successful payment server initialization. Concurrent probes share a one-second completed
@@ -157,8 +162,9 @@ root-owned or service-owned `PROOF_RESULT_FILE`.
 broadcasting a payment. It verifies public discovery and listing-surface
 documents, all ten unpaid 402 challenges, canonical network/asset/payee/amount
 fields, the 12 KB upstream header safety margin, Bazaar/OpenAPI schema parity,
-validation ordering, and the production browser CORS allowlist. Run that
-default full check before and after a complete promotion.
+validation ordering, the production browser CORS allowlist, and (when run from
+an installed release) matching public release provenance. Run that default full
+check before and after a complete promotion.
 
 During a one-instance-at-a-time rollout, use the exact target switch for the
 post-promotion gate so the newly promoted instance is not coupled to the other

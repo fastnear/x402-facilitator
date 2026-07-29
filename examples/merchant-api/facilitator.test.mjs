@@ -249,6 +249,29 @@ test("merchant facilitator aborts a hanging per-attempt request at its deadline"
   assert.equal(signal.aborted, true);
 });
 
+test("merchant facilitator aborts a hanging supported request at its deadline", async () => {
+  const timers = manualTimers();
+  let signal;
+  const client = merchantFacilitator({
+    fetchImpl: async (_url, request) => {
+      signal = request.signal;
+      return new Promise(() => {});
+    },
+    ...timers,
+  });
+
+  const checking = client.getSupported();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(timers.callbacks.length, 1);
+  timers.callbacks[0]();
+  await assert.rejects(
+    checking,
+    error => error instanceof FacilitatorTimeoutError
+      && error.message === "facilitator supported request timed out",
+  );
+  assert.equal(signal.aborted, true);
+});
+
 test("merchant facilitator defaults stay inside the nginx retry envelope", () => {
   assert.equal(merchantFacilitator().requestTimeoutMs, 7_000);
   assert.ok(3 * 7_000 + 1_500 + 3_000 < 30_000);

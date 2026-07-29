@@ -1,0 +1,74 @@
+name: Base merchant pilot
+description: Request a bounded Base-mainnet merchant integration pilot
+title: "base-pilot: "
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This issue is public. Do not include an API key, private key, signed payment authorization, credentialed URL, raw transaction bytes, or other bearer instrument. This request requires no funded payer, payment, or broadcast.
+
+  - type: input
+    id: paid_endpoint
+    attributes:
+      label: Public paid endpoint
+      description: Give the exact public HTTPS method and path that returns an unpaid x402 402 response.
+      placeholder: "GET https://merchant.example/v1/resource"
+    validations:
+      required: true
+
+  - type: input
+    id: discovery_url
+    attributes:
+      label: Public OpenAPI or discovery URL
+      description: Link public OpenAPI or discovery that names the paid operation and its payTo recipient.
+      placeholder: "https://merchant.example/openapi.json"
+    validations:
+      required: true
+
+  - type: input
+    id: pay_to
+    attributes:
+      label: Base mainnet payTo
+      description: Give the independently controlled eip155:8453 recipient address. The policy will allow only canonical Base USDC and this exact recipient.
+      placeholder: "0x..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: pay_to_control
+    attributes:
+      label: Public evidence of recipient control
+      description: Link a service page, public source/configuration, explorer profile, or equivalent public evidence tying this recipient to the merchant operator. Do not sign or send a transaction for this request.
+    validations:
+      required: true
+
+  - type: textarea
+    id: usage
+    attributes:
+      label: Expected usage
+      description: State expected verify/settle rates, daily settlement count, evaluation duration, and expected atomic USDC amount range.
+    validations:
+      required: true
+
+  - type: input
+    id: operational_contact
+    attributes:
+      label: Operational contact channel
+      description: Give a non-secret public contact or say how an existing private operator channel should be used. Credentials are never sent in this issue.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: acknowledgements
+    attributes:
+      label: Pilot acknowledgements
+      options:
+        - label: I am requesting only Base mainnet eip155:8453 with canonical Circle USDC and the exact payTo above.
+          required: true
+        - label: I accept the initial 60 verify/minute and 10 settle/minute limits, existing gas cap, and zero daily sponsorship budget until verify-first onboarding completes.
+          required: true
+        - label: I understand that any key is delivered once through an authenticated out-of-band channel after review, never in this issue.
+          required: true
+        - label: I understand public discovery plus read-only verification must pass before settlement is enabled, and the facilitator operator will not fund payer wallets or manufacture activity.
+          required: true

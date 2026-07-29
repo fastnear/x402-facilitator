@@ -18,12 +18,15 @@ merchant_legacy_previous=$merchant_release_root/20260727-regression-audit-v4
 unsafe_mode_version=v999.999.997
 unsafe_link_version=v999.999.996
 unsafe_owner_version=v999.999.995
+unsafe_metadata_version=v999.999.994
 unsafe_mode_source=/opt/x402-near-facilitator/releases/$unsafe_mode_version
 unsafe_link_source=/opt/x402-near-facilitator/releases/$unsafe_link_version
 unsafe_owner_source=/opt/x402-near-facilitator/releases/$unsafe_owner_version
+unsafe_metadata_source=/opt/x402-near-facilitator/releases/$unsafe_metadata_version
 unsafe_mode_merchant=$merchant_release_root/$unsafe_mode_version
 unsafe_link_merchant=$merchant_release_root/$unsafe_link_version
 unsafe_owner_merchant=$merchant_release_root/$unsafe_owner_version
+unsafe_metadata_merchant=$merchant_release_root/$unsafe_metadata_version
 commit=0000000000000000000000000000000000000001
 commit_release=git-$commit
 merchant_commit_destination=$merchant_release_root/$commit_release
@@ -44,9 +47,11 @@ original_opt_mode=
   [ ! -e "$unsafe_mode_source" ] &&
   [ ! -e "$unsafe_link_source" ] &&
   [ ! -e "$unsafe_owner_source" ] &&
+  [ ! -e "$unsafe_metadata_source" ] &&
   [ ! -e "$unsafe_mode_merchant" ] &&
   [ ! -e "$unsafe_link_merchant" ] &&
-  [ ! -e "$unsafe_owner_merchant" ] || {
+  [ ! -e "$unsafe_owner_merchant" ] &&
+  [ ! -e "$unsafe_metadata_merchant" ] || {
   echo "error: reserved merchant installer-test path already exists" >&2
   exit 1
 }
@@ -63,9 +68,11 @@ cleanup() {
     "$unsafe_mode_source" \
     "$unsafe_link_source" \
     "$unsafe_owner_source" \
+    "$unsafe_metadata_source" \
     "$unsafe_mode_merchant" \
     "$unsafe_link_merchant" \
-    "$unsafe_owner_merchant"
+    "$unsafe_owner_merchant" \
+    "$unsafe_metadata_merchant"
   if [ "$unsafe_merchant_root_link_created" = true ] && [ -L "$merchant_install_root" ]; then
     rm "$merchant_install_root"
   fi
@@ -130,6 +137,9 @@ grep -Fx \
 grep -Fx \
   'Environment=FACILITATOR_API_KEY_FILE=%d/facilitator-api-key' \
   "$destination/deploy/merchant/x402-merchant-api@.service"
+grep -Fx \
+  'Environment=MERCHANT_RELEASE_METADATA_REQUIRED=1' \
+  "$destination/deploy/merchant/x402-merchant-api@.service"
 test -f "$destination/examples/merchant-api/package-lock.json"
 test -f "$destination/examples/resource-server/package.json"
 (
@@ -192,6 +202,8 @@ if find "$merchant_destination" -type l -print -quit | grep -q .; then
   exit 1
 fi
 test "$(stat -c '%U:%G %a' "$merchant_destination")" = "root:root 755"
+test "$(cat "$merchant_destination/.x402-merchant-release-id")" = "$version"
+test "$(stat -c '%U:%G %a' "$merchant_destination/.x402-merchant-release-id")" = "root:root 444"
 test ! -L "$merchant_install_root"
 test ! -L "$merchant_release_root"
 test "$(stat -c '%U:%G' "$merchant_install_root")" = "root:root"
@@ -246,6 +258,33 @@ grep -Fq 'facilitator release contains a path not owned by root:root' \
   "$work/unsafe-owner.out"
 test ! -e "$unsafe_owner_merchant"
 
+# The installer owns this reserved sidecar. A source archive must not preseed
+# a plausible provenance value, even when its enclosing release and manifest
+# otherwise pass the native-release integrity checks.
+cp -a "$destination" "$unsafe_metadata_source"
+install -o root -g root -m 0444 /dev/null \
+  "$unsafe_metadata_source/examples/merchant-api/.x402-merchant-release-id"
+printf '%s\n' 'git-ffffffffffffffffffffffffffffffffffffffff' \
+  >"$unsafe_metadata_source/examples/merchant-api/.x402-merchant-release-id"
+(
+  cd "$unsafe_metadata_source"
+  find examples -type f -print0 |
+    LC_ALL=C sort -z |
+    xargs -0 sha256sum >examples-assets.sha256
+)
+if "$unsafe_metadata_source/deploy/merchant/install-release.sh" \
+  "$unsafe_metadata_version" >"$work/unsafe-metadata.out" 2>&1; then
+  echo "error: merchant installer accepted source-provided release metadata" >&2
+  exit 1
+fi
+if ! grep -Fq 'merchant source must not contain installer release metadata' \
+  "$work/unsafe-metadata.out"; then
+  echo "error: merchant installer rejected the source metadata fixture unexpectedly" >&2
+  sed -n '1,40p' "$work/unsafe-metadata.out" >&2
+  exit 1
+fi
+test ! -e "$unsafe_metadata_merchant"
+
 commit_archive_root=$work/commit-source/x402-merchant-$commit_release
 install -d -m 0755 "$commit_archive_root/examples"
 cp -a "$payload/examples/merchant-api" "$commit_archive_root/examples/"
@@ -264,6 +303,8 @@ tar -czf "$commit_archive" \
   "$commit_archive.sha256"
 test -f "$merchant_commit_destination/server.mjs"
 test -d "$merchant_commit_destination/node_modules"
+test "$(cat "$merchant_commit_destination/.x402-merchant-release-id")" = "$commit_release"
+test "$(stat -c '%U:%G %a' "$merchant_commit_destination/.x402-merchant-release-id")" = "root:root 444"
 if find "$merchant_commit_destination" -type l -print -quit | grep -q .; then
   echo "error: commit installer published a linked dependency" >&2
   exit 1

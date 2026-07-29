@@ -338,6 +338,7 @@ export async function createMerchantApplication({
     ok: true,
     network: config.network,
     activityIndex: activityStore.indexMetadata(),
+    ...(config.releaseId ? { release: { id: config.releaseId } } : {}),
   }));
   app.get("/readyz", async (_request, response) => {
     const readiness = await checkDependencies();
@@ -688,6 +689,9 @@ function openApi(config, routes) {
     info: {
       title: `${near ? "NEAR" : "Base"} Agent Evidence & Route API`,
       version: "0.3.0",
+      ...(config.releaseId
+        ? { "x-x402-merchant-release-id": config.releaseId }
+        : {}),
       contact: config.contactEmail
         ? { email: config.contactEmail }
         : { url: "https://mikedotexe.com" },
@@ -797,6 +801,9 @@ function escapeHtml(value) {
 function landing(config) {
   const chain = config.network.startsWith("near:") ? "NEAR" : "Base";
   const priceUsd = formatUsdc(config.amount);
+  const entityProbe = config.network.startsWith("near:")
+    ? `${config.resourceOrigin}/v1/entities/mike.near`
+    : `${config.resourceOrigin}/v1/entities/0x0000000000000000000000000000000000000000`;
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -828,6 +835,7 @@ function landing(config) {
     </ul>
   </div>
   <p>Start with <code>POST /v1/evidence/account</code>, <code>POST /v1/evidence/transaction</code>, or the quote-only <code>POST /v1/routes/usdc/quote</code>. An unpaid valid request returns canonical x402 v2 payment requirements.</p>
+  <p>Directory-safe unpaid probe: <code>GET <a href="${escapeHtml(entityProbe)}">${escapeHtml(entityProbe)}</a></code>. It returns the canonical x402 requirement without a payment.</p>
 </body>
 </html>`;
 }
