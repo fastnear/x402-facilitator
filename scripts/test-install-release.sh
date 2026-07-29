@@ -14,6 +14,7 @@ merchant_install_root=/opt/x402-merchant
 merchant_release_root=$merchant_install_root/releases
 merchant_destination=$merchant_release_root/$version
 merchant_previous=$merchant_release_root/v999.999.998
+merchant_legacy_previous=$merchant_release_root/20260727-regression-audit-v4
 unsafe_mode_version=v999.999.997
 unsafe_link_version=v999.999.996
 unsafe_owner_version=v999.999.995
@@ -37,6 +38,7 @@ original_opt_mode=
 }
 [ ! -e "$merchant_destination" ] &&
   [ ! -e "$merchant_previous" ] &&
+  [ ! -e "$merchant_legacy_previous" ] &&
   [ ! -e "$merchant_commit_destination" ] &&
   [ ! -e "$merchant_current" ] &&
   [ ! -e "$unsafe_mode_source" ] &&
@@ -56,6 +58,7 @@ cleanup() {
     "$destination" \
     "$merchant_destination" \
     "$merchant_previous" \
+    "$merchant_legacy_previous" \
     "$merchant_commit_destination" \
     "$unsafe_mode_source" \
     "$unsafe_link_source" \
@@ -88,6 +91,7 @@ install -m 0755 \
   "$repo_root/deploy/merchant/package-commit-release.sh" \
   "$repo_root/deploy/merchant/promote-release.sh" \
   "$repo_root/deploy/merchant/rollback-release.sh" \
+  "$repo_root/deploy/merchant/x402-merchant-api@.service" \
   "$payload/deploy/merchant/"
 cp "$repo_root"/examples/merchant-api/*.mjs \
   "$repo_root"/examples/merchant-api/package.json \
@@ -120,6 +124,12 @@ test -x "$destination/x402-near-admin"
 test -x "$destination/deploy/promote-release.sh"
 test -x "$destination/deploy/merchant/install-release.sh"
 test -x "$destination/deploy/merchant/package-commit-release.sh"
+grep -Fx \
+  'LoadCredential=facilitator-api-key:/etc/x402-merchant/credentials/%i/api-key' \
+  "$destination/deploy/merchant/x402-merchant-api@.service"
+grep -Fx \
+  'Environment=FACILITATOR_API_KEY_FILE=%d/facilitator-api-key' \
+  "$destination/deploy/merchant/x402-merchant-api@.service"
 test -f "$destination/examples/merchant-api/package-lock.json"
 test -f "$destination/examples/resource-server/package.json"
 (
@@ -260,11 +270,132 @@ if find "$merchant_commit_destination" -type l -print -quit | grep -q .; then
 fi
 
 cp -a "$merchant_destination" "$merchant_previous"
+cp -a "$merchant_destination" "$merchant_legacy_previous"
+install -d -m 0755 \
+  "$merchant_legacy_previous/node_modules/.bin" \
+  "$merchant_legacy_previous/node_modules/mustache/bin" \
+  "$merchant_legacy_previous/node_modules/node-gyp-build"
+for target in \
+  "$merchant_legacy_previous/node_modules/mustache/bin/mustache" \
+  "$merchant_legacy_previous/node_modules/node-gyp-build/bin.js" \
+  "$merchant_legacy_previous/node_modules/node-gyp-build/optional.js" \
+  "$merchant_legacy_previous/node_modules/node-gyp-build/build-test.js"; do
+  : >"$target"
+  chmod 0555 "$target"
+done
+ln -s ../mustache/bin/mustache \
+  "$merchant_legacy_previous/node_modules/.bin/mustache"
+ln -s ../node-gyp-build/bin.js \
+  "$merchant_legacy_previous/node_modules/.bin/node-gyp-build"
+ln -s ../node-gyp-build/optional.js \
+  "$merchant_legacy_previous/node_modules/.bin/node-gyp-build-optional"
+ln -s ../node-gyp-build/build-test.js \
+  "$merchant_legacy_previous/node_modules/.bin/node-gyp-build-test"
 "$destination/deploy/merchant/promote-release.sh" near v999.999.998
 test "$(readlink -f "$merchant_current")" = "$merchant_previous"
 "$destination/deploy/merchant/promote-release.sh" near "$commit_release"
 test "$(readlink -f "$merchant_current")" = "$merchant_commit_destination"
 "$destination/deploy/merchant/rollback-release.sh" near v999.999.998
 test "$(readlink -f "$merchant_current")" = "$merchant_previous"
+"$destination/deploy/merchant/promote-release.sh" near 20260727-regression-audit-v4
+test "$(readlink -f "$merchant_current")" = "$merchant_legacy_previous"
+"$destination/deploy/merchant/rollback-release.sh" near "$commit_release"
+test "$(readlink -f "$merchant_current")" = "$merchant_commit_destination"
+"$destination/deploy/merchant/rollback-release.sh" near 20260727-regression-audit-v4
+test "$(readlink -f "$merchant_current")" = "$merchant_legacy_previous"
+
+# A legacy compatibility exception must not become a general link allowance.
+cp -a "$merchant_destination" "$unsafe_link_merchant"
+ln -s server.mjs "$unsafe_link_merchant/server-link"
+if "$destination/deploy/merchant/promote-release.sh" \
+  near "$unsafe_link_version" >"$work/unsafe-merchant-link.out" 2>&1; then
+  echo "error: merchant promotion accepted a link in a non-legacy release" >&2
+  exit 1
+fi
+grep -Fq 'merchant release contains an unsafe link' \
+  "$work/unsafe-merchant-link.out"
+test "$(readlink -f "$merchant_current")" = "$merchant_legacy_previous"
+rm "$unsafe_link_merchant/server-link"
+
+ln -s ../node-gyp-build/bin.js \
+  "$merchant_legacy_previous/node_modules/.bin/unexpected"
+if "$destination/deploy/merchant/promote-release.sh" \
+  near 20260727-regression-audit-v4 >"$work/unexpected-legacy-link.out" 2>&1; then
+  echo "error: merchant promotion accepted an extra legacy npm link" >&2
+  exit 1
+fi
+grep -Fq 'merchant legacy release contains an unexpected npm link' \
+  "$work/unexpected-legacy-link.out"
+test "$(readlink -f "$merchant_current")" = "$merchant_legacy_previous"
+rm "$merchant_legacy_previous/node_modules/.bin/unexpected"
+
+legacy_mustache_link=$merchant_legacy_previous/node_modules/.bin/mustache
+rm "$legacy_mustache_link"
+if "$destination/deploy/merchant/promote-release.sh" \
+  near 20260727-regression-audit-v4 >"$work/missing-legacy-link.out" 2>&1; then
+  echo "error: merchant promotion accepted a legacy release missing an npm link" >&2
+  exit 1
+fi
+grep -Fq 'merchant legacy release is missing an expected npm link' \
+  "$work/missing-legacy-link.out"
+test "$(readlink -f "$merchant_current")" = "$merchant_legacy_previous"
+ln -s ../mustache/bin/mustache "$legacy_mustache_link"
+
+legacy_link=$merchant_legacy_previous/node_modules/.bin/node-gyp-build
+rm "$legacy_link"
+ln -s /etc/passwd "$legacy_link"
+if "$destination/deploy/merchant/promote-release.sh" \
+  near 20260727-regression-audit-v4 >"$work/escaping-legacy-link.out" 2>&1; then
+  echo "error: merchant promotion accepted an escaping legacy npm link" >&2
+  exit 1
+fi
+grep -Fq 'merchant legacy release has an unsafe npm link target' \
+  "$work/escaping-legacy-link.out"
+test "$(readlink -f "$merchant_current")" = "$merchant_legacy_previous"
+rm "$legacy_link"
+ln -s ../node-gyp-build/optional.js "$legacy_link"
+if "$destination/deploy/merchant/promote-release.sh" \
+  near 20260727-regression-audit-v4 >"$work/wrong-legacy-link.out" 2>&1; then
+  echo "error: merchant promotion accepted a wrong legacy npm link target" >&2
+  exit 1
+fi
+grep -Fq 'merchant legacy release has an unsafe npm link target' \
+  "$work/wrong-legacy-link.out"
+test "$(readlink -f "$merchant_current")" = "$merchant_legacy_previous"
+rm "$legacy_link"
+ln -s ../node-gyp-build/bin.js "$legacy_link"
+legacy_target=$merchant_legacy_previous/node_modules/node-gyp-build/bin.js
+mv "$legacy_target" "$legacy_target.real"
+if "$destination/deploy/merchant/promote-release.sh" \
+  near 20260727-regression-audit-v4 >"$work/dangling-legacy-link.out" 2>&1; then
+  echo "error: merchant promotion accepted a dangling legacy npm link" >&2
+  exit 1
+fi
+grep -Fq 'merchant legacy release has a dangling npm link' \
+  "$work/dangling-legacy-link.out"
+test "$(readlink -f "$merchant_current")" = "$merchant_legacy_previous"
+mv "$legacy_target.real" "$legacy_target"
+chown -h 65534:65534 "$legacy_link"
+if "$destination/deploy/merchant/promote-release.sh" \
+  near 20260727-regression-audit-v4 >"$work/non-root-legacy-link.out" 2>&1; then
+  echo "error: merchant promotion accepted a non-root legacy npm link" >&2
+  exit 1
+fi
+grep -Fq 'merchant legacy npm link must be owned by root:root' \
+  "$work/non-root-legacy-link.out"
+test "$(readlink -f "$merchant_current")" = "$merchant_legacy_previous"
+chown -h root:root "$legacy_link"
+chmod g+w "$legacy_target"
+if "$destination/deploy/merchant/promote-release.sh" \
+  near 20260727-regression-audit-v4 >"$work/writable-legacy-target.out" 2>&1; then
+  echo "error: merchant promotion accepted a writable legacy npm target" >&2
+  exit 1
+fi
+grep -Fq 'merchant release is writable by group or other' \
+  "$work/writable-legacy-target.out"
+test "$(readlink -f "$merchant_current")" = "$merchant_legacy_previous"
+chmod 0555 "$legacy_target"
+"$destination/deploy/merchant/promote-release.sh" near 20260727-regression-audit-v4
+test "$(readlink -f "$merchant_current")" = "$merchant_legacy_previous"
 
 echo "facilitator and merchant installer integration tests passed"

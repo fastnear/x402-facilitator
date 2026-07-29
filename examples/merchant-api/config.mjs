@@ -5,6 +5,13 @@ import {
   openSync,
   readFileSync,
 } from "node:fs";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  normalize,
+} from "node:path";
 
 import { parseAllowedOrigins } from "./cors.mjs";
 import {
@@ -14,6 +21,8 @@ import {
 } from "./evidence-input.mjs";
 
 const MAX_CREDENTIAL_BYTES = 4096;
+const SYSTEMD_CREDENTIALS_ROOT = "/run/credentials";
+const FACILITATOR_CREDENTIAL_NAME = "facilitator-api-key";
 
 export const NETWORK_PROFILES = Object.freeze({
   "near:mainnet": Object.freeze({
@@ -126,9 +135,16 @@ export function loadConfig(
       allowQuery: false,
     });
 
+  const apiKeyPath = required(environment, "FACILITATOR_API_KEY_FILE");
   const apiKey = credentialReader(
-    required(environment, "FACILITATOR_API_KEY_FILE"),
+    apiKeyPath,
     "facilitator API key",
+    {
+      expectedSystemdPath: expectedSystemdCredentialPath(
+        environment.CREDENTIALS_DIRECTORY,
+        FACILITATOR_CREDENTIAL_NAME,
+      ),
+    },
   );
   const oneClickJwt = environment.ONE_CLICK_JWT_FILE
     ? credentialReader(environment.ONE_CLICK_JWT_FILE, "1Click JWT")
@@ -165,7 +181,52 @@ export function formatUsdc(amountAtomic) {
   return `${padded.slice(0, -6)}.${padded.slice(-6)}`;
 }
 
-export function readCredential(path, label = "credential") {
+export function expectedSystemdCredentialPath(directory, credentialName) {
+  if (
+    typeof directory !== "string"
+    || typeof credentialName !== "string"
+    || credentialName.length === 0
+    || credentialName === "."
+    || credentialName === ".."
+    || basename(credentialName) !== credentialName
+    || !isAbsolute(directory)
+  ) {
+    return undefined;
+  }
+
+  const normalizedDirectory = normalize(directory);
+  if (
+    dirname(normalizedDirectory) !== SYSTEMD_CREDENTIALS_ROOT
+    || basename(normalizedDirectory) === "."
+  ) {
+    return undefined;
+  }
+  return join(normalizedDirectory, credentialName);
+}
+
+export function isExpectedSystemdAclCredential(
+  path,
+  expectedSystemdPath,
+  metadata,
+) {
+  return (
+    typeof expectedSystemdPath === "string"
+    && typeof path === "string"
+    && path === expectedSystemdPath
+    // systemd v255's LoadCredential creates a root-owned 0400 file, then
+    // grants the service user a read ACL. POSIX exposes that ACL mask as the
+    // group-read bit in stat(2), even though the root group has no access.
+    && metadata.uid === 0
+    && metadata.gid === 0
+    && (metadata.mode & 0o777) === 0o440
+  );
+}
+
+export function readCredential(
+  path,
+  label = "credential",
+  { expectedSystemdPath } = {},
+) {
   let descriptor;
   try {
     descriptor = openSync(
@@ -176,7 +237,10 @@ export function readCredential(path, label = "credential") {
     if (!metadata.isFile()) {
       throw new Error(`${label} file must be a regular file`);
     }
-    if ((metadata.mode & 0o077) !== 0) {
+    if (
+      (metadata.mode & 0o077) !== 0
+      && !isExpectedSystemdAclCredential(path, expectedSystemdPath, metadata)
+    ) {
       throw new Error(`${label} file must not be accessible by group or others`);
     }
     if (metadata.size < 1 || metadata.size > MAX_CREDENTIAL_BYTES) {
