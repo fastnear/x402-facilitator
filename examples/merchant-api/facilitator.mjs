@@ -129,15 +129,19 @@ export class MerchantFacilitatorClient {
     return parseSuccessResponse(text, settleResponseSchema, "settle");
   }
 
-  async getSupported() {
+  async getSupported({ signal } = {}) {
     // Readiness and startup must not create background retry chains after the
     // caller's bounded probe has timed out. Only payment-bearing verify and
     // settle operations use the prescribed retry policy; a later readiness
     // probe can retry this one bounded discovery request.
-    const { response, text } = await this.request("supported", async () => ({
-      method: "GET",
-      headers: await this.headersFor("supported"),
-    }));
+    const { response, text } = await this.request(
+      "supported",
+      async () => ({
+        method: "GET",
+        headers: await this.headersFor("supported"),
+      }),
+      { signal },
+    );
     if (!response.ok) {
       throw new FacilitatorHttpError("getSupported", response.status);
     }
@@ -177,8 +181,18 @@ export class MerchantFacilitatorClient {
     };
   }
 
-  async request(operation, createInit) {
+  async request(operation, createInit, { signal } = {}) {
     const controller = new AbortController();
+    let removeAbortListener;
+    if (signal) {
+      const abort = () => controller.abort();
+      if (signal.aborted) {
+        abort();
+      } else {
+        signal.addEventListener("abort", abort, { once: true });
+        removeAbortListener = () => signal.removeEventListener("abort", abort);
+      }
+    }
     try {
       return await withDeadline(
         async () => {
@@ -206,6 +220,7 @@ export class MerchantFacilitatorClient {
         },
       );
     } finally {
+      removeAbortListener?.();
       controller.abort();
     }
   }
@@ -366,10 +381,11 @@ export function createFacilitatorProbe({
       try {
         const [supported] = await Promise.all([
           withDeadline(
-            () => client.getSupported(),
+            () => client.getSupported({ signal: controller.signal }),
             {
               timeoutMs,
               message: "facilitator readiness timed out",
+              onTimeout: () => controller.abort(),
               setTimeoutImpl,
               clearTimeoutImpl,
             },
