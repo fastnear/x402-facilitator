@@ -924,15 +924,21 @@ mod tests {
     fn near_supplied_transfer_methods_are_typed_as_unsupported_before_service_policy() {
         let policy = PaymentIdentifierConfig::default();
         for (accepted, requirements) in [
-            ("delegate", "delegate"),
-            ("intents-verifier", "intents-verifier"),
-            ("future-method-a", "future-method-b"),
+            (Some("delegate"), Some("delegate")),
+            (Some("intents-verifier"), Some("intents-verifier")),
+            (Some("future-method-a"), Some("future-method-b")),
+            (Some("intents-verifier"), None),
+            (None, Some("intents-verifier")),
         ] {
             let mut request = request_value();
-            request["paymentPayload"]["accepted"]["extra"]["assetTransferMethod"] =
-                Value::String(accepted.to_owned());
-            request["paymentRequirements"]["extra"]["assetTransferMethod"] =
-                Value::String(requirements.to_owned());
+            if let Some(accepted) = accepted {
+                request["paymentPayload"]["accepted"]["extra"]["assetTransferMethod"] =
+                    Value::String(accepted.to_owned());
+            }
+            if let Some(requirements) = requirements {
+                request["paymentRequirements"]["extra"]["assetTransferMethod"] =
+                    Value::String(requirements.to_owned());
+            }
             let input = request.clone();
             let Ok(parsed) = parse_request(&encoded(&input), &policy, false) else {
                 std::process::abort();

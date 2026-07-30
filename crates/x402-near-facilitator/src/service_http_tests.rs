@@ -960,7 +960,42 @@ async fn assert_protected_contract(
         sends_before_unsupported
     );
 
-    let mut malformed_method = valid_request(payer, 52, None)?;
+    for (nonce, accepted_only) in [(52, true), (53, false)] {
+        let mut one_sided_unsupported_method = valid_request(payer, nonce, None)?;
+        if accepted_only {
+            one_sided_unsupported_method["paymentPayload"]["accepted"]["extra"] =
+                json!({"assetTransferMethod": "intents-verifier"});
+        } else {
+            one_sided_unsupported_method["paymentRequirements"]["extra"] =
+                json!({"assetTransferMethod": "intents-verifier"});
+        }
+        let one_sided_unsupported_verify = call(
+            &application.router,
+            http_request(
+                Method::POST,
+                "/verify",
+                serde_json::to_vec(&one_sided_unsupported_method)?,
+                Some("application/json"),
+                Some(&key),
+                None,
+            )?,
+        )
+        .await?;
+        assert_eq!(one_sided_unsupported_verify.status, StatusCode::OK);
+        assert_eq!(
+            one_sided_unsupported_verify.json()?,
+            json!({
+                "isValid": false,
+                "invalidReason": "unsupported_asset_transfer_method",
+            })
+        );
+        assert_eq!(
+            application.rpc.sends.load(Ordering::SeqCst),
+            sends_before_unsupported
+        );
+    }
+
+    let mut malformed_method = valid_request(payer, 54, None)?;
     malformed_method["paymentPayload"]["accepted"]["extra"] = json!({"assetTransferMethod": 7});
     malformed_method["paymentRequirements"]["extra"] = json!({"assetTransferMethod": 7});
     let malformed_method = call(
