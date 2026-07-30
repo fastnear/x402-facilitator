@@ -2,10 +2,11 @@
 
 Status (2026-07-28): the original x402 Foundation entry **merged** as #2941,
 and its NEAR-and-Base follow-up **merged** as #2960.
-awesome-agentic-commerce #510, x402facilitators #15, Pay.sh #1020, and
-Gold-402 #64 remain open. x402-list declined the facilitator pending
-independently attributable settlement activity; the implementation and
-identity checks passed. The Base demo resource is registered on x402scan.
+awesome-agentic-commerce #510 and x402facilitators #15 remain open. Pay.sh
+#1020 and Gold-402 #64 merged on 2026-07-28. x402-list declined the
+facilitator pending independently attributable settlement activity; the
+implementation and identity checks passed. The Base demo resource is
+registered on x402scan.
 NEAR discovery remains tracked in x402scan #1040.
 v0.5.3 is deployed across the three live reference instances; its public
 landing pages and Base `payment-identifier` advertisement are visible in the
@@ -317,7 +318,7 @@ them.
   API-key-gated facilitator for exact Circle USDC payments on NEAR and Base.`
 - The own-domain landing page is live. Their contribution rules require an
   active, documented, production-ready HTTPS destination.
-- **PR opened 2026-07-26:**
+- **PR merged 2026-07-28:**
   <https://github.com/xpaysh/awesome-x402/pull/1020>.
 
 ### 10. Gold-402 — hosted-facilitator list (PR)
@@ -329,7 +330,7 @@ them.
   the maintainer requests a live verification.
 - v0.5.3 is live, and the homepage and `/supported` agree with the multi-chain
   description.
-- **PR opened 2026-07-26:**
+- **PR merged 2026-07-28:**
   <https://github.com/Haustorium12/gold-402/pull/64>. No reviewer credential
   was created or disclosed.
 
