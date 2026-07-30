@@ -13,6 +13,20 @@ Patch releases remain backward compatible within the current minor line.
 
 ## [Unreleased]
 
+## [0.5.5] - 2026-07-29
+
+This backward-compatible readiness-diagnostics patch has no database-schema,
+migration, service configuration, settlement-engine, or public wire-contract
+change. Public `/readyz` remains a sanitized boolean gate surface.
+
+### Changed
+
+- Base dual-RPC signer-head readiness now preserves a closed, secret-free
+  diagnostic class for reader unavailability, chain-ID mismatch, and
+  pending-nonce disagreement. Protected transition logs and telemetry also
+  distinguish relayer-policy and native-gas hard-stop causes without exposing
+  endpoint, account, balance, nonce, transaction, or provider-response values.
+
 ## [0.5.4] - 2026-07-29
 
 The NEAR hardening in this backward-compatible security patch has no
@@ -311,7 +325,8 @@ store, leadership, HTTP) at every step.
 Initial hardened NEAR-only release lineage (durable journal, dual-RPC
 reconciliation, leadership failover, sponsorship budgets). See git history.
 
-[Unreleased]: https://github.com/fastnear/x402-facilitator/compare/v0.5.4...HEAD
+[Unreleased]: https://github.com/fastnear/x402-facilitator/compare/v0.5.5...HEAD
+[0.5.5]: https://github.com/fastnear/x402-facilitator/compare/v0.5.4...v0.5.5
 [0.5.4]: https://github.com/fastnear/x402-facilitator/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/fastnear/x402-facilitator/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/fastnear/x402-facilitator/compare/v0.5.1...v0.5.2

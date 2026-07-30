@@ -2,7 +2,7 @@ openapi: 3.1.0
 jsonSchemaDialect: https://json-schema.org/draft/2020-12/schema
 info:
   title: x402 exact-payment facilitator for NEAR and Base
-  version: 0.5.4
+  version: 0.5.5
   description: |
     Authenticated x402 facilitator for exact Circle USDC payments on NEAR and
     Base. Each process is pinned to one network and one canonical asset.
