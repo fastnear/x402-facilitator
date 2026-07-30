@@ -272,6 +272,37 @@ test("merchant facilitator aborts a hanging supported request at its deadline", 
   assert.equal(signal.aborted, true);
 });
 
+test("merchant facilitator aborts a supported request when its caller cancels", async () => {
+  const controller = new AbortController();
+  let signal;
+  let calls = 0;
+  let signalFetchStarted;
+  const fetchStarted = new Promise(resolve => {
+    signalFetchStarted = resolve;
+  });
+  const client = merchantFacilitator({
+    fetchImpl: async (_url, request) => {
+      calls += 1;
+      signal = request.signal;
+      signalFetchStarted();
+      return new Promise((resolve, reject) => {
+        request.signal.addEventListener("abort", () => {
+          const error = new Error("request aborted");
+          error.name = "AbortError";
+          reject(error);
+        }, { once: true });
+      });
+    },
+  });
+
+  const checking = client.getSupported({ signal: controller.signal });
+  await fetchStarted;
+  controller.abort();
+  await assert.rejects(checking, error => error?.name === "AbortError");
+  assert.equal(calls, 1);
+  assert.equal(signal.aborted, true);
+});
+
 test("merchant facilitator defaults stay inside the nginx retry envelope", () => {
   assert.equal(merchantFacilitator().requestTimeoutMs, 7_000);
   assert.ok(3 * 7_000 + 1_500 + 3_000 < 30_000);
@@ -452,11 +483,13 @@ test("facilitator readiness bounds either hanging dependency deterministically",
   for (const dependency of ["supported", "readyz"]) {
     const timers = manualTimers();
     let readyzSignal;
+    let supportedSignal;
     const probe = createFacilitatorProbe({
       network: "eip155:8453",
       facilitatorUrl: "https://facilitator.example",
       client: {
-        async getSupported() {
+        async getSupported({ signal } = {}) {
+          supportedSignal = signal;
           if (dependency === "supported") return new Promise(() => {});
           return {
             kinds: [{
@@ -479,6 +512,40 @@ test("facilitator readiness bounds either hanging dependency deterministically",
     assert.equal(timers.callbacks.length, 2);
     timers.callbacks[dependency === "supported" ? 0 : 1]();
     await assert.rejects(checking, /facilitator readiness timed out/);
+    if (dependency === "supported") assert.equal(supportedSignal?.aborted, true);
     if (dependency === "readyz") assert.equal(readyzSignal?.aborted, true);
   }
+});
+
+test("facilitator readiness cancels supported discovery when /readyz fails", async () => {
+  let supportedSignal;
+  let supportedStarted;
+  const started = new Promise(resolve => {
+    supportedStarted = resolve;
+  });
+  const client = merchantFacilitator({
+    fetchImpl: async (_url, request) => {
+      supportedSignal = request.signal;
+      supportedStarted();
+      return new Promise((resolve, reject) => {
+        request.signal.addEventListener("abort", () => {
+          const error = new Error("request aborted");
+          error.name = "AbortError";
+          reject(error);
+        }, { once: true });
+      });
+    },
+  });
+  const probe = createFacilitatorProbe({
+    network: "eip155:8453",
+    facilitatorUrl: "https://facilitator.example",
+    client,
+    fetchImpl: async () => {
+      await started;
+      return new Response("", { status: 503 });
+    },
+  });
+
+  await assert.rejects(() => probe.check(), /facilitator readiness returned HTTP 503/);
+  assert.equal(supportedSignal?.aborted, true);
 });
