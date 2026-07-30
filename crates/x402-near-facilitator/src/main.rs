@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -117,12 +118,13 @@ async fn main() -> Result<()> {
     });
     let monitor_state = state.clone();
     let readiness_task = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(15));
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        loop {
-            interval.tick().await;
-            monitor_state.refresh_chain_readiness().await;
-        }
+        run_readiness_monitor(Duration::from_secs(15), move || {
+            let state = monitor_state.clone();
+            async move {
+                state.refresh_chain_readiness().await;
+            }
+        })
+        .await;
     });
 
     let listener = tokio::net::TcpListener::bind(config.bind_address)
@@ -148,4 +150,65 @@ async fn main() -> Result<()> {
     readiness_task.abort();
     leadership.shutdown().await;
     Ok(())
+}
+
+fn readiness_refresh_interval(period: Duration) -> tokio::time::Interval {
+    let mut interval = tokio::time::interval(period);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    interval
+}
+
+async fn run_readiness_monitor<Refresh, RefreshFuture>(period: Duration, mut refresh: Refresh)
+where
+    Refresh: FnMut() -> RefreshFuture,
+    RefreshFuture: Future<Output = ()>,
+{
+    let mut interval = readiness_refresh_interval(period);
+    // Startup already took a synchronous readiness snapshot before the listener
+    // can become ready. Tokio intervals tick immediately, so consume that tick
+    // rather than issuing the same dual-RPC snapshot twice at startup.
+    interval.tick().await;
+    loop {
+        interval.tick().await;
+        refresh().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    use super::run_readiness_monitor;
+
+    #[tokio::test(start_paused = true)]
+    async fn readiness_monitor_waits_a_full_period_after_the_startup_snapshot() {
+        let refreshes = Arc::new(AtomicUsize::new(0));
+        let monitor_refreshes = Arc::clone(&refreshes);
+        let monitor = tokio::spawn(run_readiness_monitor(Duration::from_secs(15), move || {
+            let refreshes = Arc::clone(&monitor_refreshes);
+            async move {
+                refreshes.fetch_add(1, Ordering::SeqCst);
+            }
+        }));
+
+        tokio::task::yield_now().await;
+        assert_eq!(refreshes.load(Ordering::SeqCst), 0);
+
+        tokio::time::advance(Duration::from_secs(14)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(refreshes.load(Ordering::SeqCst), 0);
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(refreshes.load(Ordering::SeqCst), 1);
+
+        tokio::time::advance(Duration::from_secs(15)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(refreshes.load(Ordering::SeqCst), 2);
+
+        monitor.abort();
+        assert!(monitor.await.is_err());
+    }
 }
