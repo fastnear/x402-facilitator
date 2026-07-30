@@ -158,10 +158,18 @@ assets and threats:
 Repeat the threat review before enabling any of:
 
 - another token or wildcard payee policy;
+- another `assetTransferMethod`, authorization contract, custody ledger, or
+  delivery mode on a supported chain;
+- a single-use anchor whose scope changes, depends on a recovered signer, or
+  can be consumed without proving the requested payment effect;
+- settlement success derived from simulation, nonce consumption, an outer
+  transaction, or a balance snapshot without exact receipt/log/event evidence;
+- an asynchronous transfer-call, callback, refund, or partial-acceptance path;
 - native NEAR payments;
 - anonymous/public settlement;
 - more than one active instance or relayer;
-- gas-key relayers, DelegateV2, or another signature curve;
+- gas-key relayers, DelegateV2, another signature curve, or another
+  multi-standard signature envelope;
 - automatic relayer refill;
 - partner-controlled webhooks or administrative HTTP endpoints;
 - transaction replacement or any recovery path that signs new bytes;

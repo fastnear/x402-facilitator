@@ -304,3 +304,63 @@ All four were resolved on 2026-07-24; the living record is
    `evidence/2026-07-23-*-golive.md` record both go-lives. — **Resolved
    in the same change that relocated this file** (README and SECURITY.md
    now state go-live status with evidence links).
+
+## Errata and superseding decisions (2026-07-27)
+
+This section appends corrections from NEAR Intents review without rewriting
+the frozen 2026-07-24 record above. The living source of truth remains
+[near-intents-adoption-gates.md](near-intents-adoption-gates.md).
+
+1. **Proposed method name.** Upstream
+   [#2948](https://github.com/x402-foundation/x402/pull/2948) is now open and
+   under review. `intents-verifier` is the proposed discriminator because
+   “NEAR Intents” also names the 1Click system described by #2102. Every
+   unqualified `intents` discriminator above is historical draft vocabulary,
+   not an advertised capability.
+2. **Wire notation.** In the NEP-413 form, `message` is a string containing
+   JSON; there is no field named `message.intents`. The ERC-191 form has no
+   envelope `message` field at all. A future implementation must parse and
+   verify each signature standard in its actual wire shape.
+3. **Simulation claim.** Contrary to the historical statement above, the
+   current documentation explicitly lists signature validation as a simulation
+   use case, matching the deployed contract's rejection of an invalid
+   signature. Simulation still does not become the facilitator's
+   signature-verification authority: local signature and signer-authorization
+   checks remain mandatory. It also omits external asynchronous effects, so it
+   cannot prove that a wallet `ft_withdraw` reached `payTo`; only the
+   synchronous debit/event outputs defined for that delivery mode can be
+   compared at preflight.
+4. **Fee claim.** One `state.fee = 1` observation plus one exact withdrawal
+   does not establish a general withdrawal fee rule or exemption. Current
+   review indicates the protocol fee applies to `token_diff` matching, but that
+   must be confirmed against pinned Verifier source and measured vectors before
+   becoming policy. Exact settlement continues to fail closed on an unexplained
+   delivery delta.
+5. **Closed wallet intent.** `FtWithdraw.msg` MUST be absent. If present, it
+   selects `ft_transfer_call`; the receiver may partially accept and the
+   resolver may refund the remainder, so outer success would not prove that the
+   merchant received the required amount. Unknown and optional fields must be
+   closed unless the merged specification assigns them exact semantics.
+6. **Nonce meaning and failure aftermath.** A consumed signer nonce proves
+   only that an authorization in that per-signer nonce domain was consumed. It
+   does not prove which payload executed or that the merchant received its
+   exact effect. Wallet-delivery failure refunds the debit to the payer's
+   Verifier balance while still consuming the nonce; the same payload cannot be
+   retried. The client needs a fresh 402 and a fresh signed authorization.
+   Reconciliation therefore requires the exact stored transaction plus
+   receipt/event evidence for token, recipient, and full amount. Missing effect
+   evidence stays nonterminal and unready.
+7. **TOCTOU.** A signed intent does not reserve or lock the payer's Verifier
+   balance. A valid preflight may still lose a race to another authorization or
+   to storage/contract-state changes before settlement. `/settle` must
+   re-verify, and post-submission failure is not a retryable pre-prepare error.
+8. **Scoped anchor.** The durable single-use identity is the raw Verifier nonce
+   in a scope containing network, Verifier contract, and canonical signer—not a
+   global nonce and not merely the request hash. This permits different signers
+   to use the same nonce while rejecting different payments that reuse one
+   signer's nonce.
+9. **Implementation container.** The earlier sibling-service decision is
+   superseded. This is an in-tree transfer method in `x402-chain-near`, the
+   closed provider enum, and the same facilitator binary and durable engine.
+   Operators may isolate the mainnet-only method in a separately configured
+   process or hostname, but there will be no copied sibling implementation.

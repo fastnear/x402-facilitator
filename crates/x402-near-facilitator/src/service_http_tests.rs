@@ -900,6 +900,122 @@ async fn assert_protected_contract(
         json!({"isValid": true, "payer": TEST_PAYER})
     );
 
+    let mut unsupported_method = valid_request(payer, 51, None)?;
+    unsupported_method["paymentPayload"]["accepted"]["extra"] =
+        json!({"assetTransferMethod": "intents-verifier"});
+    unsupported_method["paymentRequirements"]["extra"] =
+        json!({"assetTransferMethod": "intents-verifier"});
+    unsupported_method["paymentPayload"]["payload"] = json!({
+        "signedIntent": {
+            "standard": "nep413",
+            "payload": {"message": "{}"},
+            "signature": "placeholder",
+        },
+    });
+    let sends_before_unsupported = application.rpc.sends.load(Ordering::SeqCst);
+    let unsupported_verify = call(
+        &application.router,
+        http_request(
+            Method::POST,
+            "/verify",
+            serde_json::to_vec(&unsupported_method)?,
+            Some("application/json"),
+            Some(&key),
+            None,
+        )?,
+    )
+    .await?;
+    assert_eq!(unsupported_verify.status, StatusCode::OK);
+    assert_eq!(
+        unsupported_verify.json()?,
+        json!({
+            "isValid": false,
+            "invalidReason": "unsupported_asset_transfer_method",
+        })
+    );
+    let unsupported_settle = call(
+        &application.router,
+        http_request(
+            Method::POST,
+            "/settle",
+            serde_json::to_vec(&unsupported_method)?,
+            Some("application/json"),
+            Some(&key),
+            None,
+        )?,
+    )
+    .await?;
+    assert_eq!(unsupported_settle.status, StatusCode::OK);
+    assert_eq!(
+        unsupported_settle.json()?,
+        json!({
+            "success": false,
+            "errorReason": "unsupported_asset_transfer_method",
+            "transaction": "",
+            "network": "near:testnet",
+        })
+    );
+    assert_eq!(
+        application.rpc.sends.load(Ordering::SeqCst),
+        sends_before_unsupported
+    );
+
+    for (nonce, accepted_only) in [(52, true), (53, false)] {
+        let mut one_sided_unsupported_method = valid_request(payer, nonce, None)?;
+        if accepted_only {
+            one_sided_unsupported_method["paymentPayload"]["accepted"]["extra"] =
+                json!({"assetTransferMethod": "intents-verifier"});
+        } else {
+            one_sided_unsupported_method["paymentRequirements"]["extra"] =
+                json!({"assetTransferMethod": "intents-verifier"});
+        }
+        let one_sided_unsupported_verify = call(
+            &application.router,
+            http_request(
+                Method::POST,
+                "/verify",
+                serde_json::to_vec(&one_sided_unsupported_method)?,
+                Some("application/json"),
+                Some(&key),
+                None,
+            )?,
+        )
+        .await?;
+        assert_eq!(one_sided_unsupported_verify.status, StatusCode::OK);
+        assert_eq!(
+            one_sided_unsupported_verify.json()?,
+            json!({
+                "isValid": false,
+                "invalidReason": "unsupported_asset_transfer_method",
+            })
+        );
+        assert_eq!(
+            application.rpc.sends.load(Ordering::SeqCst),
+            sends_before_unsupported
+        );
+    }
+
+    let mut malformed_method = valid_request(payer, 54, None)?;
+    malformed_method["paymentPayload"]["accepted"]["extra"] = json!({"assetTransferMethod": 7});
+    malformed_method["paymentRequirements"]["extra"] = json!({"assetTransferMethod": 7});
+    let malformed_method = call(
+        &application.router,
+        http_request(
+            Method::POST,
+            "/verify",
+            serde_json::to_vec(&malformed_method)?,
+            Some("application/json"),
+            Some(&key),
+            None,
+        )?,
+    )
+    .await?;
+    assert_eq!(malformed_method.status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        malformed_method.json()?["error"]["code"],
+        "malformed_request"
+    );
+
     let missing_media = call(
         &application.router,
         http_request(

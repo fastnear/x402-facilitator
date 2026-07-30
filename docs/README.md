@@ -47,8 +47,8 @@ the current source tree rather than the state of a public deployment.
 ## Research and project history
 
 - [NEAR Intents adoption gates](near-intents-adoption-gates.md) and
-  [sibling design](near-intents-sibling-design.md) — intentionally separate,
-  not current facilitator behavior.
+  [Verifier method design](near-intents-verifier-design.md) — proposed
+  mainnet-only transfer method in the existing NEAR provider and service.
 - [NEAR Intents research log](near-intents-x402-progress.md) — dated empirical
   work and open decisions.
 - [Distribution log](distribution.md) — dated registry and directory outreach.

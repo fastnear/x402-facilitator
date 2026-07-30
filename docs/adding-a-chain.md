@@ -11,6 +11,38 @@ provider crate keeps chain primitives out of the engine; the service and
 superset database still need explicit integration for the new chain's durable
 facts.
 
+## First decide: new chain or new transfer method
+
+A new authorization or settlement method on an already supported chain is not
+automatically a new chain provider. If it shares the chain's network identity,
+RPC/finality model, signer infrastructure, and transaction primitives, prefer
+an exhaustive method variant inside the existing provider crate and
+`ChainProvider` arm. Keep its payload parser, verified type, preparation,
+stored-submission validator, receipt/effect interpreter, and `/supported`
+metadata method-specific.
+
+Do not create a sibling provider crate, service binary, or runtime plugin merely
+because the new method has a different signature format or settlement
+contract. An operator may run a separately configured instance to isolate
+availability, custody, or mainnet-only risk while still using the same binary
+and implementation.
+
+“Same chain” also does not mean “no migration.” A method with a different
+single-use domain, authorization metadata, prepared call, or terminal-effect
+proof needs additive typed journal constraints and method-specific recovery
+tests. The design proposal must explain:
+
+- whether the request hash and chain-enforced anchor differ from existing
+  methods, including the exact anchor scope;
+- which fields are closed and which optional fields change execution semantics;
+- what preflight state can change before settlement and whether signing locks
+  any funds or nonce;
+- what exact receipt, log, event, or state transition proves success;
+- what authorization is consumed on failure and whether a fresh 402 is
+  required;
+- how stored bytes are validated and reconciled without confusing methods on
+  the same chain.
+
 Open a chain-proposal issue before implementation. The proposal must identify
 the authoritative x402 scheme specification, official interoperability oracle,
 canonical network and asset policy, chain-enforced single-use anchor,
@@ -85,8 +117,9 @@ must durably record, at minimum:
 
 Use chain-conditional database constraints so nonterminal rows cannot exist
 without the facts recovery needs. Never TTL-delete nonterminal records.
-Preserve rollback compatibility deliberately and document it in the migration
-and changelog.
+Document the forward-only rollback boundary and the required restore or
+forward-fix procedure in the migration and changelog. Never imply that an older
+binary may run against the upgraded schema.
 
 The settlement engine should consume a neutral authorization projection and a
 neutral prepared-submission projection. If adding a chain requires a new
@@ -107,6 +140,9 @@ Add deterministic tests for:
 - chain reorganization or equivalent finality reversal;
 - terminal success at the chain's authoritative inner receipt/log/finality
   locus, not merely outer transaction success.
+- for each method, authorization-consumed-without-effect, refund, partial
+  acceptance, and other asynchronous failure paths;
+- row swapping between methods that share one chain and journal.
 
 Every nonterminal state must have one documented next reconciliation action.
 No recovery branch may create replacement bytes unless a separately reviewed
@@ -135,3 +171,8 @@ same durable engine; every ambiguity stays nonterminal and unready; restart
 recovery is deterministic; the exact submission is never silently replaced;
 the public contract and operator controls have cross-chain parity; and dated
 evidence exists for any deployment claim.
+
+The same definition applies to an additional transfer method. It is supported
+only when its method discriminator, single-use scope, stored-byte binding,
+failure aftermath, and exact terminal effect are independently proven without
+weakening another method on that chain.

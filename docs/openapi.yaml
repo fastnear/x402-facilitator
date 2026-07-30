@@ -13,6 +13,13 @@ info:
     every parsed level outside the explicitly extensible `extra`, `extensions`,
     and extension-schema maps.
 
+    For NEAR, this release selects the implemented `delegate` route only when
+    `extra.assetTransferMethod` is absent on both the accepted and requirements
+    sides. Any supplied string receives the definitive protocol reason
+    `unsupported_asset_transfer_method` before the mechanism payload is
+    interpreted. This deliberately keeps unmerged transfer-method vocabulary
+    out of the delegate route and does not rewrite request JSON.
+
     An EVM instance may enable the off-by-default `accept_v1` gate. Such an
     instance also accepts the legacy v1 request branch documented here for
     network aliases `base` and `base-sepolia`. It translates that branch to
@@ -270,7 +277,20 @@ components:
   schemas:
     NearNetwork:
       type: string
-      enum: [near:testnet, near:mainnet]
+      enum: ["near:testnet", "near:mainnet"]
+    NearAssetTransferMethod:
+      type: string
+      description: |
+        Reserved NEAR exact-payment route selector. No supplied value is
+        implemented in this release; omit the field to use the classic
+        `delegate` route. Any string receives the deterministic protocol reason
+        `unsupported_asset_transfer_method`.
+    NearPaymentExtra:
+      type: object
+      additionalProperties: true
+      properties:
+        assetTransferMethod:
+          $ref: "#/components/schemas/NearAssetTransferMethod"
     EvmNetwork:
       type: string
       enum: ["eip155:84532", "eip155:8453"]
@@ -346,6 +366,11 @@ components:
           $ref: "#/components/schemas/PaymentIdentifierExtension"
     NearPaymentRequirements:
       type: object
+      description: |
+        Both `paymentPayload.accepted` and `paymentRequirements` must omit
+        `assetTransferMethod` for the currently implemented delegate route. Any
+        supplied string on either side is a definitive unsupported-method
+        protocol rejection.
       required: [scheme, network, asset, amount, payTo, maxTimeoutSeconds]
       additionalProperties: false
       properties:
@@ -368,8 +393,27 @@ components:
           type: integer
           minimum: 1
         extra:
-          type: object
-          additionalProperties: true
+          $ref: "#/components/schemas/NearPaymentExtra"
+    NearDelegatePaymentRequirements:
+      allOf:
+        - $ref: "#/components/schemas/NearPaymentRequirements"
+        - type: object
+          properties:
+            extra:
+              allOf:
+                - $ref: "#/components/schemas/NearPaymentExtra"
+                - not:
+                    required: [assetTransferMethod]
+    NearRequirementsWithSelector:
+      allOf:
+        - $ref: "#/components/schemas/NearPaymentRequirements"
+        - type: object
+          required: [extra]
+          properties:
+            extra:
+              allOf:
+                - $ref: "#/components/schemas/NearPaymentExtra"
+                - required: [assetTransferMethod]
     Eip712Domain:
       type: object
       required: [name, version]
@@ -406,6 +450,11 @@ components:
           $ref: "#/components/schemas/Eip712Domain"
     NearMechanismPayload:
       type: object
+      description: |
+        Payload for the currently implemented NEAR `delegate` route, selected
+        only when `assetTransferMethod` is omitted. For a supplied unsupported
+        selector, the server returns the protocol rejection before interpreting
+        the mechanism-specific object.
       required: [signedDelegateAction]
       additionalProperties: false
       properties:
@@ -414,6 +463,13 @@ components:
           minLength: 1
           contentEncoding: base64
           description: Standard-base64 Borsh classic NEP-366 SignedDelegateAction
+    NearUnsupportedMechanismPayload:
+      type: object
+      additionalProperties: true
+      description: |
+        Opaque mechanism object retained only long enough to return
+        `unsupported_asset_transfer_method`. Its fields are not interpreted,
+        verified, journaled, or submitted.
     Erc3009Authorization:
       type: object
       required: [from, to, value, validAfter, validBefore, nonce]
@@ -452,9 +508,25 @@ components:
         resource:
           $ref: "#/components/schemas/ResourceInfo"
         accepted:
-          $ref: "#/components/schemas/NearPaymentRequirements"
+          $ref: "#/components/schemas/NearDelegatePaymentRequirements"
         payload:
           $ref: "#/components/schemas/NearMechanismPayload"
+        extensions:
+          $ref: "#/components/schemas/PaymentExtensions"
+    NearUnsupportedPaymentPayloadV2:
+      type: object
+      required: [x402Version, accepted, payload]
+      additionalProperties: false
+      properties:
+        x402Version:
+          type: integer
+          const: 2
+        resource:
+          $ref: "#/components/schemas/ResourceInfo"
+        accepted:
+          $ref: "#/components/schemas/NearPaymentRequirements"
+        payload:
+          $ref: "#/components/schemas/NearUnsupportedMechanismPayload"
         extensions:
           $ref: "#/components/schemas/PaymentExtensions"
     EvmPaymentPayloadV2:
@@ -484,7 +556,29 @@ components:
         paymentPayload:
           $ref: "#/components/schemas/NearPaymentPayloadV2"
         paymentRequirements:
+          $ref: "#/components/schemas/NearDelegatePaymentRequirements"
+    NearUnsupportedFacilitatorRequestV2:
+      type: object
+      required: [x402Version, paymentPayload, paymentRequirements]
+      additionalProperties: false
+      properties:
+        x402Version:
+          type: integer
+          const: 2
+        paymentPayload:
+          $ref: "#/components/schemas/NearUnsupportedPaymentPayloadV2"
+        paymentRequirements:
           $ref: "#/components/schemas/NearPaymentRequirements"
+      anyOf:
+        - properties:
+            paymentPayload:
+              type: object
+              properties:
+                accepted:
+                  $ref: "#/components/schemas/NearRequirementsWithSelector"
+        - properties:
+            paymentRequirements:
+              $ref: "#/components/schemas/NearRequirementsWithSelector"
     EvmFacilitatorRequestV2:
       type: object
       required: [x402Version, paymentPayload, paymentRequirements]
@@ -566,6 +660,7 @@ components:
     FacilitatorRequestV2:
       oneOf:
         - $ref: "#/components/schemas/NearFacilitatorRequestV2"
+        - $ref: "#/components/schemas/NearUnsupportedFacilitatorRequestV2"
         - $ref: "#/components/schemas/EvmFacilitatorRequestV2"
     FacilitatorRequest:
       oneOf:
