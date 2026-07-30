@@ -13,6 +13,22 @@ Patch releases remain backward compatible within the current minor line.
 
 ## [Unreleased]
 
+## [0.5.4] - 2026-07-29
+
+The NEAR hardening in this backward-compatible security patch has no
+database-schema, migration, facilitator-core configuration, or supported
+transfer-mechanism change. This tag also packages the previously merged
+merchant API and immutable deployment tooling; their separate rollout evidence
+remains historical.
+
+### Fixed
+
+- NEAR now rejects any supplied `extra.assetTransferMethod` selector before it
+  interprets the mechanism payload, fingerprints a payment, enters the
+  settlement journal, or reaches an RPC provider. The existing classic
+  `delegate` route remains selected only when the selector is absent on both
+  the accepted and requirements sides.
+
 ### Changed
 
 - Replaced the deprecated SBOM-attestation wrapper with the direct,
@@ -295,7 +311,8 @@ store, leadership, HTTP) at every step.
 Initial hardened NEAR-only release lineage (durable journal, dual-RPC
 reconciliation, leadership failover, sponsorship budgets). See git history.
 
-[Unreleased]: https://github.com/fastnear/x402-facilitator/compare/v0.5.3...HEAD
+[Unreleased]: https://github.com/fastnear/x402-facilitator/compare/v0.5.4...HEAD
+[0.5.4]: https://github.com/fastnear/x402-facilitator/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/fastnear/x402-facilitator/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/fastnear/x402-facilitator/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/fastnear/x402-facilitator/compare/v0.5.0...v0.5.1

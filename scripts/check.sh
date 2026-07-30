@@ -8,6 +8,10 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo test --workspace --all-features --locked
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --locked
+# The fuzz workspace is excluded from the root workspace but pins the same
+# local provider crates. Resolve it here so a lockstep version bump cannot
+# wait for the separate fuzz workflow to reveal a stale exact dependency.
+cargo metadata --manifest-path fuzz/Cargo.toml --locked --format-version 1 >/dev/null
 cargo package --locked --allow-dirty -p x402-chain-near
 cargo package --locked --allow-dirty -p x402-chain-eip155-provider
 
