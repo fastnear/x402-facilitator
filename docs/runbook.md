@@ -116,6 +116,9 @@ policy, and confirmation depth.
 At least daily, and after every restart or provider incident:
 
 - check `/readyz` and bounded error/settlement metrics;
+- inspect protected `chain_readiness_failure` transition events and
+  `x402_readiness_failure_transitions_total` when Base or relayer readiness
+  changes; record only their fixed reason code and outcome in evidence;
 - confirm both RPC endpoints report the configured network;
 - compare signer balance with warning and hard-stop thresholds;
 - inspect counts and ages of nonterminal states without exposing payer,
@@ -143,6 +146,21 @@ Remove the instance from paid traffic. Determine whether the failure is
 configuration, leadership, database, RPC identity/liveness, signer balance,
 startup reconciliation, or a chain-specific quarantine. Do not override
 readiness or settle manually.
+
+For a Base signer-head transition, the protected event and metric use one of
+these fixed codes: `primary_rpc_unavailable`, `backup_rpc_unavailable`,
+`both_rpc_unavailable`, `chain_id_mismatch`, or
+`pending_nonce_disagreement`. The first three require a credential-safe
+provider availability investigation; `chain_id_mismatch` is a configuration or
+provider-integrity incident; and `pending_nonce_disagreement` is ambiguous
+signer state. In every case, keep paid traffic off, do not select a single
+reader as authoritative, and do not place an RPC URL, provider response,
+observed value, signer, balance, or nonce in a ticket or evidence record.
+
+`relayer_policy_lookup_failed`, `relayer_policy_inactive`, and
+`signer_balance_hard_stop` similarly remain fail-closed. Restore database
+policy access, the exact active policy, or sufficient native gas respectively;
+never bypass the gate to resume settlement.
 
 ### Settlement is indeterminate
 

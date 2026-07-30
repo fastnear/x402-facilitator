@@ -15,8 +15,8 @@ use x402_chain_eip155_provider::prepare::{
     EvmPrepared, ExpectedEvmSubmission, StoredTransactionError, validate_signed_transaction,
 };
 use x402_chain_eip155_provider::provider::{
-    EvmChainProvider, EvmHead, EvmReconcileStatus, EvmTerminalOutcome, EvmVerifiedPayment,
-    EvmVerifyRejection,
+    EvmChainProvider, EvmHead, EvmHeadSnapshotFailure, EvmReconcileStatus, EvmTerminalOutcome,
+    EvmVerifiedPayment, EvmVerifyRejection,
 };
 use x402_chain_near::{
     NearChainProvider, NearRpcError, PreparedTransaction as NearPrepared, RelayerHead,
@@ -254,11 +254,23 @@ impl ChainProvider {
     /// snapshot, avoiding a second burst of identical RPC calls per refresh.
     pub async fn readiness_observation(&self) -> ChainReadinessObservation {
         match self {
-            Self::Near(_) => ChainReadinessObservation {
-                rpc_ready: self.readiness_probe().await,
-                signer_head: self.signer_head().await,
-            },
-            Self::Evm(provider) => observe_evm_readiness(|| provider.head()).await,
+            Self::Near(_) => {
+                let rpc_ready = self.readiness_probe().await;
+                let signer_head = self.signer_head().await;
+                let failure_class = if !rpc_ready {
+                    Some(ReadinessFailureClass::RpcUnavailable)
+                } else if signer_head.is_err() {
+                    Some(ReadinessFailureClass::SignerHeadUnavailable)
+                } else {
+                    None
+                };
+                ChainReadinessObservation {
+                    rpc_ready,
+                    signer_head,
+                    failure_class,
+                }
+            }
+            Self::Evm(provider) => observe_evm_readiness(|| provider.readiness_head()).await,
         }
     }
 
@@ -650,6 +662,10 @@ pub struct ChainReadinessObservation {
     pub rpc_ready: bool,
     /// The signer snapshot used for funding and policy readiness.
     pub signer_head: Result<SignerHead, SignerHeadError>,
+    /// Fixed, secret-free reason for a degraded chain observation, if known.
+    /// It is an internal telemetry/logging value; public `/readyz` continues to
+    /// expose only the named boolean gate states.
+    pub failure_class: Option<ReadinessFailureClass>,
 }
 
 impl fmt::Debug for ChainReadinessObservation {
@@ -658,24 +674,105 @@ impl fmt::Debug for ChainReadinessObservation {
             .debug_struct("ChainReadinessObservation")
             .field("rpc_ready", &self.rpc_ready)
             .field("signer_ready", &self.signer_head.is_ok())
+            .field(
+                "failure_class",
+                &self.failure_class.map(ReadinessFailureClass::as_str),
+            )
             .finish()
     }
 }
 
-async fn observe_evm_readiness<Load, Loaded, Error>(load_head: Load) -> ChainReadinessObservation
+/// Bounded classification for a chain-readiness observation.
+///
+/// The codes are deliberately closed, stable, and value-free. Do not add raw
+/// provider text, URLs, account addresses, balances, nonces, or observed chain
+/// values here: this type reaches operational logs and metric labels.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReadinessFailureClass {
+    /// A NEAR RPC liveness probe did not succeed.
+    RpcUnavailable,
+    /// The EVM primary reader did not produce a head snapshot.
+    PrimaryRpcUnavailable,
+    /// The EVM backup reader did not produce a head snapshot.
+    BackupRpcUnavailable,
+    /// Neither EVM reader produced a head snapshot.
+    BothRpcUnavailable,
+    /// An EVM reader reported a chain identity other than the configured chain.
+    ChainIdMismatch,
+    /// EVM readers disagreed about the pending signer nonce.
+    PendingNonceDisagreement,
+    /// A NEAR relayer snapshot could not be read after RPC liveness succeeded.
+    SignerHeadUnavailable,
+    /// The active-relayer policy lookup could not be completed.
+    RelayerPolicyLookupFailed,
+    /// No active relayer/signer policy row matched the configured signer.
+    RelayerPolicyInactive,
+    /// The signer native-gas balance was below the configured hard stop.
+    SignerBalanceHardStop,
+}
+
+impl ReadinessFailureClass {
+    /// Stable low-cardinality code for protected telemetry and structured logs.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::RpcUnavailable => "rpc_unavailable",
+            Self::PrimaryRpcUnavailable => "primary_rpc_unavailable",
+            Self::BackupRpcUnavailable => "backup_rpc_unavailable",
+            Self::BothRpcUnavailable => "both_rpc_unavailable",
+            Self::ChainIdMismatch => "chain_id_mismatch",
+            Self::PendingNonceDisagreement => "pending_nonce_disagreement",
+            Self::SignerHeadUnavailable => "signer_head_unavailable",
+            Self::RelayerPolicyLookupFailed => "relayer_policy_lookup_failed",
+            Self::RelayerPolicyInactive => "relayer_policy_inactive",
+            Self::SignerBalanceHardStop => "signer_balance_hard_stop",
+        }
+    }
+
+    /// The bounded subsystem that made this gate fail.
+    #[must_use]
+    pub const fn component(self) -> &'static str {
+        match self {
+            Self::RpcUnavailable => "rpc",
+            Self::PrimaryRpcUnavailable
+            | Self::BackupRpcUnavailable
+            | Self::BothRpcUnavailable
+            | Self::ChainIdMismatch
+            | Self::PendingNonceDisagreement => "head",
+            Self::SignerHeadUnavailable => "signer_head",
+            Self::RelayerPolicyLookupFailed | Self::RelayerPolicyInactive => "relayer_policy",
+            Self::SignerBalanceHardStop => "signer_balance",
+        }
+    }
+}
+
+impl From<EvmHeadSnapshotFailure> for ReadinessFailureClass {
+    fn from(value: EvmHeadSnapshotFailure) -> Self {
+        match value {
+            EvmHeadSnapshotFailure::PrimaryRpcUnavailable => Self::PrimaryRpcUnavailable,
+            EvmHeadSnapshotFailure::BackupRpcUnavailable => Self::BackupRpcUnavailable,
+            EvmHeadSnapshotFailure::BothRpcUnavailable => Self::BothRpcUnavailable,
+            EvmHeadSnapshotFailure::ChainIdMismatch => Self::ChainIdMismatch,
+            EvmHeadSnapshotFailure::PendingNonceDisagreement => Self::PendingNonceDisagreement,
+        }
+    }
+}
+
+async fn observe_evm_readiness<Load, Loaded>(load_head: Load) -> ChainReadinessObservation
 where
     Load: FnOnce() -> Loaded,
-    Loaded: Future<Output = Result<EvmHead, Error>>,
-    Error: fmt::Display,
+    Loaded: Future<Output = Result<EvmHead, EvmHeadSnapshotFailure>>,
 {
     match load_head().await {
         Ok(head) => ChainReadinessObservation {
             rpc_ready: true,
             signer_head: Ok(evm_head_to_signer_head(&head)),
+            failure_class: None,
         },
-        Err(error) => ChainReadinessObservation {
+        Err(failure) => ChainReadinessObservation {
             rpc_ready: false,
-            signer_head: Err(SignerHeadError(error.to_string())),
+            signer_head: Err(SignerHeadError(failure.as_str().to_owned())),
+            failure_class: Some(failure.into()),
         },
     }
 }
@@ -1367,7 +1464,10 @@ fn execution_cost_near(outcome: &FinalExecutionOutcomeView) -> (u64, u128) {
 mod tests {
     use std::cell::Cell;
 
-    use super::{EvmHead, final_outcomes_conflict, observe_evm_readiness};
+    use super::{
+        EvmHead, EvmHeadSnapshotFailure, ReadinessFailureClass, final_outcomes_conflict,
+        observe_evm_readiness,
+    };
 
     #[test]
     fn conflicting_final_results_fail_closed() {
@@ -1382,7 +1482,7 @@ mod tests {
         let observation = observe_evm_readiness(|| {
             calls.set(calls.get().saturating_add(1));
             async {
-                Ok::<_, &'static str>(EvmHead {
+                Ok::<_, EvmHeadSnapshotFailure>(EvmHead {
                     block_number: 42,
                     account_nonce: 7,
                     gas_balance_wei: 1_000,
@@ -1394,6 +1494,7 @@ mod tests {
 
         assert_eq!(calls.get(), 1);
         assert!(observation.rpc_ready);
+        assert_eq!(observation.failure_class, None);
         let signer = observation
             .signer_head
             .unwrap_or_else(|_| std::process::abort());
@@ -1407,12 +1508,92 @@ mod tests {
         let calls = Cell::new(0_u8);
         let observation = observe_evm_readiness(|| {
             calls.set(calls.get().saturating_add(1));
-            async { Err::<EvmHead, _>("unavailable") }
+            async { Err::<EvmHead, _>(EvmHeadSnapshotFailure::BothRpcUnavailable) }
         })
         .await;
 
         assert_eq!(calls.get(), 1);
         assert!(!observation.rpc_ready);
-        assert!(observation.signer_head.is_err());
+        let error = observation
+            .signer_head
+            .err()
+            .unwrap_or_else(|| std::process::abort());
+        assert_eq!(error.to_string(), "both_rpc_unavailable");
+        assert!(
+            !error
+                .to_string()
+                .contains("https://credentialed-rpc.invalid/never-log")
+        );
+        assert_eq!(
+            observation.failure_class,
+            Some(ReadinessFailureClass::BothRpcUnavailable)
+        );
+    }
+
+    #[test]
+    fn readiness_failure_classes_are_closed_and_value_free() {
+        let classes = [
+            (
+                ReadinessFailureClass::RpcUnavailable,
+                "rpc_unavailable",
+                "rpc",
+            ),
+            (
+                ReadinessFailureClass::PrimaryRpcUnavailable,
+                "primary_rpc_unavailable",
+                "head",
+            ),
+            (
+                ReadinessFailureClass::BackupRpcUnavailable,
+                "backup_rpc_unavailable",
+                "head",
+            ),
+            (
+                ReadinessFailureClass::BothRpcUnavailable,
+                "both_rpc_unavailable",
+                "head",
+            ),
+            (
+                ReadinessFailureClass::ChainIdMismatch,
+                "chain_id_mismatch",
+                "head",
+            ),
+            (
+                ReadinessFailureClass::PendingNonceDisagreement,
+                "pending_nonce_disagreement",
+                "head",
+            ),
+            (
+                ReadinessFailureClass::SignerHeadUnavailable,
+                "signer_head_unavailable",
+                "signer_head",
+            ),
+            (
+                ReadinessFailureClass::RelayerPolicyLookupFailed,
+                "relayer_policy_lookup_failed",
+                "relayer_policy",
+            ),
+            (
+                ReadinessFailureClass::RelayerPolicyInactive,
+                "relayer_policy_inactive",
+                "relayer_policy",
+            ),
+            (
+                ReadinessFailureClass::SignerBalanceHardStop,
+                "signer_balance_hard_stop",
+                "signer_balance",
+            ),
+        ];
+
+        for (class, code, component) in classes {
+            assert_eq!(class.as_str(), code);
+            assert_eq!(class.component(), component);
+            assert!(
+                class
+                    .as_str()
+                    .bytes()
+                    .all(|byte| { byte.is_ascii_lowercase() || byte == b'_' })
+            );
+        }
     }
 }

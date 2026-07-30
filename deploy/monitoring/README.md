@@ -205,6 +205,19 @@ base instance (free-tier RPC flakiness) without a single status alarm.
 Flapping alarms use `TreatMissingData: notBreaching` since a fully dead
 check already fires the status alarm.
 
+The facilitator's protected OpenTelemetry stream also records
+`x402_readiness_failure_transitions_total` and a matching structured event when
+a fixed readiness-failure class appears or changes. This is diagnosis, not a
+new public health surface: `/readyz` remains sanitized and the metric labels
+contain only `chain_family`, `component`, and a fixed reason code. Never add a
+provider hostname, URL, credential, RPC response, signer, balance, nonce, or
+transaction value as a CloudWatch or OpenTelemetry dimension.
+
+The counter increments only for a newly observed class; recovery emits the
+bounded `chain_readiness_failure_cleared` event without incrementing it. This
+keeps the counter useful for recurring failures without turning ordinary
+recovery into a false failure signal.
+
 The balance thresholds sit above the configured service warning thresholds,
 so the operator is paged with refill headroom before the facilitator itself
 starts warning, and well before the hard-stop halts settlement.
