@@ -12,6 +12,7 @@ use tracing_subscriber::layer::SubscriberExt as _;
 use tracing_subscriber::util::SubscriberInitExt as _;
 
 use crate::VERSION;
+use crate::chain::ReadinessFailureClass;
 use crate::config::{Environment, OtelConfig, read_secret};
 
 #[allow(missing_debug_implementations)]
@@ -27,6 +28,7 @@ pub struct Metrics {
     requests: Counter<u64>,
     request_duration_seconds: Histogram<f64>,
     rpc_failovers: Counter<u64>,
+    readiness_failure_transitions: Counter<u64>,
     idempotency_replays: Counter<u64>,
     settlement_results: Counter<u64>,
     pending_settlements: Gauge<u64>,
@@ -156,6 +158,9 @@ impl Metrics {
             requests: meter.u64_counter("x402_requests_total").build(),
             request_duration_seconds: meter.f64_histogram("x402_request_duration_seconds").build(),
             rpc_failovers: meter.u64_counter("x402_rpc_failovers_total").build(),
+            readiness_failure_transitions: meter
+                .u64_counter("x402_readiness_failure_transitions_total")
+                .build(),
             idempotency_replays: meter.u64_counter("x402_idempotency_replays_total").build(),
             settlement_results: meter.u64_counter("x402_settlement_results_total").build(),
             pending_settlements: meter.u64_gauge("x402_pending_settlements").build(),
@@ -183,6 +188,27 @@ impl Metrics {
     pub fn record_rpc_failover(&self, operation: &'static str) {
         self.rpc_failovers
             .add(1, &[KeyValue::new("operation", operation)]);
+    }
+
+    /// Record a classified chain-readiness failure transition.
+    ///
+    /// Both labels and the reason are closed static values. This must remain a
+    /// transition counter rather than an every-refresh counter, and must never
+    /// carry provider URLs, RPC response text, accounts, balances, nonces, or
+    /// transaction identifiers.
+    pub fn record_readiness_failure_transition(
+        &self,
+        chain_family: &'static str,
+        failure: ReadinessFailureClass,
+    ) {
+        self.readiness_failure_transitions.add(
+            1,
+            &[
+                KeyValue::new("chain_family", chain_family),
+                KeyValue::new("component", failure.component()),
+                KeyValue::new("reason", failure.as_str()),
+            ],
+        );
     }
 
     pub fn record_idempotency_replay(&self) {

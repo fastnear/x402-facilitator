@@ -288,6 +288,58 @@ pub enum EvmRpcError {
     FeeOverflow,
 }
 
+/// A bounded, secret-free reason why an EVM dual-reader signer-head snapshot
+/// could not be used for readiness.
+///
+/// This deliberately carries neither provider identity nor any observed chain
+/// value. The service may expose its fixed [`Self::as_str`] code only through
+/// protected telemetry and structured logs; public readiness remains a boolean
+/// gate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum EvmHeadSnapshotFailure {
+    /// The configured primary reader did not produce a usable snapshot.
+    #[error("primary EVM RPC head snapshot unavailable")]
+    PrimaryRpcUnavailable,
+    /// The configured backup reader did not produce a usable snapshot.
+    #[error("backup EVM RPC head snapshot unavailable")]
+    BackupRpcUnavailable,
+    /// Neither configured reader produced a usable snapshot.
+    #[error("both EVM RPC head snapshots unavailable")]
+    BothRpcUnavailable,
+    /// A reader reported a chain identity other than the configured Base chain.
+    #[error("EVM RPC chain identity did not match the configured chain")]
+    ChainIdMismatch,
+    /// The readers disagreed about the signer's pending transaction nonce.
+    #[error("EVM RPC readers disagreed about the pending signer nonce")]
+    PendingNonceDisagreement,
+}
+
+impl EvmHeadSnapshotFailure {
+    /// Stable low-cardinality code for protected telemetry and structured logs.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::PrimaryRpcUnavailable => "primary_rpc_unavailable",
+            Self::BackupRpcUnavailable => "backup_rpc_unavailable",
+            Self::BothRpcUnavailable => "both_rpc_unavailable",
+            Self::ChainIdMismatch => "chain_id_mismatch",
+            Self::PendingNonceDisagreement => "pending_nonce_disagreement",
+        }
+    }
+
+    const fn into_rpc_error(self) -> EvmRpcError {
+        match self {
+            Self::PrimaryRpcUnavailable | Self::BackupRpcUnavailable | Self::BothRpcUnavailable => {
+                EvmRpcError::Rpc
+            }
+            Self::ChainIdMismatch => EvmRpcError::ReaderDisagreement("chain id"),
+            Self::PendingNonceDisagreement => {
+                EvmRpcError::ReaderDisagreement("pending account nonce")
+            }
+        }
+    }
+}
+
 /// Why a settlement could not be prepared.
 #[derive(Debug, thiserror::Error)]
 pub enum EvmPrepareError {
@@ -487,17 +539,17 @@ fn merge_transactions(
     }
 }
 
-fn merge_heads(
+fn merge_head_values(
     expected_chain_id: u64,
     signer_address: Address,
     primary: EndpointHead,
     backup: EndpointHead,
-) -> Result<EvmHead, EvmRpcError> {
+) -> Result<EvmHead, EvmHeadSnapshotFailure> {
     if primary.chain_id != expected_chain_id || backup.chain_id != expected_chain_id {
-        return Err(EvmRpcError::ReaderDisagreement("chain id"));
+        return Err(EvmHeadSnapshotFailure::ChainIdMismatch);
     }
     if primary.pending_account_nonce != backup.pending_account_nonce {
-        return Err(EvmRpcError::ReaderDisagreement("pending account nonce"));
+        return Err(EvmHeadSnapshotFailure::PendingNonceDisagreement);
     }
     Ok(EvmHead {
         block_number: primary.block_number.min(backup.block_number),
@@ -505,6 +557,22 @@ fn merge_heads(
         gas_balance_wei: primary.gas_balance_wei.min(backup.gas_balance_wei),
         signer_address,
     })
+}
+
+fn merge_head_snapshot(
+    expected_chain_id: u64,
+    signer_address: Address,
+    primary: Result<EndpointHead, EvmRpcError>,
+    backup: Result<EndpointHead, EvmRpcError>,
+) -> Result<EvmHead, EvmHeadSnapshotFailure> {
+    match (primary, backup) {
+        (Err(_), Err(_)) => Err(EvmHeadSnapshotFailure::BothRpcUnavailable),
+        (Err(_), Ok(_)) => Err(EvmHeadSnapshotFailure::PrimaryRpcUnavailable),
+        (Ok(_), Err(_)) => Err(EvmHeadSnapshotFailure::BackupRpcUnavailable),
+        (Ok(primary), Ok(backup)) => {
+            merge_head_values(expected_chain_id, signer_address, primary, backup)
+        }
+    }
 }
 
 fn bounded_fee_envelope(
@@ -1177,11 +1245,28 @@ impl EvmChainProvider {
     ///
     /// Returns [`EvmRpcError`] if any of the block/nonce/balance lookups fail.
     pub async fn head(&self) -> Result<EvmHead, EvmRpcError> {
+        self.readiness_head()
+            .await
+            .map_err(EvmHeadSnapshotFailure::into_rpc_error)
+    }
+
+    /// Read one conservative dual-reader snapshot for readiness.
+    ///
+    /// Unlike [`Self::head`], this preserves only a closed, secret-free failure
+    /// class for the readiness boundary. It never changes the provider's
+    /// fail-closed behavior or exposes provider URLs, response bodies, signer
+    /// data, or observed chain values.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EvmHeadSnapshotFailure`] when either reader is unavailable,
+    /// reports the wrong chain identity, or disagrees about the pending nonce.
+    pub async fn readiness_head(&self) -> Result<EvmHead, EvmHeadSnapshotFailure> {
         let (primary, backup) = tokio::join!(
             retry_transient(|| self.endpoint_head_once(&self.primary_reader), |_| true),
             retry_transient(|| self.endpoint_head_once(&self.backup_reader), |_| true),
         );
-        merge_heads(self.chain_id, self.signer.address(), primary?, backup?)
+        merge_head_snapshot(self.chain_id, self.signer.address(), primary, backup)
     }
 
     async fn endpoint_head_once(
@@ -1913,7 +1998,7 @@ mod tests {
             gas_balance_wei: 40,
             ..primary
         };
-        let merged = merge_heads(84_532, Address::repeat_byte(0x11), primary, backup)?;
+        let merged = merge_head_values(84_532, Address::repeat_byte(0x11), primary, backup)?;
         assert_eq!(merged.block_number, 103);
         assert_eq!(merged.gas_balance_wei, 40);
 
@@ -1922,10 +2007,100 @@ mod tests {
             ..backup
         };
         assert!(matches!(
-            merge_heads(84_532, Address::repeat_byte(0x11), primary, divergent),
-            Err(EvmRpcError::ReaderDisagreement("pending account nonce"))
+            merge_head_values(84_532, Address::repeat_byte(0x11), primary, divergent),
+            Err(EvmHeadSnapshotFailure::PendingNonceDisagreement)
         ));
         Ok(())
+    }
+
+    #[test]
+    fn readiness_head_snapshot_failure_classes_are_bounded_and_preserve_head_semantics() {
+        let cases = [
+            (
+                EvmHeadSnapshotFailure::PrimaryRpcUnavailable,
+                "primary_rpc_unavailable",
+            ),
+            (
+                EvmHeadSnapshotFailure::BackupRpcUnavailable,
+                "backup_rpc_unavailable",
+            ),
+            (
+                EvmHeadSnapshotFailure::BothRpcUnavailable,
+                "both_rpc_unavailable",
+            ),
+            (EvmHeadSnapshotFailure::ChainIdMismatch, "chain_id_mismatch"),
+            (
+                EvmHeadSnapshotFailure::PendingNonceDisagreement,
+                "pending_nonce_disagreement",
+            ),
+        ];
+
+        for (failure, code) in cases {
+            assert_eq!(failure.as_str(), code);
+            match failure.into_rpc_error() {
+                EvmRpcError::Rpc => {
+                    assert!(matches!(
+                        failure,
+                        EvmHeadSnapshotFailure::PrimaryRpcUnavailable
+                            | EvmHeadSnapshotFailure::BackupRpcUnavailable
+                            | EvmHeadSnapshotFailure::BothRpcUnavailable
+                    ));
+                }
+                EvmRpcError::ReaderDisagreement("chain id") => {
+                    assert_eq!(failure, EvmHeadSnapshotFailure::ChainIdMismatch);
+                }
+                EvmRpcError::ReaderDisagreement("pending account nonce") => {
+                    assert_eq!(failure, EvmHeadSnapshotFailure::PendingNonceDisagreement);
+                }
+                _ => std::process::abort(),
+            }
+        }
+    }
+
+    #[test]
+    fn readiness_head_snapshot_distinguishes_reader_availability_without_identity_data() {
+        let endpoint = EndpointHead {
+            chain_id: 84_532,
+            block_number: 100,
+            pending_account_nonce: 7,
+            gas_balance_wei: 50,
+        };
+        let signer = Address::repeat_byte(0x11);
+
+        assert!(matches!(
+            merge_head_snapshot(84_532, signer, Err(EvmRpcError::Rpc), Ok(endpoint)),
+            Err(EvmHeadSnapshotFailure::PrimaryRpcUnavailable)
+        ));
+        assert!(matches!(
+            merge_head_snapshot(84_532, signer, Ok(endpoint), Err(EvmRpcError::Rpc)),
+            Err(EvmHeadSnapshotFailure::BackupRpcUnavailable)
+        ));
+        assert!(matches!(
+            merge_head_snapshot(84_532, signer, Err(EvmRpcError::Rpc), Err(EvmRpcError::Rpc)),
+            Err(EvmHeadSnapshotFailure::BothRpcUnavailable)
+        ));
+
+        let wrong_chain = EndpointHead {
+            chain_id: 1,
+            ..endpoint
+        };
+        assert!(matches!(
+            merge_head_snapshot(84_532, signer, Ok(endpoint), Ok(wrong_chain)),
+            Err(EvmHeadSnapshotFailure::ChainIdMismatch)
+        ));
+
+        // Reader availability takes precedence when the other reader cannot
+        // supply a complete snapshot. This retains `head()`'s historical
+        // fail-closed error ordering: it never treats one reader's value as
+        // sufficient evidence for a dual-reader snapshot.
+        assert!(matches!(
+            merge_head_snapshot(84_532, signer, Ok(wrong_chain), Err(EvmRpcError::Rpc)),
+            Err(EvmHeadSnapshotFailure::BackupRpcUnavailable)
+        ));
+        assert!(matches!(
+            merge_head_snapshot(84_532, signer, Err(EvmRpcError::Rpc), Ok(wrong_chain)),
+            Err(EvmHeadSnapshotFailure::PrimaryRpcUnavailable)
+        ));
     }
 
     #[test]

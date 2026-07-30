@@ -46,8 +46,8 @@ use crate::VERSION;
 use crate::auth::{ApiKeyAuthenticator, AuthError, AuthenticatedClient};
 use crate::chain::{
     AuthorizationMetadata, BroadcastOutcome, ChainProvider, Prepared, PreparedDetail,
-    ReconcileVerdict, RecoveryPolicy, SignerHead, StoredEvmSubmission, TerminalOutcome,
-    VerifiedPayment,
+    ReadinessFailureClass, ReconcileVerdict, RecoveryPolicy, SignerHead, StoredEvmSubmission,
+    TerminalOutcome, VerifiedPayment,
 };
 use crate::config::{ChainKind, ServiceConfig};
 use crate::leadership::ReadinessState;
@@ -82,7 +82,45 @@ pub struct AppState {
     rates: Arc<RateLimiter>,
     verify_slots: Arc<Semaphore>,
     relayer_lock: Arc<Mutex<()>>,
+    readiness_failures: Arc<ReadinessFailureTracker>,
     metrics: Metrics,
+}
+
+#[derive(Default)]
+struct ReadinessFailureTracker {
+    current: Mutex<Option<ReadinessFailureClass>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReadinessFailureTransition {
+    Observed(ReadinessFailureClass),
+    Cleared(ReadinessFailureClass),
+}
+
+impl ReadinessFailureTracker {
+    async fn observe(
+        &self,
+        current: Option<ReadinessFailureClass>,
+    ) -> Option<ReadinessFailureTransition> {
+        let mut observed = self.current.lock().await;
+        let previous = *observed;
+        if previous == current {
+            return None;
+        }
+        *observed = current;
+        match (previous, current) {
+            (_, Some(failure)) => Some(ReadinessFailureTransition::Observed(failure)),
+            (Some(failure), None) => Some(ReadinessFailureTransition::Cleared(failure)),
+            (None, None) => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RelayerPolicyReadiness {
+    Active,
+    Inactive,
+    LookupFailed,
 }
 
 impl AppState {
@@ -107,6 +145,7 @@ impl AppState {
             rates: Arc::new(RateLimiter::default()),
             verify_slots: Arc::new(Semaphore::new(max_concurrent_verify)),
             relayer_lock: Arc::new(Mutex::new(())),
+            readiness_failures: Arc::new(ReadinessFailureTracker::default()),
             metrics,
         }
     }
@@ -132,9 +171,10 @@ impl AppState {
         let rpc_ready = observation.rpc_ready;
         self.readiness.set_rpc(rpc_ready);
 
+        let observation_failure = observation.failure_class;
         let signer = observation.signer_head;
         let signer_account_id = self.provider.signer_account_id();
-        let policy_active = self
+        let policy_readiness = match self
             .store
             .relayer_is_active(
                 &self.config.network,
@@ -142,7 +182,12 @@ impl AppState {
                 &self.provider.signer_public_key(),
             )
             .await
-            .unwrap_or(false);
+        {
+            Ok(true) => RelayerPolicyReadiness::Active,
+            Ok(false) => RelayerPolicyReadiness::Inactive,
+            Err(_) => RelayerPolicyReadiness::LookupFailed,
+        };
+        let policy_active = policy_readiness == RelayerPolicyReadiness::Active;
         if let Ok(head) = &signer
             && let Ok(balance_yocto_near) = head.signer_balance_atomic.to_string().parse::<f64>()
         {
@@ -151,10 +196,20 @@ impl AppState {
                 !policy_active,
             );
         }
-        let relayer_ready = signer
-            .is_ok_and(|head| signer_is_funded(&self.config, head.signer_balance_atomic))
-            && policy_active;
+        let signer_ready = signer.is_ok();
+        let signer_funded = signer
+            .as_ref()
+            .is_ok_and(|head| signer_is_funded(&self.config, head.signer_balance_atomic));
+        let relayer_ready = signer_ready && signer_funded && policy_active;
         self.readiness.set_relayer(relayer_ready);
+        let failure = classify_readiness_failure(
+            rpc_ready,
+            observation_failure,
+            signer_ready,
+            policy_readiness,
+            signer_funded,
+        );
+        self.record_readiness_failure_transition(failure).await;
 
         if let Ok(summary) = self.store.journal_summary().await {
             let total = summary
@@ -184,6 +239,68 @@ impl AppState {
             self.metrics.record_budget_used_ratio(ratio);
         }
         rpc_ready && relayer_ready
+    }
+
+    async fn record_readiness_failure_transition(&self, failure: Option<ReadinessFailureClass>) {
+        let Some(transition) = self.readiness_failures.observe(failure).await else {
+            return;
+        };
+        emit_readiness_failure_transition(
+            &self.metrics,
+            self.config.chain_kind.as_str(),
+            transition,
+        );
+    }
+}
+
+fn classify_readiness_failure(
+    rpc_ready: bool,
+    observation_failure: Option<ReadinessFailureClass>,
+    signer_ready: bool,
+    policy_readiness: RelayerPolicyReadiness,
+    signer_funded: bool,
+) -> Option<ReadinessFailureClass> {
+    if !rpc_ready {
+        return Some(observation_failure.unwrap_or(ReadinessFailureClass::RpcUnavailable));
+    }
+    if !signer_ready {
+        return Some(observation_failure.unwrap_or(ReadinessFailureClass::SignerHeadUnavailable));
+    }
+    match policy_readiness {
+        RelayerPolicyReadiness::LookupFailed => {
+            Some(ReadinessFailureClass::RelayerPolicyLookupFailed)
+        }
+        RelayerPolicyReadiness::Inactive => Some(ReadinessFailureClass::RelayerPolicyInactive),
+        RelayerPolicyReadiness::Active if !signer_funded => {
+            Some(ReadinessFailureClass::SignerBalanceHardStop)
+        }
+        RelayerPolicyReadiness::Active => None,
+    }
+}
+
+fn emit_readiness_failure_transition(
+    metrics: &Metrics,
+    chain_family: &'static str,
+    transition: ReadinessFailureTransition,
+) {
+    match transition {
+        ReadinessFailureTransition::Observed(failure) => {
+            metrics.record_readiness_failure_transition(chain_family, failure);
+            tracing::warn!(
+                event = "chain_readiness_failure",
+                chain_family,
+                component = failure.component(),
+                reason = failure.as_str()
+            );
+        }
+        ReadinessFailureTransition::Cleared(failure) => {
+            tracing::info!(
+                event = "chain_readiness_failure_cleared",
+                chain_family,
+                component = failure.component(),
+                reason = failure.as_str()
+            );
+        }
     }
 }
 
@@ -2981,6 +3098,122 @@ mod tests {
         assert!(!limiter.check("x402_test_a", Operation::Verify, 1).await);
         assert!(limiter.check("x402_test_b", Operation::Verify, 1).await);
         assert!(limiter.check("x402_test_a", Operation::Settle, 1).await);
+    }
+
+    #[test]
+    fn readiness_failure_classification_is_fail_closed_and_covers_policy_and_balance() {
+        let active = RelayerPolicyReadiness::Active;
+        assert_eq!(
+            classify_readiness_failure(
+                false,
+                Some(ReadinessFailureClass::PendingNonceDisagreement),
+                true,
+                active,
+                true,
+            ),
+            Some(ReadinessFailureClass::PendingNonceDisagreement)
+        );
+        assert_eq!(
+            classify_readiness_failure(false, None, true, active, true),
+            Some(ReadinessFailureClass::RpcUnavailable)
+        );
+        assert_eq!(
+            classify_readiness_failure(true, None, false, active, false),
+            Some(ReadinessFailureClass::SignerHeadUnavailable)
+        );
+        assert_eq!(
+            classify_readiness_failure(
+                true,
+                None,
+                true,
+                RelayerPolicyReadiness::LookupFailed,
+                true,
+            ),
+            Some(ReadinessFailureClass::RelayerPolicyLookupFailed)
+        );
+        assert_eq!(
+            classify_readiness_failure(true, None, true, RelayerPolicyReadiness::Inactive, true,),
+            Some(ReadinessFailureClass::RelayerPolicyInactive)
+        );
+        assert_eq!(
+            classify_readiness_failure(true, None, true, active, false),
+            Some(ReadinessFailureClass::SignerBalanceHardStop)
+        );
+        assert_eq!(
+            classify_readiness_failure(true, None, true, active, true),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn readiness_failure_tracker_emits_only_new_or_recovered_classes() {
+        let tracker = ReadinessFailureTracker::default();
+        assert_eq!(tracker.observe(None).await, None);
+        assert_eq!(
+            tracker
+                .observe(Some(ReadinessFailureClass::PrimaryRpcUnavailable))
+                .await,
+            Some(ReadinessFailureTransition::Observed(
+                ReadinessFailureClass::PrimaryRpcUnavailable
+            ))
+        );
+        assert_eq!(
+            tracker
+                .observe(Some(ReadinessFailureClass::PrimaryRpcUnavailable))
+                .await,
+            None
+        );
+        assert_eq!(
+            tracker
+                .observe(Some(ReadinessFailureClass::PendingNonceDisagreement))
+                .await,
+            Some(ReadinessFailureTransition::Observed(
+                ReadinessFailureClass::PendingNonceDisagreement
+            ))
+        );
+        assert_eq!(
+            tracker.observe(None).await,
+            Some(ReadinessFailureTransition::Cleared(
+                ReadinessFailureClass::PendingNonceDisagreement
+            ))
+        );
+    }
+
+    #[test]
+    fn readiness_failure_events_expose_only_fixed_fields() {
+        let bytes = Arc::new(StdMutex::new(Vec::new()));
+        let writer = CaptureWriter(Arc::clone(&bytes));
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(writer)
+            .with_ansi(false)
+            .without_time()
+            .finish();
+        let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+        let metrics = Metrics::for_tests();
+        let sentinel = "https://credentialed-rpc.invalid/path?token=never-log-this";
+
+        emit_readiness_failure_transition(
+            &metrics,
+            "eip155",
+            ReadinessFailureTransition::Observed(ReadinessFailureClass::PendingNonceDisagreement),
+        );
+        emit_readiness_failure_transition(
+            &metrics,
+            "eip155",
+            ReadinessFailureTransition::Cleared(ReadinessFailureClass::PendingNonceDisagreement),
+        );
+
+        let output = bytes.lock().map_or_else(
+            |_| std::process::abort(),
+            |bytes| String::from_utf8_lossy(&bytes).into_owned(),
+        );
+        assert!(output.contains("event=\"chain_readiness_failure\""));
+        assert!(output.contains("event=\"chain_readiness_failure_cleared\""));
+        assert!(output.contains("chain_family=\"eip155\""));
+        assert!(output.contains("component=\"head\""));
+        assert!(output.contains("reason=\"pending_nonce_disagreement\""));
+        assert!(!output.contains(sentinel));
+        assert!(!output.contains("credentialed-rpc"));
     }
 
     #[tokio::test]

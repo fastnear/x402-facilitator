@@ -106,6 +106,13 @@ endpoints must return Base's `l1Fee` receipt quantity, and preparation must be
 able to call the canonical Base GasPriceOracle predeploy over the exact signed
 transaction bytes.
 
+When the dual-reader signer-head readiness snapshot fails, protected telemetry
+and structured service logs use only fixed codes such as
+`primary_rpc_unavailable`, `chain_id_mismatch`, or
+`pending_nonce_disagreement`. They never include either RPC URL, a provider
+response, observed chain/head values, signer address, balance, or nonce.
+Public `/readyz` remains limited to its sanitized boolean gate states.
+
 The service binds `network` to its canonical Circle USDC and refuses a
 mismatch, exactly as the NEAR branch binds a network to its USDC account:
 
