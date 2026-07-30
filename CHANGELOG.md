@@ -15,8 +15,11 @@ Patch releases remain backward compatible within the current minor line.
 
 ## [0.5.4] - 2026-07-29
 
-This backward-compatible security patch has no database-schema, migration,
-configuration, or supported transfer-mechanism change.
+The NEAR hardening in this backward-compatible security patch has no
+database-schema, migration, facilitator-core configuration, or supported
+transfer-mechanism change. This tag also packages the previously merged
+merchant API and immutable deployment tooling; their separate rollout evidence
+remains historical.
 
 ### Fixed
 
