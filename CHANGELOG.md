@@ -13,6 +13,20 @@ Patch releases remain backward compatible within the current minor line.
 
 ## [Unreleased]
 
+## [0.5.6] - 2026-07-29
+
+This backward-compatible startup-readiness scheduling patch has no
+database-schema, migration, service configuration, settlement-engine, or
+public wire-contract change. Public `/readyz` remains a sanitized boolean gate
+surface.
+
+### Fixed
+
+- After the synchronous startup readiness snapshot, the background monitor now
+  waits its full 15-second period before refreshing. This avoids a duplicate
+  immediate dual-RPC probe during process startup without changing the
+  subsequent monitoring cadence.
+
 ## [0.5.5] - 2026-07-29
 
 This backward-compatible readiness-diagnostics patch has no database-schema,
@@ -325,7 +339,8 @@ store, leadership, HTTP) at every step.
 Initial hardened NEAR-only release lineage (durable journal, dual-RPC
 reconciliation, leadership failover, sponsorship budgets). See git history.
 
-[Unreleased]: https://github.com/fastnear/x402-facilitator/compare/v0.5.5...HEAD
+[Unreleased]: https://github.com/fastnear/x402-facilitator/compare/v0.5.6...HEAD
+[0.5.6]: https://github.com/fastnear/x402-facilitator/compare/v0.5.5...v0.5.6
 [0.5.5]: https://github.com/fastnear/x402-facilitator/compare/v0.5.4...v0.5.5
 [0.5.4]: https://github.com/fastnear/x402-facilitator/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/fastnear/x402-facilitator/compare/v0.5.2...v0.5.3
