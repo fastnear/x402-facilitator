@@ -11,6 +11,10 @@ coverage
 *.credential
 *.secret
 deploy
-docs
+docs/*
+!docs/openapi.yaml
+!docs/catalog
+docs/catalog/*
+!docs/catalog/resources.json
 examples
 scripts

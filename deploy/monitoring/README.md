@@ -19,7 +19,7 @@ topic `arn:aws:sns:us-east-1:341982967115:x402-facilitator-alerts`.
 | `x402-near-alert.sh` | `/usr/local/bin/` | Publish a unit failure to SNS |
 | `x402-near-alert@.service` | `/etc/systemd/system/` | `OnFailure=` target for units that need immediate notification |
 | `certbot-onfailure.conf` | `/etc/systemd/system/certbot.service.d/x402-near-onfailure.conf` | Alert on failed certificate renewal |
-| `x402-canary.sh` | `/usr/local/bin/` | Synthetic `/verify`, demo `/work`, and unpaid merchant canaries every 5 minutes |
+| `x402-canary.sh` | `/usr/local/bin/` | Synthetic `/verify`, discovery, demo `/work`, and unpaid merchant canaries every 5 minutes |
 | `x402-canary.{service,timer}` | `/etc/systemd/system/` | Drive the canaries (offset 2 minutes from the metrics timer) |
 | `x402-ebs-snapshot.sh` | `/usr/local/bin/` | Daily EBS snapshot + prune (installed but disabled until the IAM grant below) |
 | `x402-ebs-snapshot.{service,timer}` | `/etc/systemd/system/` | Drive the snapshot |
@@ -100,6 +100,12 @@ carry an empty `extra` object; the Base acceptance must carry only Circle
 USDC's `USD Coin`/`2` domain. They do not sign an authorization, invoke
 application work, or move funds.
 
+The three facilitator discovery checks are fully public and secret-free. Each
+requires `/llms.txt`, `/openapi.yaml`, and a network-filtered
+`/discovery/resources` response to agree on the instance network and canonical
+asset. Every returned item must remain x402 v2 HTTP metadata for that profile;
+an empty catalog is explicitly healthy and makes no activity or volume claim.
+
 ## Instance-role policy
 
 The host authenticates with the `x402-near-backup-role` instance role
@@ -170,6 +176,7 @@ itself.
 | `x402-<inst>-verify-canary-failing` | `VerifyCanaryOk{Network=<inst>}` | `< 1` | 2 of 3 × 5 min |
 | `x402-demo-<inst>-work-canary-failing` | `DemoWorkOk{Network=<inst>}` | `< 1` | 2 of 3 × 5 min |
 | `x402-merchant-<inst>-api-canary-failing` | `MerchantApiOk{Network=<inst>}` | `< 1` | 2 of 3 × 5 min |
+| `x402-<inst>-discovery-canary-failing` | `FacilitatorDiscoveryOk{Network=<inst>}` | `< 1` | 2 of 3 × 5 min |
 | `x402-<inst>-readyz-flapping` | `HealthCheckPercentageHealthy` (Average, 1 h) | `< 90` % | 1 × 1 h |
 
 Install or refresh the two merchant alarms after the updated canary is active:
@@ -181,6 +188,29 @@ for network in mainnet base; do
     --alarm-name "x402-merchant-${network}-api-canary-failing" \
     --namespace x402near \
     --metric-name MerchantApiOk \
+    --dimensions "Name=Network,Value=${network}" \
+    --statistic Minimum \
+    --period 300 \
+    --evaluation-periods 3 \
+    --datapoints-to-alarm 2 \
+    --threshold 1 \
+    --comparison-operator LessThanThreshold \
+    --treat-missing-data breaching \
+    --alarm-actions arn:aws:sns:us-east-1:341982967115:x402-facilitator-alerts \
+    --ok-actions arn:aws:sns:us-east-1:341982967115:x402-facilitator-alerts
+done
+```
+
+Install or refresh the three public discovery alarms after the updated canary
+is active:
+
+```sh
+for network in mainnet testnet base; do
+  aws cloudwatch put-metric-alarm \
+    --region us-east-1 \
+    --alarm-name "x402-${network}-discovery-canary-failing" \
+    --namespace x402near \
+    --metric-name FacilitatorDiscoveryOk \
     --dimensions "Name=Network,Value=${network}" \
     --statistic Minimum \
     --period 300 \
@@ -243,6 +273,9 @@ starts warning, and well before the hard-stop halts settlement.
   configured production policy broken → `MerchantApiOk` drops to 0 without
   making a payment. A stopped canary timer breaches every canary alarm via
   missing data.
+- Facilitator OpenAPI, agent onboarding text, proxy allowlisting, or catalog
+  metadata broken → `FacilitatorDiscoveryOk` drops to 0. A valid empty catalog
+  remains healthy and communicates no activity claim.
 - `/readyz` flapping without sustained failure → hourly
   `HealthCheckPercentageHealthy` alarms.
 - Demo endpoints down at the static layer → the Route 53 demo `/` checks.

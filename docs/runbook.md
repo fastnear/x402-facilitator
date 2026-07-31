@@ -101,7 +101,9 @@ Startup must remain unready until the service:
 - connects through both database URLs and acquires session-pinned leadership;
 - confirms primary and backup RPC identity and liveness;
 - confirms the signer balance is above the hard stop;
-- loads at least one active client and exact recipient policy; and
+- loads at least one active client and exact recipient policy;
+- strictly validates the release-embedded merchant catalog before listening;
+  and
 - reconciles every nonterminal settlement.
 
 NEAR additionally checks the configured FullAccess key, final chain state, and
@@ -124,9 +126,15 @@ At least daily, and after every restart or provider incident:
 - inspect counts and ages of nonterminal states without exposing payer,
   authorization, transaction, or API-key material;
 - verify database backups and the age of the last restore drill;
-- review API-client budgets, policy changes, and credential rotations; and
+- review API-client budgets, policy changes, and credential rotations;
 - check certificate expiry and the reverse proxy's authentication-header
-  redaction.
+  redaction;
+- confirm `/llms.txt`, `/openapi.yaml`, and `/discovery/resources` remain
+  public only through their exact Nginx allowlist and agree on the configured
+  network and canonical asset; and
+- treat catalog admission as a source/release review: never derive it from
+  client or settlement data, and remove an entry promptly if consent or public
+  payTo evidence is withdrawn.
 
 On Ubuntu hosts using the packaged Nginx logrotate policy, let its
 `/var/log/nginx/*.log` wildcard own every facilitator, demo, and merchant log.

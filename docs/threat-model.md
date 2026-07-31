@@ -97,6 +97,14 @@ its own infrastructure threat review.
   but do not eliminate this risk.
 - API clients can legitimately request many invalid preflights. Rate limits
   bound work but do not make public RPC exhaustion impossible.
+- The release-embedded merchant catalog and agent onboarding routes are public
+  unauthenticated metadata. Strict manifest/query bounds, exact canonical
+  network and asset validation, HTTPS-only reviewed evidence, no Host-derived
+  URLs, and an exact Nginx allowlist prevent them from becoming an SSRF,
+  credential-disclosure, or operational-data surface. Catalog provenance is
+  retained in source but omitted from responses. A listing is opt-in and
+  attests only to completed admission review; it never implies settlement,
+  activity, availability, quality, or volume.
 - The origin is directly exposed to the public Internet with no CDN or proxy
   tier absorbing floods or TLS-layer attacks. Nginx limits, API-key
   authentication, and fail-closed readiness bound abuse, but volumetric
@@ -175,6 +183,8 @@ Repeat the threat review before enabling any of:
   multi-standard signature envelope;
 - automatic relayer refill;
 - partner-controlled webhooks or administrative HTTP endpoints;
+- semantic discovery, public activity rankings, or a catalog backed by live
+  client, settlement, payer, or telemetry data;
 - transaction replacement or any recovery path that signs new bytes;
 - an additional EVM chain, a non-canonical asset binding, or `accept_v1` on
   any new instance class.

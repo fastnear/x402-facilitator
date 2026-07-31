@@ -10,6 +10,35 @@ use zeroize::Zeroizing;
 const MAINNET: &str = "near:mainnet";
 const TESTNET: &str = "near:testnet";
 
+pub const NEAR_MAINNET_USDC: &str =
+    "17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1";
+pub const NEAR_TESTNET_USDC: &str =
+    "3e2210e1184b45b64c8a434c0a7e7b23cc04ea7eb7a6c3c32520d03d4afcb8af";
+pub const BASE_MAINNET_USDC: &str = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913";
+pub const BASE_SEPOLIA_USDC: &str = "0x036cbd53842c5426634e7929541ec2318f3dcf7e";
+
+/// Return the canonical Circle USDC asset for one supported network profile.
+#[must_use]
+pub fn canonical_usdc_asset(network: &str) -> Option<&'static str> {
+    match network {
+        MAINNET => Some(NEAR_MAINNET_USDC),
+        TESTNET => Some(NEAR_TESTNET_USDC),
+        "eip155:8453" => Some(BASE_MAINNET_USDC),
+        "eip155:84532" => Some(BASE_SEPOLIA_USDC),
+        _ => None,
+    }
+}
+
+/// Return the exact token EIP-712 domain for a supported Base profile.
+#[must_use]
+pub fn canonical_eip712_domain(network: &str) -> Option<(&'static str, &'static str)> {
+    match network {
+        "eip155:8453" => Some(("USD Coin", "2")),
+        "eip155:84532" => Some(("USDC", "2")),
+        _ => None,
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum Environment {
@@ -371,8 +400,6 @@ impl ServiceConfig {
         // Base only (per the launch decision): mainnet 8453, Sepolia 84532, with
         // Circle's canonical USDC on each. Bind the tier to a specific chain so a
         // testnet deploy can never point at mainnet USDC (or vice versa).
-        const BASE_MAINNET_USDC: &str = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913";
-        const BASE_SEPOLIA_USDC: &str = "0x036cbd53842c5426634e7929541ec2318f3dcf7e";
         const MAX_JOURNALED_CONFIRMATIONS: u64 = 2_147_483_647;
         let (expected_chain_id, expected_usdc) = match self.environment {
             Environment::Mainnet => (8453_u64, BASE_MAINNET_USDC),
@@ -474,11 +501,6 @@ impl ServiceConfig {
     /// counterpart (`validate_eip155`) enforces the matching Base policy.
     fn validate_near(&self) -> Result<(), ConfigError> {
         const MAX_INNER_GAS: u64 = 30_000_000_000_000;
-        const MAINNET_USDC: &str =
-            "17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1";
-        const TESTNET_USDC: &str =
-            "3e2210e1184b45b64c8a434c0a7e7b23cc04ea7eb7a6c3c32520d03d4afcb8af";
-
         if self.network != self.environment.network() {
             return Err(ConfigError::Invalid(format!(
                 "network {} does not match environment {:?}",
@@ -486,8 +508,8 @@ impl ServiceConfig {
             )));
         }
         let expected_asset = match self.environment {
-            Environment::Mainnet => MAINNET_USDC,
-            Environment::Testnet => TESTNET_USDC,
+            Environment::Mainnet => NEAR_MAINNET_USDC,
+            Environment::Testnet => NEAR_TESTNET_USDC,
         };
         if self.asset != expected_asset {
             return Err(ConfigError::Invalid(format!(

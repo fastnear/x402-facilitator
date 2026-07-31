@@ -7,6 +7,8 @@ COPY .cargo .cargo
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates crates
 COPY migrations migrations
+COPY docs/openapi.yaml docs/openapi.yaml
+COPY docs/catalog/resources.json docs/catalog/resources.json
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/src/target,sharing=locked \

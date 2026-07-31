@@ -60,6 +60,14 @@ body:
       required: true
 
   - type: checkboxes
+    id: catalog_opt_in
+    attributes:
+      label: Optional public discovery-catalog listing
+      description: Catalog review is separate from credential approval and never claims settlement activity or volume.
+      options:
+        - label: After public discovery, payTo-control evidence, and private read-only verification pass, I explicitly consent to publishing this endpoint and payment metadata in the facilitator's public discovery catalog.
+
+  - type: checkboxes
     id: acknowledgements
     attributes:
       label: Pilot acknowledgements
@@ -71,4 +79,6 @@ body:
         - label: I understand that any key is delivered once through an authenticated out-of-band channel after review, never in this issue.
           required: true
         - label: I understand public discovery plus read-only verification must pass before settlement is enabled, and the facilitator operator will not fund payer wallets or manufacture activity.
+          required: true
+        - label: I understand a catalog entry, if requested above, is an opt-in discovery record and is not evidence of settlement activity, quality, availability, or volume.
           required: true

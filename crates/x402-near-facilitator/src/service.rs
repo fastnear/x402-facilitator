@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use axum::Router;
 use axum::body::{Body, to_bytes};
-use axum::extract::{Request, State};
+use axum::extract::{RawQuery, Request, State};
 use axum::http::header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, RETRY_AFTER};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
@@ -44,6 +44,7 @@ use x402_types::scheme::SchemeRegistry;
 
 use crate::VERSION;
 use crate::auth::{ApiKeyAuthenticator, AuthError, AuthenticatedClient};
+use crate::catalog::{Catalog, CatalogQuery};
 use crate::chain::{
     AuthorizationMetadata, BroadcastOutcome, ChainProvider, Prepared, PreparedDetail,
     ReadinessFailureClass, ReconcileVerdict, RecoveryPolicy, SignerHead, StoredEvmSubmission,
@@ -65,6 +66,7 @@ use crate::v1_compat::{self, WireVersion};
 
 const SERVICE_NAME: &str = "x402-near-facilitator";
 const RETRY_SECONDS: &str = "1";
+const OPENAPI_YAML: &str = include_str!("../../../docs/openapi.yaml");
 
 #[derive(Clone)]
 #[allow(missing_debug_implementations)]
@@ -83,6 +85,7 @@ pub struct AppState {
     verify_slots: Arc<Semaphore>,
     relayer_lock: Arc<Mutex<()>>,
     readiness_failures: Arc<ReadinessFailureTracker>,
+    catalog: Arc<Catalog>,
     metrics: Metrics,
 }
 
@@ -132,6 +135,7 @@ impl AppState {
         facilitator: Option<FacilitatorLocal<SchemeRegistry>>,
         provider: ChainProvider,
         readiness: ReadinessState,
+        catalog: Catalog,
         metrics: Metrics,
     ) -> Self {
         let max_concurrent_verify = config.request_limits.max_concurrent_verify;
@@ -146,6 +150,7 @@ impl AppState {
             verify_slots: Arc::new(Semaphore::new(max_concurrent_verify)),
             relayer_lock: Arc::new(Mutex::new(())),
             readiness_failures: Arc::new(ReadinessFailureTracker::default()),
+            catalog: Arc::new(catalog),
             metrics,
         }
     }
@@ -381,6 +386,9 @@ pub fn router(state: AppState) -> Router {
     let request_id = HeaderName::from_static("x-request-id");
     Router::new()
         .route("/", get(landing))
+        .route("/openapi.yaml", get(openapi))
+        .route("/llms.txt", get(llms))
+        .route("/discovery/resources", get(discovery_resources))
         .route("/supported", get(supported))
         .route("/healthz", get(health))
         .route("/readyz", get(ready))
@@ -489,6 +497,34 @@ async fn landing(State(state): State<AppState>) -> Html<String> {
     Html(landing_page(&state.config.network, &state.config.asset))
 }
 
+async fn openapi() -> Response {
+    (
+        [(CONTENT_TYPE, "application/yaml; charset=utf-8")],
+        OPENAPI_YAML,
+    )
+        .into_response()
+}
+
+async fn llms(State(state): State<AppState>) -> Response {
+    (
+        [(CONTENT_TYPE, "text/plain; charset=utf-8")],
+        llms_text(&state.config),
+    )
+        .into_response()
+}
+
+async fn discovery_resources(State(state): State<AppState>, RawQuery(raw): RawQuery) -> Response {
+    let Ok(query) = CatalogQuery::parse(raw.as_deref()) else {
+        return ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_discovery_query",
+            "discovery query parameters are invalid",
+        )
+        .into_response();
+    };
+    axum::Json(state.catalog.list(&query)).into_response()
+}
+
 fn landing_page(network: &str, asset: &str) -> String {
     let network = escape_html_text(network);
     let asset = escape_html_text(asset);
@@ -499,6 +535,7 @@ fn landing_page(network: &str, asset: &str) -> String {
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="Open-source x402 exact-payment facilitator for Circle USDC on NEAR and Base.">
+  <link rel="service-desc" type="application/yaml" href="/openapi.yaml">
   <title>x402 facilitator for NEAR and Base</title>
 </head>
 <body>
@@ -517,9 +554,11 @@ fn landing_page(network: &str, asset: &str) -> String {
     <ul>
       <li><a href="/supported">Live capabilities</a></li>
       <li><a href="/readyz">Sanitized readiness</a></li>
+      <li><a href="/llms.txt">Agent-readable onboarding</a></li>
+      <li><a href="/openapi.yaml">Same-origin OpenAPI 3.1 contract</a></li>
+      <li><a href="/discovery/resources">Opt-in merchant discovery catalog</a></li>
       <li><a href="https://github.com/fastnear/x402-facilitator/issues/new?template=access_request.yml">Request reference-instance access</a></li>
       <li><a href="https://github.com/fastnear/x402-facilitator/blob/main/docs/reference-access.md">Integration and access guide</a></li>
-      <li><a href="https://github.com/fastnear/x402-facilitator/blob/main/docs/openapi.yaml">OpenAPI 3.1 contract</a></li>
       <li><a href="https://github.com/fastnear/x402-facilitator/tree/main/examples/resource-server">Runnable resource-server example</a></li>
       <li><a href="https://github.com/fastnear/x402-facilitator">Source and documentation</a></li>
       <li><a href="https://github.com/fastnear/x402-facilitator/security/policy">Security policy</a></li>
@@ -532,6 +571,71 @@ fn landing_page(network: &str, asset: &str) -> String {
 </html>
 "#,
         version = env!("CARGO_PKG_VERSION"),
+    )
+}
+
+fn llms_text(config: &ServiceConfig) -> String {
+    let legacy = if config.accept_v1 {
+        "A gated legacy x402 v1 transport is also accepted on this EVM instance; v2 remains canonical."
+    } else {
+        "Only canonical x402 v2 is advertised by this instance."
+    };
+    let domain = crate::config::canonical_eip712_domain(&config.network).map_or_else(
+        || "NEAR payments use the configured canonical NEP-141 Circle USDC contract.".to_owned(),
+        |(name, version)| {
+            format!(
+                "ERC-3009 signatures must use the token EIP-712 domain name {name:?}, version {version:?}."
+            )
+        },
+    );
+    format!(
+        r#"# FastNEAR x402 facilitator
+
+Open-source, API-key-gated x402 exact-payment verification and durable settlement for Circle USDC on NEAR and Base.
+
+## This instance
+
+- Network: {network}
+- Canonical asset: {asset}
+- Scheme: exact
+- Canonical wire version: x402 v2
+- Facilitator fee: 0
+- Build version: {version}
+- {legacy}
+- {domain}
+
+## Public routes
+
+- GET /supported - live payment capabilities and signer identity
+- GET /readyz - sanitized settlement readiness
+- GET /healthz - process liveness
+- GET /llms.txt - this agent-readable, instance-specific onboarding document
+- GET /openapi.yaml - same-origin OpenAPI 3.1 contract
+- GET /discovery/resources - public opt-in catalog of independently operated merchants; an entry does not claim settlement activity or volume
+
+## Authenticated routes
+
+- POST /verify - read-only payment verification
+- POST /settle - durable, idempotent settlement
+
+Resource servers require a separate API key for every deployed instance and environment. Keep the key in server-side secret storage or a mode-0600 regular file. Never put it in payer, browser, issue, log, or source code.
+
+## Integrate
+
+- Access guide: https://github.com/fastnear/x402-facilitator/blob/main/docs/reference-access.md
+- Tested TypeScript recipes: https://github.com/fastnear/x402-facilitator/tree/main/examples/resource-server/typescript
+- Runnable Express resource server: https://github.com/fastnear/x402-facilitator/tree/main/examples/resource-server
+- Access request: https://github.com/fastnear/x402-facilitator/issues/new?template=access_request.yml
+- Base merchant pilot: https://github.com/fastnear/x402-facilitator/issues/new?template=base_merchant_pilot.yml
+- Source and security: https://github.com/fastnear/x402-facilitator
+
+Base mainnet resource servers must use Circle USDC's exact EIP-712 domain name "USD Coin", version "2". Each deployed facilitator instance requires its own credential.
+
+The public reference deployment serves NEAR mainnet, NEAR testnet, and Base mainnet. Base Sepolia is a supported software profile, not a claimed live public instance.
+"#,
+        network = config.network,
+        asset = config.asset,
+        version = VERSION,
     )
 }
 
@@ -3284,7 +3388,9 @@ mod tests {
         assert!(body.contains("href=\"/readyz\""));
         assert!(body.contains("issues/new?template=access_request.yml"));
         assert!(body.contains("docs/reference-access.md"));
-        assert!(body.contains("docs/openapi.yaml"));
+        assert!(body.contains("href=\"/openapi.yaml\""));
+        assert!(body.contains("href=\"/llms.txt\""));
+        assert!(body.contains("href=\"/discovery/resources\""));
         assert!(body.contains("examples/resource-server"));
         assert!(body.contains("security/policy"));
         assert!(body.contains(r#"id="instance-network">eip155:8453"#));

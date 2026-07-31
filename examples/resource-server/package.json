@@ -3,7 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "check": "node --check index.mjs && node --check journal.mjs && node --check legacy-v1.mjs && node --check retry.mjs && node --test journal.test.mjs && node --test legacy-v1.test.mjs && node --test retry.test.mjs && node check-imports.mjs",
+    "check": "node --check index.mjs && node --check journal.mjs && node --check legacy-v1.mjs && node --check retry.mjs && node --check catalog-check.mjs && npm run typecheck && node --test journal.test.mjs legacy-v1.test.mjs retry.test.mjs catalog-check.test.mjs && node --import tsx --test typescript/recipes.test.ts && node check-imports.mjs && node catalog-check.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
     "start": "node index.mjs"
   },
   "dependencies": {
@@ -13,5 +14,10 @@
     "@x402/extensions": "2.19.0",
     "@x402/near": "2.19.0",
     "express": "5.2.1"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.1",
+    "tsx": "4.20.6",
+    "typescript": "5.9.3"
   }
 }

@@ -16,6 +16,10 @@ the current source tree rather than the state of a public deployment.
   policies, budgets, rotation, and revocation.
 - [Reference access](reference-access.md) — safe onboarding for the public,
   API-key-gated reference instances.
+- [Merchant discovery catalog](catalog.md) — immutable manifest, public API,
+  admission evidence, opt-in, removal, and non-claim policy.
+- [TypeScript recipes](typescript-recipes.md) — tested public discovery and
+  authenticated server-client setup using the pinned official packages.
 - [Reference resource server](../examples/resource-server/README.md) — runnable
   Express workload for NEAR or EVM.
 - [Agent-facing merchant API](../examples/merchant-api/README.md) — companion

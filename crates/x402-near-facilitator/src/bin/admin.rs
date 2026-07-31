@@ -12,6 +12,7 @@ use near_primitives::types::AccountId;
 use uuid::Uuid;
 use x402_near_facilitator::auth::{ApiKeyAuthenticator, GeneratedApiKey};
 use x402_near_facilitator::bootstrap::build_chain_provider;
+use x402_near_facilitator::catalog::Catalog;
 use x402_near_facilitator::config::{
     Environment, SecretFiles, ServiceConfig, is_evm_address, network_environment, read_secret,
 };
@@ -342,6 +343,7 @@ async fn reconcile_command(config_path: &Path) -> Result<()> {
         facilitator,
         provider,
         readiness.clone(),
+        Catalog::empty(),
         telemetry.metrics(),
     );
     state.refresh_chain_readiness().await;

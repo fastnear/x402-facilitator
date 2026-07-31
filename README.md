@@ -52,7 +52,9 @@ traffic.
 ## Integrate with a reference instance
 
 Start by reading the target's public `/supported` and `/readyz` endpoints,
-then follow the [end-to-end access guide](docs/reference-access.md). Reference
+or give an agent the same-origin `/llms.txt`, `/openapi.yaml`, and
+`/discovery/resources` surfaces, then follow the
+[end-to-end access guide](docs/reference-access.md). Reference
 credentials are manually approved, restricted to an exact network, canonical
 USDC asset, and payee, and issued separately for every resource-server
 instance and environment. Open a
@@ -67,6 +69,12 @@ middleware, bounded retries, and delivery idempotency. Base mainnet
 integrations must use Circle USDC's real EIP-712 domain `USD Coin` / `2`.
 Base Sepolia is supported by the software but is not a live public reference
 instance.
+
+The discovery catalog is an audited, opt-in list of independently operated
+resources. It starts empty, never contains the operator's demos, and makes no
+claim about settlement activity or volume. See the
+[catalog admission contract](docs/catalog.md) and the tested
+[TypeScript recipes](docs/typescript-recipes.md).
 
 ## Deliberate scope
 
@@ -111,6 +119,9 @@ fixtures, operational checks, and documentation. See
 | Method | Path | Authentication | Purpose |
 | --- | --- | --- | --- |
 | `GET` | `/` | Public | Identify the project and link capabilities, access onboarding, source, and security policy |
+| `GET` | `/openapi.yaml` | Public | Serve the exact checked-in OpenAPI contract from the instance origin |
+| `GET` | `/llms.txt` | Public | Describe the instance and safe integration path for agents |
+| `GET` | `/discovery/resources` | Public | List reviewed opt-in independent merchant resources using the Bazaar response vocabulary |
 | `GET` | `/supported` | Public | Advertise this instance's network, scheme, dialects, signer, and extensions |
 | `GET` | `/healthz` | Public | Process liveness and build version |
 | `GET` | `/readyz` | Public | Sanitized database, leadership, recovery, RPC, and signer readiness |

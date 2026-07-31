@@ -38,6 +38,7 @@ use super::{
     run_new_settlement, signer_is_funded,
 };
 use crate::auth::ApiKeyAuthenticator;
+use crate::catalog::Catalog;
 use crate::chain::{ChainProvider, TerminalOutcome};
 use crate::config::{
     ChainKind, Environment, PaymentIdentifierConfig, RequestLimits, ServiceConfig,
@@ -470,6 +471,7 @@ fn build_state(database: &TestDatabase, rpc: MockRpc, backup_rpc: MockRpc) -> Te
         Some(facilitator),
         ChainProvider::Near(provider),
         readiness,
+        Catalog::empty(),
         Metrics::for_tests(),
     );
     Ok(state)
