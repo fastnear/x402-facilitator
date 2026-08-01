@@ -71,6 +71,9 @@ the current source tree rather than the state of a public deployment.
 - [Merchant provenance rollout](evidence/2026-07-29-merchant-provenance-rollout.md)
   — merged-SHA deployment, public provenance checks, canary, and rollback
   checkpoint.
+- [v0.6.0 agent discovery rollout](evidence/2026-07-31-v060-agent-discovery-rollout.md)
+  — signed release, immutable three-instance promotion, public discovery
+  checks, empty catalogs, and monitoring alarms.
 - [x402-list Base service submission](evidence/2026-07-29-x402-list-base-service-submission.md)
   — free service submission, five successful unpaid endpoint probes, and
   pending manual review.
