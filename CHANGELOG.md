@@ -13,6 +13,44 @@ Patch releases remain backward compatible within the current minor line.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-31
+
+This backward-compatible discovery release adds public onboarding and merchant
+catalog surfaces without changing the canonical v2 payment endpoints, database
+schema, settlement engine, or credential model. The embedded production catalog
+launches empty; catalog publication is opt-in and does not imply settlement
+volume or activity.
+
+### Added
+
+- Public, same-origin `GET /openapi.yaml` and instance-specific `GET /llms.txt`
+  onboarding documents. The OpenAPI response is byte-identical to the signed
+  release document, and generated URLs never trust an inbound `Host` header.
+- Public Bazaar-compatible `GET /discovery/resources` with strict query
+  parsing, stable pagination and ordering, canonical network/asset filtering,
+  and case-insensitive comparison only for EVM addresses.
+- A versioned, release-embedded merchant manifest with strict startup
+  validation for canonical v2 `exact` requirements, Circle USDC profiles, Base
+  EIP-712 domains, HTTPS evidence, payTo control, explicit listing consent, and
+  bounded metadata. Operator review provenance is retained privately in the
+  manifest and omitted from public discovery responses.
+- Tested TypeScript recipes using the pinned official Bazaar client and
+  authenticated `HTTPFacilitatorClient`, plus release, Nginx, deployment, and
+  secret-free discovery-canary validation.
+
+### Fixed
+
+- Merchant readiness now cancels a pending `/supported` request when its
+  caller, deadline, or peer `/readyz` check completes unsuccessfully, preventing
+  stale background discovery work without changing payment-bearing retry
+  behavior.
+
+### Security
+
+- Updated `ruint` to 1.20.0 to resolve RUSTSEC-2026-0220. The existing
+  low-severity transitive `elliptic` advisory remains monitored because the
+  pinned `@x402/near` dependency has no available fix.
+
 ## [0.5.6] - 2026-07-29
 
 This backward-compatible startup-readiness scheduling patch has no
@@ -339,7 +377,8 @@ store, leadership, HTTP) at every step.
 Initial hardened NEAR-only release lineage (durable journal, dual-RPC
 reconciliation, leadership failover, sponsorship budgets). See git history.
 
-[Unreleased]: https://github.com/fastnear/x402-facilitator/compare/v0.5.6...HEAD
+[Unreleased]: https://github.com/fastnear/x402-facilitator/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/fastnear/x402-facilitator/compare/v0.5.6...v0.6.0
 [0.5.6]: https://github.com/fastnear/x402-facilitator/compare/v0.5.5...v0.5.6
 [0.5.5]: https://github.com/fastnear/x402-facilitator/compare/v0.5.4...v0.5.5
 [0.5.4]: https://github.com/fastnear/x402-facilitator/compare/v0.5.3...v0.5.4
