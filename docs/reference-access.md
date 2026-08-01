@@ -31,6 +31,8 @@ is not a live public reference instance.
 
 Each base URL exposes:
 
+- `GET /llms.txt` and `GET /openapi.yaml` for same-origin agent onboarding;
+- `GET /discovery/resources` for the reviewed opt-in merchant catalog;
 - `GET /supported` for the live network, wire kinds, extensions, and signer;
 - `POST /verify` and `POST /settle` for authenticated x402 requests;
 - `GET /healthz` for liveness; and
@@ -85,6 +87,13 @@ or transaction. If approved, one per-instance key is delivered exactly once by
 an authenticated out-of-band channel. The operator then confirms public
 discovery and performs read-only verification before a positive settlement
 budget can be enabled.
+
+An applicant may separately opt in to the public
+[merchant discovery catalog](catalog.md). Catalog publication requires the
+public endpoint, discovery metadata, independent payee-control evidence, and a
+successful private read-only verification. It does not require a settlement
+and does not assert activity, availability, quality, or volume. The operator's
+own demos and merchant examples are never catalog entries.
 
 ## Integrate end to end
 

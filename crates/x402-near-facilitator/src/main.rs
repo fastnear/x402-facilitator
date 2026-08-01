@@ -7,6 +7,7 @@ use clap::Parser;
 use x402_facilitator_local::util::SigDown;
 use x402_near_facilitator::auth::ApiKeyAuthenticator;
 use x402_near_facilitator::bootstrap::build_chain_provider;
+use x402_near_facilitator::catalog::Catalog;
 use x402_near_facilitator::config::{OtelConfig, SecretFiles, ServiceConfig};
 use x402_near_facilitator::leadership::{LeadershipHandle, ReadinessState};
 use x402_near_facilitator::service::{AppState, reconcile, router};
@@ -40,6 +41,7 @@ async fn main() -> Result<()> {
             secrets.backup_rpc_url.as_ref().map(|value| value.as_str()),
         )
         .context("apply protected RPC configuration")?;
+    let catalog = Catalog::load_embedded_for(&config).context("load embedded discovery catalog")?;
     let otel = OtelConfig::from_environment().context("load telemetry configuration")?;
     let telemetry = TelemetryGuard::initialize(config.environment, otel.as_ref())
         .context("initialize telemetry")?;
@@ -94,6 +96,7 @@ async fn main() -> Result<()> {
         facilitator,
         provider,
         readiness.clone(),
+        catalog,
         telemetry.metrics(),
     );
     state.refresh_chain_readiness().await;

@@ -497,6 +497,7 @@ jobs:
           diff -qr migrations "$stage/migrations"
           diff -qr deploy "$stage/deploy"
           diff -qr docs "$stage/docs"
+          test -f "$stage/docs/catalog/resources.json"
           test ! -e "$stage/examples/resource-server/node_modules"
           test ! -e "$stage/examples/merchant-api/node_modules"
           if find "$stage/examples" ! -type f ! -type d -print -quit |

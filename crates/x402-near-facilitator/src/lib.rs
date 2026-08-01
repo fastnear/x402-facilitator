@@ -9,6 +9,7 @@
 
 pub mod auth;
 pub mod bootstrap;
+pub mod catalog;
 pub mod chain;
 pub mod config;
 pub mod leadership;

@@ -24,6 +24,11 @@
 #     request returns exactly one canonical x402 v2 `exact` acceptance for
 #     the configured production policy. Base additionally requires the real
 #     Circle USDC EIP-712 domain. It never sends a payment header.
+#   - FacilitatorDiscoveryOk{Network=mainnet|testnet|base}: 1 when the
+#     facilitator's public /llms.txt, /openapi.yaml, and network-filtered
+#     /discovery/resources responses agree on the configured network and
+#     canonical asset. This probe is secret-free and an empty catalog is a
+#     valid healthy state.
 #
 # The companion alarms treat missing data as breaching, so a host, timer, or
 # credential failure that stops these pushes raises the same alert as a
@@ -181,6 +186,70 @@ merchant_canary() {
   return 1
 }
 
+# Public discovery must remain internally consistent without authentication.
+# The catalog may be empty, but every returned entry must belong to this
+# instance's exact network and canonical asset. Response details never enter
+# logs or metric dimensions.
+discovery_canary() {
+  local network=$1 base_url=$2 expected_network=$3 expected_asset=$4
+  local catalog_body llms_body openapi_body catalog_status llms_status openapi_status
+  catalog_body=$(mktemp)
+  llms_body=$(mktemp)
+  openapi_body=$(mktemp)
+  catalog_status=$(curl -sS -o "$catalog_body" -w "%{http_code}" \
+    --connect-timeout "$CURL_CONNECT_TIME" \
+    --max-time "$CURL_MAX_TIME" \
+    --get "$base_url/discovery/resources" \
+    --data-urlencode "network=$expected_network" \
+    --data-urlencode "limit=100" \
+    --data-urlencode "offset=0" || echo "000")
+  llms_status=$(curl -sS -o "$llms_body" -w "%{http_code}" \
+    --connect-timeout "$CURL_CONNECT_TIME" \
+    --max-time "$CURL_MAX_TIME" "$base_url/llms.txt" || echo "000")
+  openapi_status=$(curl -sS -o "$openapi_body" -w "%{http_code}" \
+    --connect-timeout "$CURL_CONNECT_TIME" \
+    --max-time "$CURL_MAX_TIME" "$base_url/openapi.yaml" || echo "000")
+
+  if [ "$catalog_status" = "200" ] \
+    && [ "$llms_status" = "200" ] \
+    && [ "$openapi_status" = "200" ] \
+    && jq -e --arg network "$expected_network" --arg asset "$expected_asset" '
+      .x402Version == 2
+      and (.items | type == "array")
+      and .pagination.limit == 100
+      and .pagination.offset == 0
+      and .pagination.total == (.items | length)
+      and all(.items[];
+        .type == "http"
+        and .x402Version == 2
+        and (.resource | type == "string" and startswith("https://"))
+        and (.accepts | type == "array" and length > 0)
+        and all(.accepts[];
+          .network == $network
+          and (
+            .asset == $asset
+            or (
+              ($network | startswith("eip155:"))
+              and (.asset | ascii_downcase) == ($asset | ascii_downcase)
+            )
+          )
+        )
+      )
+    ' "$catalog_body" >/dev/null 2>&1 \
+    && grep -Fqx -- "- Network: $expected_network" "$llms_body" \
+    && grep -Fqx -- "- Canonical asset: $expected_asset" "$llms_body" \
+    && grep -Fqx -- '- Facilitator fee: 0' "$llms_body" \
+    && grep -Fq '  /openapi.yaml:' "$openapi_body" \
+    && grep -Fq '  /llms.txt:' "$openapi_body" \
+    && grep -Fq '  /discovery/resources:' "$openapi_body"; then
+    rm -f "$catalog_body" "$llms_body" "$openapi_body"
+    return 0
+  fi
+  rm -f "$catalog_body" "$llms_body" "$openapi_body"
+  echo "WARN: discovery canary $network: public discovery contract check failed (catalog=$catalog_status llms=$llms_status openapi=$openapi_status)" >&2
+  return 1
+}
+
 run_verify() {
   local network=$1 base_url=$2 expected_reason=$3
   local ok=1
@@ -218,6 +287,19 @@ run_merchant() {
   echo "MerchantApiOk network=$network value=$ok"
 }
 
+run_discovery() {
+  local network=$1 base_url=$2 expected_network=$3 expected_asset=$4
+  local ok=1
+  if discovery_canary "$network" "$base_url" "$expected_network" "$expected_asset"; then
+    ok=1
+  else
+    ok=0
+    fail=1
+  fi
+  publish FacilitatorDiscoveryOk "$network" "$ok"
+  echo "FacilitatorDiscoveryOk network=$network value=$ok"
+}
+
 run_verify mainnet https://x402.mikedotexe.com invalid_exact_near_payload_signed_delegate_action
 run_verify testnet https://test.x402.mikedotexe.com invalid_exact_near_payload_signed_delegate_action
 run_verify base https://base.x402.mikedotexe.com insufficient_funds
@@ -225,6 +307,22 @@ run_verify base https://base.x402.mikedotexe.com insufficient_funds
 run_demo mainnet https://x402-demo.mikedotexe.com near:mainnet
 run_demo testnet https://x402-demo-test.mikedotexe.com near:testnet
 run_demo base https://x402-demo-base.mikedotexe.com eip155:8453
+
+run_discovery \
+  mainnet \
+  https://x402.mikedotexe.com \
+  near:mainnet \
+  17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1
+run_discovery \
+  testnet \
+  https://test.x402.mikedotexe.com \
+  near:testnet \
+  3e2210e1184b45b64c8a434c0a7e7b23cc04ea7eb7a6c3c32520d03d4afcb8af
+run_discovery \
+  base \
+  https://base.x402.mikedotexe.com \
+  eip155:8453 \
+  0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913
 
 run_merchant \
   mainnet \

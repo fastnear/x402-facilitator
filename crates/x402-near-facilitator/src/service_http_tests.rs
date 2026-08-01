@@ -43,9 +43,10 @@ use x402_facilitator_local::FacilitatorLocal;
 use x402_types::chain::{ChainIdPattern, ChainProviderOps, ChainRegistry};
 use x402_types::scheme::{SchemeBlueprints, SchemeConfig, SchemeRegistry};
 
-use super::{AppState, router};
+use super::{AppState, OPENAPI_YAML, router};
 use crate::VERSION;
 use crate::auth::{ApiKeyAuthenticator, digest_api_key};
+use crate::catalog::Catalog;
 use crate::chain::ChainProvider;
 use crate::config::{
     ChainKind, Eip155Config, Environment, PaymentIdentifierConfig, RequestLimits, ServiceConfig,
@@ -416,6 +417,14 @@ fn build_facilitator(provider: NearChainProvider) -> FacilitatorLocal<SchemeRegi
 }
 
 fn build_application(store: PgStore, metrics: Metrics) -> TestResult<TestApplication> {
+    build_application_with_catalog(store, metrics, Catalog::empty())
+}
+
+fn build_application_with_catalog(
+    store: PgStore,
+    metrics: Metrics,
+    catalog: Catalog,
+) -> TestResult<TestApplication> {
     let config = service_config()?;
     let rpc = Arc::new(MockRpc::new());
     let primary: Arc<dyn NearRpc> = rpc.clone();
@@ -434,6 +443,7 @@ fn build_application(store: PgStore, metrics: Metrics) -> TestResult<TestApplica
         Some(facilitator),
         ChainProvider::Near(provider),
         readiness.clone(),
+        catalog,
         metrics,
     );
     Ok(TestApplication {
@@ -469,6 +479,7 @@ fn build_base_protocol_application(
         None,
         ChainProvider::Near(provider),
         readiness.clone(),
+        Catalog::empty(),
         metrics,
     );
     Ok(TestApplication {
@@ -729,7 +740,77 @@ fn disconnected_store() -> PgStore {
     PgStore::from_explicit_test_pool(pool)
 }
 
+async fn assert_public_discovery_contract(application: &TestApplication) -> TestResult {
+    let landing = call(
+        &application.router,
+        http_request(Method::GET, "/", Vec::new(), None, None, None)?,
+    )
+    .await?;
+    assert_eq!(landing.status, StatusCode::OK);
+    let landing = String::from_utf8(landing.bytes)?;
+    assert!(landing.contains("href=\"/llms.txt\""));
+    assert!(landing.contains("href=\"/openapi.yaml\""));
+    assert!(landing.contains("href=\"/discovery/resources\""));
+
+    let openapi = call(
+        &application.router,
+        http_request(Method::GET, "/openapi.yaml", Vec::new(), None, None, None)?,
+    )
+    .await?;
+    assert_eq!(openapi.status, StatusCode::OK);
+    assert_eq!(openapi.bytes, OPENAPI_YAML.as_bytes());
+    assert_eq!(
+        openapi
+            .headers
+            .get(CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        Some("application/yaml; charset=utf-8")
+    );
+
+    let llms = call(
+        &application.router,
+        http_request(Method::GET, "/llms.txt", Vec::new(), None, None, None)?,
+    )
+    .await?;
+    assert_eq!(llms.status, StatusCode::OK);
+    assert_eq!(
+        llms.headers.get(CONTENT_TYPE).and_then(|v| v.to_str().ok()),
+        Some("text/plain; charset=utf-8")
+    );
+    let llms = String::from_utf8(llms.bytes)?;
+    assert!(llms.contains("Network: near:testnet"));
+    assert!(llms.contains(TESTNET_USDC));
+    assert!(llms.contains("Facilitator fee: 0"));
+    assert!(llms.contains("EIP-712 domain name \"USD Coin\", version \"2\""));
+    assert!(!llms.to_ascii_lowercase().contains("api key:"));
+
+    let discovery = call(
+        &application.router,
+        http_request(
+            Method::GET,
+            "/discovery/resources",
+            Vec::new(),
+            None,
+            None,
+            None,
+        )?,
+    )
+    .await?;
+    assert_eq!(discovery.status, StatusCode::OK);
+    assert_eq!(
+        discovery.json()?,
+        json!({
+            "x402Version": 2,
+            "items": [],
+            "pagination": {"limit": 100, "offset": 0, "total": 0}
+        })
+    );
+    Ok(())
+}
+
 async fn assert_public_contract(application: &TestApplication, payer: &Signer) -> TestResult {
+    assert_public_discovery_contract(application).await?;
+
     let health = call(
         &application.router,
         http_request(Method::GET, "/healthz", Vec::new(), None, None, None)?,
@@ -825,6 +906,127 @@ async fn assert_public_contract(application: &TestApplication, payer: &Signer) -
     .await?;
     assert_eq!(options.status, StatusCode::METHOD_NOT_ALLOWED);
     assert!(options.headers.get(ACCESS_CONTROL_ALLOW_ORIGIN).is_none());
+    Ok(())
+}
+
+fn populated_discovery_manifest() -> Value {
+    json!({
+        "schemaVersion": 1,
+        "resources": [
+            {
+                "resource": "https://merchant-two.example/work",
+                "type": "http",
+                "x402Version": 2,
+                "accepts": [{
+                    "scheme": "exact",
+                    "network": "near:testnet",
+                    "asset": TESTNET_USDC,
+                    "amount": "2000",
+                    "payTo": "second-merchant.testnet",
+                    "maxTimeoutSeconds": 300
+                }],
+                "lastUpdated": "2026-07-31T13:00:00Z",
+                "description": "Second independent merchant",
+                "extensions": {"bazaar": {
+                    "info": {"input": {"type": "http", "method": "POST"}},
+                    "schema": {"type": "object"}
+                }},
+                "admission": {
+                    "reviewedAt": "2026-07-31T13:00:00Z",
+                    "optInEvidenceUrl": "https://github.com/example/two/issues/1",
+                    "payToControlEvidenceUrl": "https://merchant-two.example/payments"
+                }
+            },
+            {
+                "resource": "https://merchant-one.example/work",
+                "type": "http",
+                "x402Version": 2,
+                "accepts": [{
+                    "scheme": "exact",
+                    "network": "near:testnet",
+                    "asset": TESTNET_USDC,
+                    "amount": "1000",
+                    "payTo": "first-merchant.testnet",
+                    "maxTimeoutSeconds": 300
+                }],
+                "lastUpdated": "2026-07-31T12:00:00Z",
+                "description": "First independent merchant",
+                "extensions": {"bazaar": {
+                    "info": {"input": {"type": "http", "method": "POST"}},
+                    "schema": {"type": "object"}
+                }},
+                "admission": {
+                    "reviewedAt": "2026-07-31T12:00:00Z",
+                    "optInEvidenceUrl": "https://github.com/example/one/issues/1",
+                    "payToControlEvidenceUrl": "https://merchant-one.example/payments"
+                }
+            }
+        ]
+    })
+}
+
+#[tokio::test]
+async fn discovery_catalog_filters_paginates_and_rejects_bad_queries() -> TestResult {
+    let manifest = populated_discovery_manifest();
+    let catalog = Catalog::from_json_for(
+        &serde_json::to_string(&manifest)?,
+        "near:testnet",
+        TESTNET_USDC,
+    )?;
+    let application =
+        build_application_with_catalog(disconnected_store(), Metrics::for_tests(), catalog)?;
+
+    let first_page = call(
+        &application.router,
+        http_request(
+            Method::GET,
+            "/discovery/resources?type=http&network=near%3Atestnet&scheme=exact&extensions=bazaar&limit=1&offset=0",
+            Vec::new(),
+            None,
+            None,
+            None,
+        )?,
+    )
+    .await?;
+    assert_eq!(first_page.status, StatusCode::OK);
+    let first_page = first_page.json()?;
+    assert_eq!(first_page["pagination"]["total"], 2);
+    assert_eq!(
+        first_page["items"][0]["resource"],
+        "https://merchant-two.example/work"
+    );
+    assert!(first_page["items"][0].get("admission").is_none());
+
+    let payee = call(
+        &application.router,
+        http_request(
+            Method::GET,
+            "/discovery/resources?payTo=first-merchant.testnet",
+            Vec::new(),
+            None,
+            None,
+            None,
+        )?,
+    )
+    .await?;
+    assert_eq!(payee.json()?["pagination"]["total"], 1);
+
+    for path in [
+        "/discovery/resources?limit=0",
+        "/discovery/resources?limit=01",
+        "/discovery/resources?network=a&network=b",
+        "/discovery/resources?network=%ZZ",
+        "/discovery/resources?network=%FF",
+        "/discovery/resources?unknown=value",
+    ] {
+        let response = call(
+            &application.router,
+            http_request(Method::GET, path, Vec::new(), None, None, None)?,
+        )
+        .await?;
+        assert_eq!(response.status, StatusCode::BAD_REQUEST);
+        assert_eq!(response.json()?["error"]["code"], "invalid_discovery_query");
+    }
     Ok(())
 }
 

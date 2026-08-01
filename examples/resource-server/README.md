@@ -100,6 +100,21 @@ Legacy v1 is never enabled for NEAR. On EVM, the reference server emits a v1
 compatibility body and accepts `X-PAYMENT` only when the configured facilitator
 also enables `accept_v1`.
 
+## TypeScript recipes
+
+The [`typescript/`](typescript/) directory contains small, type-checked recipes
+that use the pinned official packages directly:
+
+- [`discover.ts`](typescript/discover.ts) lists the facilitator's public
+  Bazaar-compatible catalog without a credential;
+- [`facilitator-client.ts`](typescript/facilitator-client.ts) constructs the
+  official server-side client and scopes one API key to `/verify` and `/settle`.
+
+The recipes permit plain HTTP only on loopback for local tests. Production URLs
+must use HTTPS, and the authenticated recipe must never be imported into
+browser or payer code. The complete Express application in this directory
+remains the reference for retries and delivery idempotency.
+
 ## Tests
 
 ```sh
@@ -107,5 +122,6 @@ npm run check
 ```
 
 The suite covers delivery-journal conflicts, bounded retries, the strict v1
-translation contract, and import hygiene. It uses no funded credentials and
-broadcasts no transaction.
+translation contract, official Bazaar-client discovery, TypeScript type
+checking, catalog-extension validation, and import hygiene. It uses no funded
+credentials and broadcasts no transaction.

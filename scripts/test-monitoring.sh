@@ -277,6 +277,26 @@ canary_near_policy_header=$(printf '%s' "$canary_near_policy" | base64 | tr -d '
 canary_base_policy_header=$(printf '%s' "$canary_base_policy" | base64 | tr -d '\n')
 canary_base_policy_extra_header=$(printf '%s' "$canary_base_policy_extra" | base64 | tr -d '\n')
 canary_base_policy_two_accepts_header=$(printf '%s' "$canary_base_policy_two_accepts" | base64 | tr -d '\n')
+canary_discovery_empty='{"x402Version":2,"items":[],"pagination":{"limit":100,"offset":0,"total":0}}'
+canary_discovery_bad='{"x402Version":2,"items":[{"resource":"https://merchant.example/work","type":"http","x402Version":2,"accepts":[{"scheme":"exact","network":"eip155:84532","asset":"0x036CbD53842c5426634e7929541eC2318f3dCF7c","amount":"1000","payTo":"0x1111111111111111111111111111111111111111","maxTimeoutSeconds":300,"extra":{"name":"USDC","version":"2"}}],"lastUpdated":"2026-07-31T12:00:00Z"}],"pagination":{"limit":100,"offset":0,"total":1}}'
+canary_openapi=$(printf '%s\n' \
+  'openapi: 3.1.0' \
+  'paths:' \
+  '  /openapi.yaml:' \
+  '  /llms.txt:' \
+  '  /discovery/resources:')
+canary_llms_mainnet=$(printf '%s\n' \
+  '- Network: near:mainnet' \
+  '- Canonical asset: 17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1' \
+  '- Facilitator fee: 0')
+canary_llms_testnet=$(printf '%s\n' \
+  '- Network: near:testnet' \
+  '- Canonical asset: 3e2210e1184b45b64c8a434c0a7e7b23cc04ea7eb7a6c3c32520d03d4afcb8af' \
+  '- Facilitator fee: 0')
+canary_llms_base=$(printf '%s\n' \
+  '- Network: eip155:8453' \
+  '- Canonical asset: 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' \
+  '- Facilitator fee: 0')
 
 printf '%s\n' \
   '#!/bin/bash' \
@@ -324,6 +344,15 @@ printf '%s\n' \
   '    -X | --data | --data-binary)' \
   '      shift 2' \
   '      ;;' \
+  '    --get)' \
+  '      shift' \
+  '      ;;' \
+  '    --data-urlencode)' \
+  '      case ${2-} in' \
+  '        network=*) url="${url}?network=${2#network=}&limit=100&offset=0" ;;' \
+  '      esac' \
+  '      shift 2' \
+  '      ;;' \
   '    http://* | https://*)' \
   '      url=$1' \
   '      shift' \
@@ -345,6 +374,34 @@ printf '%s\n' \
   '    ;;' \
   'esac' \
   'case "$url" in' \
+  '  https://x402.mikedotexe.com/discovery/resources?network=near:mainnet\&limit=100\&offset=0 | https://test.x402.mikedotexe.com/discovery/resources?network=near:testnet\&limit=100\&offset=0)' \
+  '    write_body "$CANARY_DISCOVERY_EMPTY"' \
+  '    printf 200' \
+  '    ;;' \
+  '  https://base.x402.mikedotexe.com/discovery/resources?network=eip155:8453\&limit=100\&offset=0)' \
+  '    if [ "${CANARY_SCENARIO:-success}" = base-discovery-bad ]; then' \
+  '      write_body "$CANARY_DISCOVERY_BAD"' \
+  '    else' \
+  '      write_body "$CANARY_DISCOVERY_EMPTY"' \
+  '    fi' \
+  '    printf 200' \
+  '    ;;' \
+  '  https://x402.mikedotexe.com/llms.txt)' \
+  '    write_body "$CANARY_LLMS_MAINNET"' \
+  '    printf 200' \
+  '    ;;' \
+  '  https://test.x402.mikedotexe.com/llms.txt)' \
+  '    write_body "$CANARY_LLMS_TESTNET"' \
+  '    printf 200' \
+  '    ;;' \
+  '  https://base.x402.mikedotexe.com/llms.txt)' \
+  '    write_body "$CANARY_LLMS_BASE"' \
+  '    printf 200' \
+  '    ;;' \
+  '  https://x402.mikedotexe.com/openapi.yaml | https://test.x402.mikedotexe.com/openapi.yaml | https://base.x402.mikedotexe.com/openapi.yaml)' \
+  '    write_body "$CANARY_OPENAPI"' \
+  '    printf 200' \
+  '    ;;' \
   '  https://x402.mikedotexe.com/verify | https://test.x402.mikedotexe.com/verify)' \
   '    write_body "$CANARY_VERIFY_NEAR"' \
   '    printf 200' \
@@ -420,6 +477,12 @@ run_canary() {
     CANARY_BASE_POLICY_HEADER="$canary_base_policy_header" \
     CANARY_BASE_POLICY_EXTRA_HEADER="$canary_base_policy_extra_header" \
     CANARY_BASE_POLICY_TWO_ACCEPTS_HEADER="$canary_base_policy_two_accepts_header" \
+    CANARY_DISCOVERY_EMPTY="$canary_discovery_empty" \
+    CANARY_DISCOVERY_BAD="$canary_discovery_bad" \
+    CANARY_OPENAPI="$canary_openapi" \
+    CANARY_LLMS_MAINNET="$canary_llms_mainnet" \
+    CANARY_LLMS_TESTNET="$canary_llms_testnet" \
+    CANARY_LLMS_BASE="$canary_llms_base" \
     X402_CANARY_FIXTURE_DIR="$canary_fixture_dir" \
     X402_CANARY_CREDENTIAL_DIR="$canary_credential_dir" \
     PATH="$canary_bin:$PATH" \
@@ -440,6 +503,14 @@ grep -Fq 'MerchantApiOk network=base value=1' "$canary_success_stdout" ||
   fail "healthy Base merchant policy and EIP-712 domain did not publish success"
 grep -Fq -- '--metric-name MerchantApiOk' "$canary_success_aws" ||
   fail "merchant success did not publish its CloudWatch metric"
+grep -Fq 'FacilitatorDiscoveryOk network=mainnet value=1' "$canary_success_stdout" ||
+  fail "healthy NEAR mainnet discovery did not publish success"
+grep -Fq 'FacilitatorDiscoveryOk network=testnet value=1' "$canary_success_stdout" ||
+  fail "healthy NEAR testnet discovery did not publish success"
+grep -Fq 'FacilitatorDiscoveryOk network=base value=1' "$canary_success_stdout" ||
+  fail "healthy Base discovery did not publish success"
+grep -Fq -- '--metric-name FacilitatorDiscoveryOk' "$canary_success_aws" ||
+  fail "discovery success did not publish its CloudWatch metric"
 grep -Fq -- '--config -' "$canary_success_curl" ||
   fail "verify canary did not pass credentials through stdin curl configuration"
 if grep -Fq 'canary-api-key-must-not-escape' \
@@ -504,4 +575,25 @@ if grep -Fq 'merchant-response-secret\|canary-api-key-must-not-escape' \
   fail "merchant response or credential detail escaped canary output"
 fi
 
-echo "monitoring RPC fallback, redaction, dead-man, and merchant canary checks passed"
+canary_discovery_failure_stdout="$work/canary-discovery-failure.stdout"
+canary_discovery_failure_stderr="$work/canary-discovery-failure.stderr"
+canary_discovery_failure_aws="$work/canary-discovery-failure.aws"
+: >"$canary_discovery_failure_aws"
+if run_canary base-discovery-bad "$canary_discovery_failure_stdout" \
+  "$canary_discovery_failure_stderr" "$canary_discovery_failure_aws"; then
+  fail "wrong-network Base discovery metadata must fail closed"
+fi
+grep -Fq 'FacilitatorDiscoveryOk network=mainnet value=1' \
+  "$canary_discovery_failure_stdout" ||
+  fail "a Base discovery failure stopped the independent mainnet probe"
+grep -Fq 'FacilitatorDiscoveryOk network=testnet value=1' \
+  "$canary_discovery_failure_stdout" ||
+  fail "a Base discovery failure stopped the independent testnet probe"
+grep -Fq 'FacilitatorDiscoveryOk network=base value=0' \
+  "$canary_discovery_failure_stdout" ||
+  fail "wrong-network Base discovery did not publish FacilitatorDiscoveryOk=0"
+grep -Fq 'public discovery contract check failed' \
+  "$canary_discovery_failure_stderr" ||
+  fail "Base discovery failure was not classified safely"
+
+echo "monitoring RPC fallback, redaction, dead-man, merchant, and discovery canary checks passed"

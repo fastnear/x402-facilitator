@@ -14,6 +14,7 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --lock
 cargo metadata --manifest-path fuzz/Cargo.toml --locked --format-version 1 >/dev/null
 cargo package --locked --allow-dirty -p x402-chain-near
 cargo package --locked --allow-dirty -p x402-chain-eip155-provider
+python3 -m json.tool docs/catalog/resources.json >/dev/null
 
 if command -v cargo-deny >/dev/null 2>&1; then
   # RustSec is checked by cargo-audit below. Keeping the advisory scan out of
