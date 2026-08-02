@@ -119,7 +119,7 @@ At least daily, and after every restart or provider incident:
 
 - check `/readyz` and bounded error/settlement metrics;
 - inspect protected `chain_readiness_failure` transition events and
-  `x402_readiness_failure_transitions_total` when Base or relayer readiness
+  `x402_readiness_failure_transitions_total` when either chain or signer readiness
   changes; record only their fixed reason code and outcome in evidence;
 - confirm both RPC endpoints report the configured network;
 - compare signer balance with warning and hard-stop thresholds;
@@ -155,14 +155,23 @@ configuration, leadership, database, RPC identity/liveness, signer balance,
 startup reconciliation, or a chain-specific quarantine. Do not override
 readiness or settle manually.
 
+For a NEAR dual-reader liveness transition, the protected event and metric use
+one of these fixed codes: `primary_rpc_unavailable`,
+`backup_rpc_unavailable`, `both_rpc_unavailable`, or `chain_id_mismatch`.
+The first three identify which reader failed to return both the configured
+chain identity and a final block; they do not distinguish authentication,
+transport, timeout, or provider-side failure. Confirm the named reader through
+credential-safe read-only checks. Treat `chain_id_mismatch` as a configuration
+or provider-integrity incident.
+
 For a Base signer-head transition, the protected event and metric use one of
 these fixed codes: `primary_rpc_unavailable`, `backup_rpc_unavailable`,
 `both_rpc_unavailable`, `chain_id_mismatch`, or
 `pending_nonce_disagreement`. The first three require a credential-safe
 provider availability investigation; `chain_id_mismatch` is a configuration or
 provider-integrity incident; and `pending_nonce_disagreement` is ambiguous
-signer state. In every case, keep paid traffic off, do not select a single
-reader as authoritative, and do not place an RPC URL, provider response,
+signer state. For both chain families, keep paid traffic off, do not select a
+single reader as authoritative, and do not place an RPC URL, provider response,
 observed value, signer, balance, or nonce in a ticket or evidence record.
 
 `relayer_policy_lookup_failed`, `relayer_policy_inactive`, and

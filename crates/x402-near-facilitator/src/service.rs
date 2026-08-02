@@ -3222,6 +3222,16 @@ mod tests {
             Some(ReadinessFailureClass::RpcUnavailable)
         );
         assert_eq!(
+            classify_readiness_failure(
+                false,
+                Some(ReadinessFailureClass::NearPrimaryRpcUnavailable),
+                true,
+                active,
+                true,
+            ),
+            Some(ReadinessFailureClass::NearPrimaryRpcUnavailable)
+        );
+        assert_eq!(
             classify_readiness_failure(true, None, false, active, false),
             Some(ReadinessFailureClass::SignerHeadUnavailable)
         );
@@ -3306,6 +3316,16 @@ mod tests {
             "eip155",
             ReadinessFailureTransition::Cleared(ReadinessFailureClass::PendingNonceDisagreement),
         );
+        emit_readiness_failure_transition(
+            &metrics,
+            "near",
+            ReadinessFailureTransition::Observed(ReadinessFailureClass::NearPrimaryRpcUnavailable),
+        );
+        emit_readiness_failure_transition(
+            &metrics,
+            "near",
+            ReadinessFailureTransition::Cleared(ReadinessFailureClass::NearPrimaryRpcUnavailable),
+        );
 
         let output = bytes.lock().map_or_else(
             |_| std::process::abort(),
@@ -3316,6 +3336,9 @@ mod tests {
         assert!(output.contains("chain_family=\"eip155\""));
         assert!(output.contains("component=\"head\""));
         assert!(output.contains("reason=\"pending_nonce_disagreement\""));
+        assert!(output.contains("chain_family=\"near\""));
+        assert!(output.contains("component=\"rpc\""));
+        assert!(output.contains("reason=\"primary_rpc_unavailable\""));
         assert!(!output.contains(sentinel));
         assert!(!output.contains("credentialed-rpc"));
     }

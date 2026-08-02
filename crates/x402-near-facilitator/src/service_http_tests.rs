@@ -47,7 +47,7 @@ use super::{AppState, OPENAPI_YAML, router};
 use crate::VERSION;
 use crate::auth::{ApiKeyAuthenticator, digest_api_key};
 use crate::catalog::Catalog;
-use crate::chain::ChainProvider;
+use crate::chain::{ChainProvider, ReadinessFailureClass};
 use crate::config::{
     ChainKind, Eip155Config, Environment, PaymentIdentifierConfig, RequestLimits, ServiceConfig,
     SponsorshipConfig,
@@ -73,6 +73,7 @@ struct MockRpc {
     sends: AtomicUsize,
     payer_nonce: AtomicU64,
     relayer_nonce: AtomicU64,
+    network_id_failures: AtomicUsize,
     relayer_account_failures: AtomicUsize,
     advance_payer_nonce: AtomicBool,
 }
@@ -88,6 +89,7 @@ impl MockRpc {
             sends: AtomicUsize::new(0),
             payer_nonce: AtomicU64::new(0),
             relayer_nonce: AtomicU64::new(0),
+            network_id_failures: AtomicUsize::new(0),
             relayer_account_failures: AtomicUsize::new(0),
             advance_payer_nonce: AtomicBool::new(true),
         }
@@ -95,6 +97,10 @@ impl MockRpc {
 
     fn fail_next_relayer_account_lookup(&self) {
         self.relayer_account_failures.store(1, Ordering::SeqCst);
+    }
+
+    fn fail_next_network_id_lookup(&self) {
+        self.network_id_failures.store(1, Ordering::SeqCst);
     }
 
     fn keep_payer_nonce_stable(&self) {
@@ -171,6 +177,15 @@ impl MockRpc {
 #[async_trait]
 impl NearRpc for MockRpc {
     async fn network_id(&self) -> Result<String, NearRpcError> {
+        if self
+            .network_id_failures
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return Err(NearRpcError::Timeout);
+        }
         Ok("testnet".to_owned())
     }
 
@@ -963,6 +978,29 @@ fn populated_discovery_manifest() -> Value {
             }
         ]
     })
+}
+
+#[tokio::test]
+async fn near_readiness_observation_preserves_reader_classification() -> TestResult {
+    let primary = Arc::new(MockRpc::new());
+    primary.fail_next_network_id_lookup();
+    let backup = Arc::new(MockRpc::new());
+    let primary_rpc: Arc<dyn NearRpc> = primary;
+    let backup_rpc: Arc<dyn NearRpc> = backup;
+    let relayer_signer = test_signer(TEST_RELAYER)?;
+    let provider =
+        NearChainProvider::new(NearNetwork::Testnet, primary_rpc, Arc::new(relayer_signer))
+            .with_backup_rpc(backup_rpc);
+
+    let observation = ChainProvider::Near(provider).readiness_observation().await;
+
+    assert!(!observation.rpc_ready);
+    assert!(observation.signer_head.is_ok());
+    assert_eq!(
+        observation.failure_class,
+        Some(ReadinessFailureClass::NearPrimaryRpcUnavailable)
+    );
+    Ok(())
 }
 
 #[tokio::test]

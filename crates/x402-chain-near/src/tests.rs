@@ -33,10 +33,10 @@ use x402_types::{proto, scheme::X402SchemeFacilitator};
 
 use crate::{
     ExactNearPayload, NearChainProvider, NearExactFacilitator, NearExactFacilitatorConfig,
-    NearNetwork, NearRelayerSigner, NearRpc, NearRpcError, ReceiptValidationError, RelayerHead,
-    TransactionLookup, VerificationFailure, VerificationPolicy, decode_ft_transfer_args,
-    decode_signed_delegate, interpret_final_outcome, rpc::FinalBlock, signed_transaction_hash,
-    validate_final_outcome_identity,
+    NearNetwork, NearRelayerSigner, NearRpc, NearRpcError, NearRpcReadinessFailure,
+    ReceiptValidationError, RelayerHead, TransactionLookup, VerificationFailure,
+    VerificationPolicy, decode_ft_transfer_args, decode_signed_delegate, interpret_final_outcome,
+    rpc::FinalBlock, signed_transaction_hash, validate_final_outcome_identity,
 };
 
 const ED25519_TEST_SECRET_DO_NOT_FUND: &str = "ed25519:4m8u95BQAFnA3c593fnghrApJ9c4bufLydgdUwaHnmHvRs3r5ukT68H2punoN6Mg45MnRGnH5AEQcjQGnaNPJoQu";
@@ -100,6 +100,7 @@ impl MockFailure {
 
 #[derive(Debug, Default)]
 struct RpcCalls {
+    network_id: AtomicUsize,
     final_block: AtomicUsize,
     access_key: AtomicUsize,
     sender_account: AtomicUsize,
@@ -180,6 +181,7 @@ impl MockRpc {
 #[async_trait]
 impl NearRpc for MockRpc {
     async fn network_id(&self) -> Result<String, NearRpcError> {
+        self.calls.network_id.fetch_add(1, Ordering::SeqCst);
         if let Some(error) = self.network_id_error {
             return Err(error.into_rpc_error());
         }
@@ -1765,6 +1767,7 @@ async fn readiness_apis_report_rpc_identity_finality_and_pinned_relayer_state()
     let backup = Arc::new(backup_rpc);
     let chain_provider = provider(Arc::clone(&primary))?.with_backup_rpc(backup);
 
+    assert_eq!(chain_provider.readiness_probe().await, Ok(()));
     assert_eq!(chain_provider.rpc_network_id().await?, "testnet");
     assert_eq!(chain_provider.backup_rpc_network_id().await?, "testnet");
     assert_eq!(chain_provider.rpc_final_block().await?, primary.block);
@@ -1790,6 +1793,109 @@ async fn readiness_apis_report_rpc_identity_finality_and_pinned_relayer_state()
         ))
     ));
     Ok(())
+}
+
+#[tokio::test]
+async fn readiness_probe_classifies_each_reader_without_short_circuiting()
+-> Result<(), Box<dyn Error>> {
+    let mut primary_rpc = MockRpc::new();
+    primary_rpc.block_error = Some(MockFailure::Request);
+    let primary = Arc::new(primary_rpc);
+    let backup = Arc::new(MockRpc::new());
+    let chain_provider =
+        provider(Arc::clone(&primary))?.with_backup_rpc(Arc::clone(&backup) as Arc<dyn NearRpc>);
+
+    assert_eq!(
+        chain_provider.readiness_probe().await,
+        Err(NearRpcReadinessFailure::PrimaryRpcUnavailable)
+    );
+    assert_eq!(primary.calls.network_id.load(Ordering::SeqCst), 1);
+    assert_eq!(primary.calls.final_block.load(Ordering::SeqCst), 1);
+    assert_eq!(backup.calls.network_id.load(Ordering::SeqCst), 1);
+    assert_eq!(backup.calls.final_block.load(Ordering::SeqCst), 1);
+
+    let primary = Arc::new(MockRpc::new());
+    let mut backup_rpc = MockRpc::new();
+    backup_rpc.network_id_error = Some(MockFailure::Timeout);
+    let chain_provider = provider(primary)?.with_backup_rpc(Arc::new(backup_rpc));
+    assert_eq!(
+        chain_provider.readiness_probe().await,
+        Err(NearRpcReadinessFailure::BackupRpcUnavailable)
+    );
+
+    let mut primary_rpc = MockRpc::new();
+    primary_rpc.network_id_error = Some(MockFailure::Request);
+    let mut backup_rpc = MockRpc::new();
+    backup_rpc.block_error = Some(MockFailure::Timeout);
+    let chain_provider = provider(Arc::new(primary_rpc))?.with_backup_rpc(Arc::new(backup_rpc));
+    assert_eq!(
+        chain_provider.readiness_probe().await,
+        Err(NearRpcReadinessFailure::BothRpcUnavailable)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn readiness_probe_is_fail_closed_for_identity_and_incomplete_pairs()
+-> Result<(), Box<dyn Error>> {
+    let mut wrong_chain = MockRpc::new();
+    wrong_chain.network_id = "mainnet".to_owned();
+    let chain_provider = provider(Arc::new(wrong_chain))?.with_backup_rpc(Arc::new(MockRpc::new()));
+    assert_eq!(
+        chain_provider.readiness_probe().await,
+        Err(NearRpcReadinessFailure::ChainIdMismatch)
+    );
+
+    let mut wrong_chain = MockRpc::new();
+    wrong_chain.network_id = "mainnet".to_owned();
+    let mut unavailable_backup = MockRpc::new();
+    unavailable_backup.block_error = Some(MockFailure::Timeout);
+    let chain_provider =
+        provider(Arc::new(wrong_chain))?.with_backup_rpc(Arc::new(unavailable_backup));
+    assert_eq!(
+        chain_provider.readiness_probe().await,
+        Err(NearRpcReadinessFailure::BackupRpcUnavailable)
+    );
+
+    let chain_provider = provider(Arc::new(MockRpc::new()))?;
+    assert_eq!(
+        chain_provider.readiness_probe().await,
+        Err(NearRpcReadinessFailure::BackupRpcUnavailable)
+    );
+    Ok(())
+}
+
+#[test]
+fn readiness_failure_codes_are_closed_and_value_free() {
+    let cases = [
+        (
+            NearRpcReadinessFailure::PrimaryRpcUnavailable,
+            "primary_rpc_unavailable",
+        ),
+        (
+            NearRpcReadinessFailure::BackupRpcUnavailable,
+            "backup_rpc_unavailable",
+        ),
+        (
+            NearRpcReadinessFailure::BothRpcUnavailable,
+            "both_rpc_unavailable",
+        ),
+        (
+            NearRpcReadinessFailure::ChainIdMismatch,
+            "chain_id_mismatch",
+        ),
+    ];
+
+    for (failure, code) in cases {
+        assert_eq!(failure.as_str(), code);
+        assert!(
+            failure
+                .as_str()
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+        );
+        assert!(!failure.to_string().contains("https://"));
+    }
 }
 
 #[tokio::test]

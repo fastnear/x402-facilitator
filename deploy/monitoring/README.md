@@ -248,6 +248,11 @@ bounded `chain_readiness_failure_cleared` event without incrementing it. This
 keeps the counter useful for recurring failures without turning ordinary
 recovery into a false failure signal.
 
+NEAR dual-reader liveness transitions use `component=rpc` with the bounded
+reasons `primary_rpc_unavailable`, `backup_rpc_unavailable`,
+`both_rpc_unavailable`, or `chain_id_mismatch`. Base retains its existing
+`component=head` readiness series; no provider identity is encoded in either.
+
 The balance thresholds sit above the configured service warning thresholds,
 so the operator is paged with refill headroom before the facilitator itself
 starts warning, and well before the hard-stop halts settlement.

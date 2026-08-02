@@ -74,6 +74,14 @@ All NEAR-denominated configuration is expressed as decimal yoctoNEAR strings,
 not floating point. Circle USDC quantities are decimal atomic-unit strings.
 Configuration validation requires at least 1,000 atomic USDC.
 
+NEAR readiness independently requires both configured RPC readers to report
+the expected `status.chain_id` and a final block. Protected telemetry and
+structured logs classify a degraded pair with only the fixed codes
+`primary_rpc_unavailable`, `backup_rpc_unavailable`,
+`both_rpc_unavailable`, or `chain_id_mismatch`. They never include an RPC URL,
+credential, provider response, or observed chain value. Public `/readyz`
+remains limited to its sanitized boolean gate states.
+
 ## EVM (eip155) instances
 
 An instance selects its chain family with `chain_kind`; it defaults to `near`
