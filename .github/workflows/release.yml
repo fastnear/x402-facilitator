@@ -595,7 +595,7 @@ jobs:
 
       - name: Attest native archive SBOM
         id: native-sbom-attestation
-        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         with:
           subject-path: dist/${{ steps.package.outputs.archive }}
           sbom-path: dist/${{ steps.stage.outputs.sbom }}
@@ -843,7 +843,7 @@ jobs:
 
       - name: Attest image SBOM
         id: image-sbom-attestation
-        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         with:
           subject-name: ${{ needs.preflight.outputs.image }}
           subject-digest: ${{ steps.publish.outputs.digest }}
