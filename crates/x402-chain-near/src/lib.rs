@@ -19,8 +19,8 @@ pub use mechanism::{
     decode_ft_transfer_args, decode_signed_delegate, signed_delegate_hash,
 };
 pub use provider::{
-    NearChainProvider, NearRelayerSigner, NearSettlementCoordinator, RelayerHead, RelayerStatus,
-    SettlementDisposition,
+    NearChainProvider, NearRelayerSigner, NearRpcReadinessFailure, NearSettlementCoordinator,
+    RelayerHead, RelayerStatus, SettlementDisposition,
 };
 pub use receipt::{
     ReceiptValidationError, SuccessfulTransferReceipt, interpret_final_outcome,

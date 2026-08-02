@@ -19,11 +19,11 @@ use x402_chain_eip155_provider::provider::{
     EvmVerifiedPayment, EvmVerifyRejection,
 };
 use x402_chain_near::{
-    NearChainProvider, NearRpcError, PreparedTransaction as NearPrepared, RelayerHead,
-    TransactionLookup, VerificationFailure as NearVerificationFailure, VerificationPolicy,
-    VerifiedPayment as NearVerified, interpret_final_outcome, validate_final_outcome_identity,
+    NearChainProvider, NearRpcError, NearRpcReadinessFailure, PreparedTransaction as NearPrepared,
+    RelayerHead, TransactionLookup, VerificationFailure as NearVerificationFailure,
+    VerificationPolicy, VerifiedPayment as NearVerified, interpret_final_outcome,
+    validate_final_outcome_identity,
 };
-use x402_types::chain::ChainProviderOps as _;
 use x402_types::proto;
 
 /// The settlement provider for the environment's chain. A closed enum (rather
@@ -232,16 +232,7 @@ impl ChainProvider {
     /// final block. This is the chain-liveness half of readiness.
     pub async fn readiness_probe(&self) -> bool {
         match self {
-            Self::Near(provider) => {
-                let expected = provider.chain_id().reference;
-                matches!(provider.rpc_network_id().await, Ok(network) if network == expected)
-                    && matches!(
-                        provider.backup_rpc_network_id().await,
-                        Ok(network) if network == expected
-                    )
-                    && provider.rpc_final_block().await.is_ok()
-                    && provider.backup_rpc_final_block().await.is_ok()
-            }
+            Self::Near(provider) => provider.readiness_probe().await.is_ok(),
             Self::Evm(provider) => provider.readiness_probe().await,
         }
     }
@@ -254,11 +245,16 @@ impl ChainProvider {
     /// snapshot, avoiding a second burst of identical RPC calls per refresh.
     pub async fn readiness_observation(&self) -> ChainReadinessObservation {
         match self {
-            Self::Near(_) => {
-                let rpc_ready = self.readiness_probe().await;
+            Self::Near(provider) => {
+                let rpc_failure = provider
+                    .readiness_probe()
+                    .await
+                    .err()
+                    .map(ReadinessFailureClass::from);
+                let rpc_ready = rpc_failure.is_none();
                 let signer_head = self.signer_head().await;
                 let failure_class = if !rpc_ready {
-                    Some(ReadinessFailureClass::RpcUnavailable)
+                    rpc_failure
                 } else if signer_head.is_err() {
                     Some(ReadinessFailureClass::SignerHeadUnavailable)
                 } else {
@@ -689,13 +685,21 @@ impl fmt::Debug for ChainReadinessObservation {
 /// values here: this type reaches operational logs and metric labels.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReadinessFailureClass {
-    /// A NEAR RPC liveness probe did not succeed.
+    /// A chain RPC liveness probe failed without a more specific observation.
     RpcUnavailable,
-    /// The EVM primary reader did not produce a head snapshot.
+    /// The NEAR primary reader did not produce a usable liveness snapshot.
+    NearPrimaryRpcUnavailable,
+    /// The NEAR backup reader did not produce a usable liveness snapshot.
+    NearBackupRpcUnavailable,
+    /// Neither NEAR reader produced a usable liveness snapshot.
+    NearBothRpcUnavailable,
+    /// A NEAR reader reported a chain identity other than the configured chain.
+    NearChainIdMismatch,
+    /// The EVM primary reader did not produce a usable readiness snapshot.
     PrimaryRpcUnavailable,
-    /// The EVM backup reader did not produce a head snapshot.
+    /// The EVM backup reader did not produce a usable readiness snapshot.
     BackupRpcUnavailable,
-    /// Neither EVM reader produced a head snapshot.
+    /// Neither EVM reader produced a usable readiness snapshot.
     BothRpcUnavailable,
     /// An EVM reader reported a chain identity other than the configured chain.
     ChainIdMismatch,
@@ -717,10 +721,12 @@ impl ReadinessFailureClass {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::RpcUnavailable => "rpc_unavailable",
-            Self::PrimaryRpcUnavailable => "primary_rpc_unavailable",
-            Self::BackupRpcUnavailable => "backup_rpc_unavailable",
-            Self::BothRpcUnavailable => "both_rpc_unavailable",
-            Self::ChainIdMismatch => "chain_id_mismatch",
+            Self::NearPrimaryRpcUnavailable | Self::PrimaryRpcUnavailable => {
+                "primary_rpc_unavailable"
+            }
+            Self::NearBackupRpcUnavailable | Self::BackupRpcUnavailable => "backup_rpc_unavailable",
+            Self::NearBothRpcUnavailable | Self::BothRpcUnavailable => "both_rpc_unavailable",
+            Self::NearChainIdMismatch | Self::ChainIdMismatch => "chain_id_mismatch",
             Self::PendingNonceDisagreement => "pending_nonce_disagreement",
             Self::SignerHeadUnavailable => "signer_head_unavailable",
             Self::RelayerPolicyLookupFailed => "relayer_policy_lookup_failed",
@@ -733,7 +739,11 @@ impl ReadinessFailureClass {
     #[must_use]
     pub const fn component(self) -> &'static str {
         match self {
-            Self::RpcUnavailable => "rpc",
+            Self::RpcUnavailable
+            | Self::NearPrimaryRpcUnavailable
+            | Self::NearBackupRpcUnavailable
+            | Self::NearBothRpcUnavailable
+            | Self::NearChainIdMismatch => "rpc",
             Self::PrimaryRpcUnavailable
             | Self::BackupRpcUnavailable
             | Self::BothRpcUnavailable
@@ -754,6 +764,17 @@ impl From<EvmHeadSnapshotFailure> for ReadinessFailureClass {
             EvmHeadSnapshotFailure::BothRpcUnavailable => Self::BothRpcUnavailable,
             EvmHeadSnapshotFailure::ChainIdMismatch => Self::ChainIdMismatch,
             EvmHeadSnapshotFailure::PendingNonceDisagreement => Self::PendingNonceDisagreement,
+        }
+    }
+}
+
+impl From<NearRpcReadinessFailure> for ReadinessFailureClass {
+    fn from(value: NearRpcReadinessFailure) -> Self {
+        match value {
+            NearRpcReadinessFailure::PrimaryRpcUnavailable => Self::NearPrimaryRpcUnavailable,
+            NearRpcReadinessFailure::BackupRpcUnavailable => Self::NearBackupRpcUnavailable,
+            NearRpcReadinessFailure::BothRpcUnavailable => Self::NearBothRpcUnavailable,
+            NearRpcReadinessFailure::ChainIdMismatch => Self::NearChainIdMismatch,
         }
     }
 }
@@ -1465,8 +1486,8 @@ mod tests {
     use std::cell::Cell;
 
     use super::{
-        EvmHead, EvmHeadSnapshotFailure, ReadinessFailureClass, final_outcomes_conflict,
-        observe_evm_readiness,
+        EvmHead, EvmHeadSnapshotFailure, NearRpcReadinessFailure, ReadinessFailureClass,
+        final_outcomes_conflict, observe_evm_readiness,
     };
 
     #[test]
@@ -1539,6 +1560,26 @@ mod tests {
                 "rpc",
             ),
             (
+                ReadinessFailureClass::NearPrimaryRpcUnavailable,
+                "primary_rpc_unavailable",
+                "rpc",
+            ),
+            (
+                ReadinessFailureClass::NearBackupRpcUnavailable,
+                "backup_rpc_unavailable",
+                "rpc",
+            ),
+            (
+                ReadinessFailureClass::NearBothRpcUnavailable,
+                "both_rpc_unavailable",
+                "rpc",
+            ),
+            (
+                ReadinessFailureClass::NearChainIdMismatch,
+                "chain_id_mismatch",
+                "rpc",
+            ),
+            (
                 ReadinessFailureClass::PrimaryRpcUnavailable,
                 "primary_rpc_unavailable",
                 "head",
@@ -1594,6 +1635,35 @@ mod tests {
                     .bytes()
                     .all(|byte| { byte.is_ascii_lowercase() || byte == b'_' })
             );
+        }
+    }
+
+    #[test]
+    fn near_readiness_failures_preserve_reader_and_rpc_component() {
+        let cases = [
+            (
+                NearRpcReadinessFailure::PrimaryRpcUnavailable,
+                ReadinessFailureClass::NearPrimaryRpcUnavailable,
+            ),
+            (
+                NearRpcReadinessFailure::BackupRpcUnavailable,
+                ReadinessFailureClass::NearBackupRpcUnavailable,
+            ),
+            (
+                NearRpcReadinessFailure::BothRpcUnavailable,
+                ReadinessFailureClass::NearBothRpcUnavailable,
+            ),
+            (
+                NearRpcReadinessFailure::ChainIdMismatch,
+                ReadinessFailureClass::NearChainIdMismatch,
+            ),
+        ];
+
+        for (failure, expected) in cases {
+            let observed = ReadinessFailureClass::from(failure);
+            assert_eq!(observed, expected);
+            assert_eq!(observed.component(), "rpc");
+            assert_eq!(observed.as_str(), failure.as_str());
         }
     }
 }

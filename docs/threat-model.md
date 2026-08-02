@@ -149,13 +149,14 @@ assets and threats:
   mined-then-missing transaction returns to nonterminal. No recovery path
   signs replacement bytes, matching the NEAR rule.
 - **RPC trust**: durable signer-head and receipt decisions require two distinct
-  configured readers. Chain-ID, pending-nonce, or receipt disagreement is
-  indeterminate; conservative head/balance observations gate progress. A
-  readiness transition may identify only a fixed class (reader unavailable,
-  chain-ID mismatch, or pending-nonce disagreement); it never exposes a
-  provider URL, response, chain value, signer, balance, nonce, or transaction
-  value. Operator independence and availability still depend on the endpoints
-  a self-hoster chooses.
+  configured readers. NEAR liveness likewise requires both readers to report
+  the expected chain and a final block. Chain-ID, pending-nonce, or receipt
+  disagreement is indeterminate; conservative head/balance observations gate
+  progress. A readiness transition may identify only a fixed class (reader
+  unavailable, chain-ID mismatch, or pending-nonce disagreement); it never
+  exposes a provider URL, response, chain value, signer, balance, nonce, or
+  transaction value. Operator independence and availability still depend on
+  the endpoints a self-hoster chooses.
 - **Legacy v1 wire (`accept_v1`)**: adds no new authorization semantics — a
   v1 request is strictly translated (deny-unknown-fields) into the canonical
   v2 shape at the parse boundary, so policy, verification, budgets, and the

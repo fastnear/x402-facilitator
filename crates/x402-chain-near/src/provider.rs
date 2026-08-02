@@ -67,6 +67,42 @@ pub struct RelayerStatus {
     pub account: AccountView,
 }
 
+/// A bounded, secret-free reason why the dual-reader NEAR liveness probe
+/// could not be used for readiness.
+///
+/// This deliberately carries neither provider identity nor any observed chain
+/// value. Callers may expose its fixed [`Self::as_str`] code only through
+/// protected telemetry and structured logs; public readiness remains a boolean
+/// gate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum NearRpcReadinessFailure {
+    /// The configured primary reader did not produce a usable liveness result.
+    #[error("primary NEAR RPC readiness probe unavailable")]
+    PrimaryRpcUnavailable,
+    /// The configured backup reader did not produce a usable liveness result.
+    #[error("backup NEAR RPC readiness probe unavailable")]
+    BackupRpcUnavailable,
+    /// Neither configured reader produced a usable liveness result.
+    #[error("both NEAR RPC readiness probes unavailable")]
+    BothRpcUnavailable,
+    /// Both readers responded, but at least one reported the wrong NEAR chain.
+    #[error("NEAR RPC chain identity did not match the configured chain")]
+    ChainIdMismatch,
+}
+
+impl NearRpcReadinessFailure {
+    /// Stable low-cardinality code for protected telemetry and structured logs.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::PrimaryRpcUnavailable => "primary_rpc_unavailable",
+            Self::BackupRpcUnavailable => "backup_rpc_unavailable",
+            Self::BothRpcUnavailable => "both_rpc_unavailable",
+            Self::ChainIdMismatch => "chain_id_mismatch",
+        }
+    }
+}
+
 impl fmt::Debug for RelayerStatus {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -221,6 +257,35 @@ impl NearChainProvider {
         backup.final_block().await
     }
 
+    /// Probe both configured RPC readers independently for the expected NEAR
+    /// chain identity and a final block.
+    ///
+    /// All four read-only calls are allowed to complete even when one fails, so
+    /// the result identifies the unavailable reader without trusting the other
+    /// reader as sufficient evidence. Availability takes precedence over chain
+    /// identity when only one reader returns a complete result, matching the
+    /// EVM dual-reader readiness policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns a fixed [`NearRpcReadinessFailure`] without provider URLs,
+    /// response text, chain values, or credentials.
+    pub async fn readiness_probe(&self) -> Result<(), NearRpcReadinessFailure> {
+        let primary = probe_rpc_readiness(self.rpc.as_ref());
+        let backup = async {
+            let rpc = self
+                .backup_rpc
+                .as_ref()
+                .ok_or(NearRpcError::InvalidResponse(
+                    "backup RPC is not configured",
+                ))?;
+            probe_rpc_readiness(rpc.as_ref()).await
+        };
+        let (primary, backup) = tokio::join!(primary, backup);
+        let expected = self.network.chain_id();
+        classify_rpc_readiness(&expected.reference, primary, backup)
+    }
+
     pub async fn verify(
         &self,
         request: &proto::VerifyRequest,
@@ -364,6 +429,29 @@ impl NearChainProvider {
         payment: VerifiedPayment,
     ) -> Result<SettlementDisposition, NearRpcError> {
         self.coordinator.settle(self, payment).await
+    }
+}
+
+async fn probe_rpc_readiness(rpc: &dyn NearRpc) -> Result<String, NearRpcError> {
+    let (network_id, final_block) = tokio::join!(rpc.network_id(), rpc.final_block());
+    let network_id = network_id?;
+    final_block?;
+    Ok(network_id)
+}
+
+fn classify_rpc_readiness(
+    expected_network: &str,
+    primary: Result<String, NearRpcError>,
+    backup: Result<String, NearRpcError>,
+) -> Result<(), NearRpcReadinessFailure> {
+    match (primary, backup) {
+        (Err(_), Err(_)) => Err(NearRpcReadinessFailure::BothRpcUnavailable),
+        (Err(_), Ok(_)) => Err(NearRpcReadinessFailure::PrimaryRpcUnavailable),
+        (Ok(_), Err(_)) => Err(NearRpcReadinessFailure::BackupRpcUnavailable),
+        (Ok(primary), Ok(backup)) if primary == expected_network && backup == expected_network => {
+            Ok(())
+        }
+        (Ok(_), Ok(_)) => Err(NearRpcReadinessFailure::ChainIdMismatch),
     }
 }
 
