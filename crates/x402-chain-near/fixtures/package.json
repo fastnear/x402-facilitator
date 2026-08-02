@@ -10,6 +10,6 @@
     "@near-js/crypto": "2.5.1",
     "@near-js/signers": "2.5.1",
     "@near-js/transactions": "2.5.1",
-    "@x402/near": "2.19.0"
+    "@x402/near": "2.20.0"
   }
 }
