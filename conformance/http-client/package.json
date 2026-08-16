@@ -7,6 +7,6 @@
     "conformance": "node check.mjs"
   },
   "dependencies": {
-    "@x402/core": "2.19.0"
+    "@x402/core": "2.22.0"
   }
 }
