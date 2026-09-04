@@ -1,5 +1,10 @@
 [advisories]
-ignore = []
+ignore = [
+  # rust_decimal still lists optional rkyv 0.7 metadata in Cargo.lock, but rkyv
+  # is not reachable from normal/build dependencies. scripts/check.sh refuses
+  # this exception if the edge becomes active.
+  "RUSTSEC-2026-0235",
+]
 
 [bans]
 multiple-versions = "warn"
