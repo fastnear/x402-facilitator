@@ -124,16 +124,16 @@ jobs:
           systemd-analyze verify deploy/merchant/x402-merchant-api@.service
 
       - name: Audit official HTTP client dependency
-        run: npm --prefix conformance/http-client audit --audit-level=high
+        run: scripts/npm-audit-retry.py conformance/http-client high
 
       - name: Check runnable resource workloads
         run: |
           npm --prefix examples/resource-server ci
           npm --prefix examples/resource-server run check
-          npm --prefix examples/resource-server audit --audit-level=high
+          scripts/npm-audit-retry.py examples/resource-server high
           npm --prefix examples/merchant-api ci
           npm --prefix examples/merchant-api run check
-          npm --prefix examples/merchant-api audit --audit-level=high
+          scripts/npm-audit-retry.py examples/merchant-api high
 
       - name: Validate merchant deployment assets
         run: |
@@ -209,7 +209,7 @@ jobs:
           test -f "$fixture_dir/package-lock.json"
           npm --prefix "$fixture_dir" ci
           npm --prefix "$fixture_dir" run check
-          npm --prefix "$fixture_dir" audit --audit-level=high
+          scripts/npm-audit-retry.py "$fixture_dir" high
 
   container:
     name: Build production container
