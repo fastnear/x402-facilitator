@@ -33,8 +33,19 @@ if command -v cargo-audit >/dev/null 2>&1; then
     echo "error: rsa became reachable; remove the RUSTSEC-2023-0071 exception" >&2
     exit 1
   fi
-  cargo audit --ignore RUSTSEC-2023-0071
-  cargo audit --file fuzz/Cargo.lock --ignore RUSTSEC-2023-0071
+  # rust_decimal's serde-with-arbitrary-precision support declares an inactive
+  # rkyv edge in Cargo.lock via x402-types. Refuse the exception if rkyv ever
+  # becomes reachable by production workspace or fuzz targets.
+  if cargo tree --workspace --edges normal,build -i rkyv 2>/dev/null | grep -q .; then
+    echo "error: rkyv became reachable; remove the RUSTSEC-2026-0235 exception" >&2
+    exit 1
+  fi
+  if cargo tree --manifest-path fuzz/Cargo.toml --edges normal,build -i rkyv 2>/dev/null | grep -q .; then
+    echo "error: rkyv became reachable in fuzz; remove the RUSTSEC-2026-0235 exception" >&2
+    exit 1
+  fi
+  cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0235
+  cargo audit --file fuzz/Cargo.lock --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0235
 else
   echo "note: cargo-audit is not installed; CI must run this gate" >&2
 fi

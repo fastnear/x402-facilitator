@@ -248,6 +248,13 @@ bounded `chain_readiness_failure_cleared` event without incrementing it. This
 keeps the counter useful for recurring failures without turning ordinary
 recovery into a false failure signal.
 
+When an RPC-dependent readiness probe fails, the service also emits bounded
+`chain_readiness_dependency_failure` events. These identify only the chain
+family, component, primary/backup reader, readiness operation, a fixed
+dependency-error code, and when available an HTTP status or JSON-RPC error
+code. They must never include provider URLs, response bodies, signer data,
+balances, nonces, transaction hashes, or authorization material.
+
 NEAR dual-reader liveness transitions use `component=rpc` with the bounded
 reasons `primary_rpc_unavailable`, `backup_rpc_unavailable`,
 `both_rpc_unavailable`, or `chain_id_mismatch`. Base retains its existing

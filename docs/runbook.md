@@ -121,6 +121,9 @@ At least daily, and after every restart or provider incident:
 - inspect protected `chain_readiness_failure` transition events and
   `x402_readiness_failure_transitions_total` when either chain or signer readiness
   changes; record only their fixed reason code and outcome in evidence;
+- inspect `chain_readiness_dependency_failure` events for RPC-dependent
+  readiness failures; record the fixed reader, operation, dependency-error,
+  HTTP status, and JSON-RPC code fields only;
 - confirm both RPC endpoints report the configured network;
 - compare signer balance with warning and hard-stop thresholds;
 - inspect counts and ages of nonterminal states without exposing payer,
