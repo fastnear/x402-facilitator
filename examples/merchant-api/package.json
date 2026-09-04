@@ -9,11 +9,11 @@
     "start": "node server.mjs"
   },
   "dependencies": {
-    "@x402/core": "2.19.0",
-    "@x402/evm": "2.19.0",
-    "@x402/express": "2.19.0",
-    "@x402/extensions": "2.19.0",
-    "@x402/near": "2.19.0",
+    "@x402/core": "2.25.0",
+    "@x402/evm": "2.25.0",
+    "@x402/express": "2.25.0",
+    "@x402/extensions": "2.25.0",
+    "@x402/near": "2.25.0",
     "express": "5.2.1",
     "viem": "2.55.10"
   }

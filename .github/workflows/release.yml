@@ -322,19 +322,19 @@ jobs:
           test -f "$fixture_dir/package-lock.json"
           npm --prefix "$fixture_dir" ci
           npm --prefix "$fixture_dir" run check
-          npm --prefix "$fixture_dir" audit --audit-level=high
+          scripts/npm-audit-retry.py "$fixture_dir" high
 
       - name: Audit official HTTP client dependency
-        run: npm --prefix conformance/http-client audit --audit-level=high
+        run: scripts/npm-audit-retry.py conformance/http-client high
 
       - name: Check runnable resource workloads
         run: |
           npm --prefix examples/resource-server ci
           npm --prefix examples/resource-server run check
-          npm --prefix examples/resource-server audit --audit-level=high
+          scripts/npm-audit-retry.py examples/resource-server high
           npm --prefix examples/merchant-api ci
           npm --prefix examples/merchant-api run check
-          npm --prefix examples/merchant-api audit --audit-level=high
+          scripts/npm-audit-retry.py examples/merchant-api high
 
       - name: Validate merchant deployment assets
         run: |
@@ -561,7 +561,7 @@ jobs:
             any(.components[]?;
               .name == "x402-types" and .version == "2.0.2") and
             any(.components[]?;
-              .name == "near-primitives" and .version == "0.37.2")
+              .name == "near-primitives" and .version == "0.37.3")
           ' "$sbom" >/dev/null
           cp "$sbom" \
             "dist/${{ steps.stage.outputs.directory }}/SBOM.cdx.json"
@@ -825,7 +825,7 @@ jobs:
             any(.components[]?;
               .name == "x402-types" and .version == "2.0.2") and
             any(.components[]?;
-              .name == "near-primitives" and .version == "0.37.2")
+              .name == "near-primitives" and .version == "0.37.3")
           ' "$sbom" >/dev/null
           (
             cd dist
@@ -1068,13 +1068,13 @@ jobs:
             any(.components[]?;
               .name == "x402-types" and .version == "2.0.2") and
             any(.components[]?;
-              .name == "near-primitives" and .version == "0.37.2")
+              .name == "near-primitives" and .version == "0.37.3")
           ' "dist/${NATIVE_SBOM}" >/dev/null
           jq -e '
             any(.components[]?;
               .name == "x402-types" and .version == "2.0.2") and
             any(.components[]?;
-              .name == "near-primitives" and .version == "0.37.2")
+              .name == "near-primitives" and .version == "0.37.3")
           ' "dist/${oci_prefix}.cdx.json" >/dev/null
           test "$(
             cat "dist/${oci_prefix}.digest"

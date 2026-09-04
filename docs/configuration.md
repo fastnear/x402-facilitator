@@ -81,6 +81,9 @@ structured logs classify a degraded pair with only the fixed codes
 `both_rpc_unavailable`, or `chain_id_mismatch`. They never include an RPC URL,
 credential, provider response, or observed chain value. Public `/readyz`
 remains limited to its sanitized boolean gate states.
+When an endpoint cannot complete a readiness operation, protected structured
+logs also emit `chain_readiness_dependency_failure` with the fixed reader,
+operation, and dependency-error code.
 
 ## EVM (eip155) instances
 
@@ -120,6 +123,9 @@ and structured service logs use only fixed codes such as
 `pending_nonce_disagreement`. They never include either RPC URL, a provider
 response, observed chain/head values, signer address, balance, or nonce.
 Public `/readyz` remains limited to its sanitized boolean gate states.
+Endpoint-level readiness failures also emit `chain_readiness_dependency_failure`
+with the fixed reader, failed EVM operation, dependency-error code, and when
+available an HTTP status or JSON-RPC error code.
 
 The service binds `network` to its canonical Circle USDC and refuses a
 mismatch, exactly as the NEAR branch binds a network to its USDC account:

@@ -39,7 +39,7 @@ transaction success by itself.
 | Payer state changes after verify | Full re-verification under the settlement claim and mutex | Nonce/balance/storage race tests |
 | Sponsorship drain | API keys, exact payees, rate limits, minimum payment, gas cap, atomic daily budgets, low-balance stop | Quota, balance, and reservation rollback tests |
 | API-key database theft | High-entropy one-time key, HMAC-SHA256 digest with separate pepper, constant-time compare, rotation/revocation | Authentication and redaction tests |
-| Credential leakage in telemetry | Sensitive-header marking, no request bodies, bounded fields, hashes excluded from metric labels; readiness diagnostics use fixed classes only | Automated log/trace redaction test |
+| Credential leakage in telemetry | Sensitive-header marking, no request bodies, bounded fields, hashes excluded from metric labels; readiness diagnostics use fixed classes and endpoint-operation error codes only | Automated log/trace redaction test |
 | PostgreSQL split brain | Session advisory leadership lock; readiness false without leadership | Competing-instance test |
 | RPC lies, lags, or partitions | Finality, pinned blocks, typed errors, independent backup reconciliation, fail closed; protected readiness events classify only fixed snapshot causes | Failover and disagreement tests |
 | Database loss or tampering | Scheduled off-host dumps with a tested restore, least-privileged role, append-oriented journal | Dated restore drill |
@@ -152,11 +152,11 @@ assets and threats:
   configured readers. NEAR liveness likewise requires both readers to report
   the expected chain and a final block. Chain-ID, pending-nonce, or receipt
   disagreement is indeterminate; conservative head/balance observations gate
-  progress. A readiness transition may identify only a fixed class (reader
-  unavailable, chain-ID mismatch, or pending-nonce disagreement); it never
-  exposes a provider URL, response, chain value, signer, balance, nonce, or
-  transaction value. Operator independence and availability still depend on
-  the endpoints a self-hoster chooses.
+  progress. Readiness telemetry may identify only fixed classes and bounded
+  endpoint-operation error codes; it never exposes a provider URL, response
+  body, chain value, signer, balance, nonce, or transaction value. Operator
+  independence and availability still depend on the endpoints a self-hoster
+  chooses.
 - **Legacy v1 wire (`accept_v1`)**: adds no new authorization semantics — a
   v1 request is strictly translated (deny-unknown-fields) into the canonical
   v2 shape at the parse boundary, so policy, verification, budgets, and the
