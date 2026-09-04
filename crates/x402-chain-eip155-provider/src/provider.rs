@@ -15,6 +15,7 @@ use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use alloy_rpc_types_eth::{TransactionInput, TransactionRequest};
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::SolCall;
+use alloy_transport::{RpcError, TransportError, TransportErrorKind};
 use std::fmt;
 use std::future::Future;
 use std::io::Write as _;
@@ -286,6 +287,93 @@ pub enum EvmRpcError {
     /// Base L1 or execution fee arithmetic exceeded the supported range.
     #[error("EVM fee value exceeds the supported range")]
     FeeOverflow,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EvmReadinessReader {
+    Primary,
+    Backup,
+}
+
+impl EvmReadinessReader {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Primary => "primary",
+            Self::Backup => "backup",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EvmReadinessOperation {
+    ChainId,
+    BlockNumber,
+    PendingNonce,
+    GasBalance,
+}
+
+impl EvmReadinessOperation {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::ChainId => "eth_chainId",
+            Self::BlockNumber => "eth_blockNumber",
+            Self::PendingNonce => "eth_getTransactionCount_pending",
+            Self::GasBalance => "eth_getBalance",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EvmReadinessDependencyError {
+    JsonRpcError,
+    NullResponse,
+    UnsupportedFeature,
+    LocalUsage,
+    Serialization,
+    Deserialization,
+    HttpRateLimited,
+    HttpTemporarilyUnavailable,
+    HttpClientError,
+    HttpServerError,
+    HttpStatus,
+    MissingBatchResponse,
+    BackendGone,
+    PubsubUnavailable,
+    CustomTransport,
+    NonRetryableTransport,
+    Transport,
+}
+
+impl EvmReadinessDependencyError {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::JsonRpcError => "json_rpc_error",
+            Self::NullResponse => "null_response",
+            Self::UnsupportedFeature => "unsupported_feature",
+            Self::LocalUsage => "local_usage",
+            Self::Serialization => "serialization",
+            Self::Deserialization => "deserialization",
+            Self::HttpRateLimited => "http_rate_limited",
+            Self::HttpTemporarilyUnavailable => "http_temporarily_unavailable",
+            Self::HttpClientError => "http_client_error",
+            Self::HttpServerError => "http_server_error",
+            Self::HttpStatus => "http_status",
+            Self::MissingBatchResponse => "missing_batch_response",
+            Self::BackendGone => "backend_gone",
+            Self::PubsubUnavailable => "pubsub_unavailable",
+            Self::CustomTransport => "custom_transport",
+            Self::NonRetryableTransport => "non_retryable_transport",
+            Self::Transport => "transport",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct EvmReadinessEndpointError {
+    operation: EvmReadinessOperation,
+    error: EvmReadinessDependencyError,
+    http_status: Option<u16>,
+    json_rpc_code: Option<i64>,
 }
 
 /// A bounded, secret-free reason why an EVM dual-reader signer-head snapshot
@@ -572,6 +660,115 @@ fn merge_head_snapshot(
         (Ok(primary), Ok(backup)) => {
             merge_head_values(expected_chain_id, signer_address, primary, backup)
         }
+    }
+}
+
+fn merge_head_snapshot_with_diagnostics(
+    expected_chain_id: u64,
+    signer_address: Address,
+    primary: Result<EndpointHead, EvmReadinessEndpointError>,
+    backup: Result<EndpointHead, EvmReadinessEndpointError>,
+) -> Result<EvmHead, EvmHeadSnapshotFailure> {
+    match (&primary, &backup) {
+        (Err(primary), Err(backup)) => {
+            log_evm_readiness_dependency_failure(EvmReadinessReader::Primary, primary);
+            log_evm_readiness_dependency_failure(EvmReadinessReader::Backup, backup);
+        }
+        (Err(primary), Ok(_)) => {
+            log_evm_readiness_dependency_failure(EvmReadinessReader::Primary, primary);
+        }
+        (Ok(_), Err(backup)) => {
+            log_evm_readiness_dependency_failure(EvmReadinessReader::Backup, backup);
+        }
+        (Ok(_), Ok(_)) => {}
+    }
+    merge_head_snapshot(
+        expected_chain_id,
+        signer_address,
+        primary.map_err(|_| EvmRpcError::Rpc),
+        backup.map_err(|_| EvmRpcError::Rpc),
+    )
+}
+
+fn log_evm_readiness_dependency_failure(
+    reader: EvmReadinessReader,
+    failure: &EvmReadinessEndpointError,
+) {
+    tracing::warn!(
+        event = "chain_readiness_dependency_failure",
+        chain_family = "eip155",
+        component = "head",
+        reader = reader.as_str(),
+        operation = failure.operation.as_str(),
+        dependency_error = failure.error.as_str(),
+        http_status = failure.http_status.unwrap_or(0),
+        json_rpc_code = failure.json_rpc_code.unwrap_or(0)
+    );
+}
+
+fn classify_transport_error(
+    error: &TransportError,
+) -> (EvmReadinessDependencyError, Option<u16>, Option<i64>) {
+    match error {
+        RpcError::ErrorResp(payload) => (
+            EvmReadinessDependencyError::JsonRpcError,
+            None,
+            Some(payload.code),
+        ),
+        RpcError::NullResp => (EvmReadinessDependencyError::NullResponse, None, None),
+        RpcError::UnsupportedFeature(_) => {
+            (EvmReadinessDependencyError::UnsupportedFeature, None, None)
+        }
+        RpcError::LocalUsageError(_) => (EvmReadinessDependencyError::LocalUsage, None, None),
+        RpcError::SerError(_) => (EvmReadinessDependencyError::Serialization, None, None),
+        RpcError::DeserError { .. } => (EvmReadinessDependencyError::Deserialization, None, None),
+        RpcError::Transport(kind) => classify_transport_kind(kind),
+    }
+}
+
+fn classify_transport_kind(
+    kind: &TransportErrorKind,
+) -> (EvmReadinessDependencyError, Option<u16>, Option<i64>) {
+    match kind {
+        TransportErrorKind::HttpError(error) => {
+            let classified = match error.status {
+                429 => EvmReadinessDependencyError::HttpRateLimited,
+                503 => EvmReadinessDependencyError::HttpTemporarilyUnavailable,
+                400..=499 => EvmReadinessDependencyError::HttpClientError,
+                500..=599 => EvmReadinessDependencyError::HttpServerError,
+                _ => EvmReadinessDependencyError::HttpStatus,
+            };
+            (classified, Some(error.status), None)
+        }
+        TransportErrorKind::MissingBatchResponse(_) => (
+            EvmReadinessDependencyError::MissingBatchResponse,
+            None,
+            None,
+        ),
+        TransportErrorKind::BackendGone => (EvmReadinessDependencyError::BackendGone, None, None),
+        TransportErrorKind::PubsubUnavailable => {
+            (EvmReadinessDependencyError::PubsubUnavailable, None, None)
+        }
+        TransportErrorKind::Custom(_) => (EvmReadinessDependencyError::CustomTransport, None, None),
+        TransportErrorKind::NonRetryable(_) => (
+            EvmReadinessDependencyError::NonRetryableTransport,
+            None,
+            None,
+        ),
+        _ => (EvmReadinessDependencyError::Transport, None, None),
+    }
+}
+
+fn evm_readiness_endpoint_error(
+    operation: EvmReadinessOperation,
+    error: &TransportError,
+) -> EvmReadinessEndpointError {
+    let (error, http_status, json_rpc_code) = classify_transport_error(error);
+    EvmReadinessEndpointError {
+        operation,
+        error,
+        http_status,
+        json_rpc_code,
     }
 }
 
@@ -1245,8 +1442,11 @@ impl EvmChainProvider {
     ///
     /// Returns [`EvmRpcError`] if any of the block/nonce/balance lookups fail.
     pub async fn head(&self) -> Result<EvmHead, EvmRpcError> {
-        self.readiness_head()
-            .await
+        let (primary, backup) = tokio::join!(
+            retry_transient(|| self.endpoint_head_once(&self.primary_reader), |_| true),
+            retry_transient(|| self.endpoint_head_once(&self.backup_reader), |_| true),
+        );
+        merge_head_snapshot(self.chain_id, self.signer.address(), primary, backup)
             .map_err(EvmHeadSnapshotFailure::into_rpc_error)
     }
 
@@ -1263,10 +1463,16 @@ impl EvmChainProvider {
     /// reports the wrong chain identity, or disagrees about the pending nonce.
     pub async fn readiness_head(&self) -> Result<EvmHead, EvmHeadSnapshotFailure> {
         let (primary, backup) = tokio::join!(
-            retry_transient(|| self.endpoint_head_once(&self.primary_reader), |_| true),
-            retry_transient(|| self.endpoint_head_once(&self.backup_reader), |_| true),
+            retry_transient(
+                || self.readiness_endpoint_head_once(&self.primary_reader),
+                |_| true
+            ),
+            retry_transient(
+                || self.readiness_endpoint_head_once(&self.backup_reader),
+                |_| true
+            ),
         );
-        merge_head_snapshot(self.chain_id, self.signer.address(), primary, backup)
+        merge_head_snapshot_with_diagnostics(self.chain_id, self.signer.address(), primary, backup)
     }
 
     async fn endpoint_head_once(
@@ -1296,6 +1502,35 @@ impl EvmChainProvider {
                     .map_err(|_| EvmRpcError::Rpc)
             },
         )?;
+        Ok(EndpointHead {
+            chain_id,
+            block_number,
+            pending_account_nonce,
+            gas_balance_wei: u128::try_from(balance).unwrap_or(u128::MAX),
+        })
+    }
+
+    async fn readiness_endpoint_head_once(
+        &self,
+        provider: &DynProvider,
+    ) -> Result<EndpointHead, EvmReadinessEndpointError> {
+        let address = self.signer.address();
+        let chain_id = provider.get_chain_id().await.map_err(|error| {
+            evm_readiness_endpoint_error(EvmReadinessOperation::ChainId, &error)
+        })?;
+        let block_number = provider.get_block_number().await.map_err(|error| {
+            evm_readiness_endpoint_error(EvmReadinessOperation::BlockNumber, &error)
+        })?;
+        let pending_account_nonce = provider
+            .get_transaction_count(address)
+            .pending()
+            .await
+            .map_err(|error| {
+                evm_readiness_endpoint_error(EvmReadinessOperation::PendingNonce, &error)
+            })?;
+        let balance = provider.get_balance(address).await.map_err(|error| {
+            evm_readiness_endpoint_error(EvmReadinessOperation::GasBalance, &error)
+        })?;
         Ok(EndpointHead {
             chain_id,
             block_number,
@@ -2055,6 +2290,48 @@ mod tests {
                 _ => std::process::abort(),
             }
         }
+    }
+
+    #[test]
+    fn readiness_dependency_errors_are_bounded_without_provider_text() {
+        let sentinel = "https://credentialed-rpc.invalid/path?token=never-log-this";
+        let rate_limited = TransportErrorKind::http_error(429, sentinel.to_owned());
+        let unavailable = TransportErrorKind::http_error(503, sentinel.to_owned());
+        let custom = TransportErrorKind::custom_str(sentinel);
+        let custom_for_debug = TransportErrorKind::custom_str(sentinel);
+
+        assert_eq!(
+            classify_transport_error(&rate_limited),
+            (
+                EvmReadinessDependencyError::HttpRateLimited,
+                Some(429),
+                None
+            )
+        );
+        assert_eq!(
+            classify_transport_error(&unavailable),
+            (
+                EvmReadinessDependencyError::HttpTemporarilyUnavailable,
+                Some(503),
+                None
+            )
+        );
+        assert_eq!(
+            evm_readiness_endpoint_error(EvmReadinessOperation::ChainId, &custom),
+            EvmReadinessEndpointError {
+                operation: EvmReadinessOperation::ChainId,
+                error: EvmReadinessDependencyError::CustomTransport,
+                http_status: None,
+                json_rpc_code: None,
+            }
+        );
+
+        let diagnostic = format!(
+            "{:?}",
+            evm_readiness_endpoint_error(EvmReadinessOperation::ChainId, &custom_for_debug)
+        );
+        assert!(!diagnostic.contains(sentinel));
+        assert!(!diagnostic.contains("credentialed-rpc"));
     }
 
     #[test]

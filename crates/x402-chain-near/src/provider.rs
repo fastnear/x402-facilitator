@@ -103,6 +103,73 @@ impl NearRpcReadinessFailure {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NearReadinessReader {
+    Primary,
+    Backup,
+}
+
+impl NearReadinessReader {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Primary => "primary",
+            Self::Backup => "backup",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NearReadinessOperation {
+    Status,
+    FinalBlock,
+}
+
+impl NearReadinessOperation {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Status => "status",
+            Self::FinalBlock => "block_final",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NearReadinessDependencyError {
+    Timeout,
+    RpcRequest,
+    InvalidResponse,
+    AccountNotFound,
+    AccessKeyNotFound,
+    MethodNotFound,
+    TransactionUnknown,
+    TransactionRejected,
+    TransactionTemporarilyRejected,
+    InvalidSignedTransaction,
+}
+
+impl NearReadinessDependencyError {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Timeout => "timeout",
+            Self::RpcRequest => "rpc_request",
+            Self::InvalidResponse => "invalid_response",
+            Self::AccountNotFound => "account_not_found",
+            Self::AccessKeyNotFound => "access_key_not_found",
+            Self::MethodNotFound => "method_not_found",
+            Self::TransactionUnknown => "transaction_unknown",
+            Self::TransactionRejected => "transaction_rejected",
+            Self::TransactionTemporarilyRejected => "transaction_temporarily_rejected",
+            Self::InvalidSignedTransaction => "invalid_signed_transaction",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct NearReadinessEndpointError {
+    operation: NearReadinessOperation,
+    error: NearReadinessDependencyError,
+}
+
 impl fmt::Debug for RelayerStatus {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -273,17 +340,17 @@ impl NearChainProvider {
     pub async fn readiness_probe(&self) -> Result<(), NearRpcReadinessFailure> {
         let primary = probe_rpc_readiness(self.rpc.as_ref());
         let backup = async {
-            let rpc = self
-                .backup_rpc
-                .as_ref()
-                .ok_or(NearRpcError::InvalidResponse(
-                    "backup RPC is not configured",
-                ))?;
+            let rpc = self.backup_rpc.as_ref().ok_or_else(|| {
+                near_readiness_endpoint_error(
+                    NearReadinessOperation::Status,
+                    &NearRpcError::InvalidResponse("backup RPC is not configured"),
+                )
+            })?;
             probe_rpc_readiness(rpc.as_ref()).await
         };
         let (primary, backup) = tokio::join!(primary, backup);
         let expected = self.network.chain_id();
-        classify_rpc_readiness(&expected.reference, primary, backup)
+        classify_rpc_readiness(&expected.reference, &primary, &backup)
     }
 
     pub async fn verify(
@@ -432,26 +499,82 @@ impl NearChainProvider {
     }
 }
 
-async fn probe_rpc_readiness(rpc: &dyn NearRpc) -> Result<String, NearRpcError> {
+async fn probe_rpc_readiness(rpc: &dyn NearRpc) -> Result<String, NearReadinessEndpointError> {
     let (network_id, final_block) = tokio::join!(rpc.network_id(), rpc.final_block());
-    let network_id = network_id?;
-    final_block?;
+    let network_id = network_id
+        .map_err(|error| near_readiness_endpoint_error(NearReadinessOperation::Status, &error))?;
+    final_block.map_err(|error| {
+        near_readiness_endpoint_error(NearReadinessOperation::FinalBlock, &error)
+    })?;
     Ok(network_id)
 }
 
 fn classify_rpc_readiness(
     expected_network: &str,
-    primary: Result<String, NearRpcError>,
-    backup: Result<String, NearRpcError>,
+    primary: &Result<String, NearReadinessEndpointError>,
+    backup: &Result<String, NearReadinessEndpointError>,
 ) -> Result<(), NearRpcReadinessFailure> {
     match (primary, backup) {
-        (Err(_), Err(_)) => Err(NearRpcReadinessFailure::BothRpcUnavailable),
-        (Err(_), Ok(_)) => Err(NearRpcReadinessFailure::PrimaryRpcUnavailable),
-        (Ok(_), Err(_)) => Err(NearRpcReadinessFailure::BackupRpcUnavailable),
+        (Err(primary), Err(backup)) => {
+            log_near_readiness_dependency_failure(NearReadinessReader::Primary, *primary);
+            log_near_readiness_dependency_failure(NearReadinessReader::Backup, *backup);
+            Err(NearRpcReadinessFailure::BothRpcUnavailable)
+        }
+        (Err(primary), Ok(_)) => {
+            log_near_readiness_dependency_failure(NearReadinessReader::Primary, *primary);
+            Err(NearRpcReadinessFailure::PrimaryRpcUnavailable)
+        }
+        (Ok(_), Err(backup)) => {
+            log_near_readiness_dependency_failure(NearReadinessReader::Backup, *backup);
+            Err(NearRpcReadinessFailure::BackupRpcUnavailable)
+        }
         (Ok(primary), Ok(backup)) if primary == expected_network && backup == expected_network => {
             Ok(())
         }
         (Ok(_), Ok(_)) => Err(NearRpcReadinessFailure::ChainIdMismatch),
+    }
+}
+
+fn log_near_readiness_dependency_failure(
+    reader: NearReadinessReader,
+    failure: NearReadinessEndpointError,
+) {
+    tracing::warn!(
+        event = "chain_readiness_dependency_failure",
+        chain_family = "near",
+        component = "rpc",
+        reader = reader.as_str(),
+        operation = failure.operation.as_str(),
+        dependency_error = failure.error.as_str()
+    );
+}
+
+fn classify_near_readiness_error(error: &NearRpcError) -> NearReadinessDependencyError {
+    match error {
+        NearRpcError::AccountNotFound => NearReadinessDependencyError::AccountNotFound,
+        NearRpcError::AccessKeyNotFound => NearReadinessDependencyError::AccessKeyNotFound,
+        NearRpcError::MethodNotFound => NearReadinessDependencyError::MethodNotFound,
+        NearRpcError::TransactionUnknown => NearReadinessDependencyError::TransactionUnknown,
+        NearRpcError::TransactionRejected => NearReadinessDependencyError::TransactionRejected,
+        NearRpcError::TransactionTemporarilyRejected => {
+            NearReadinessDependencyError::TransactionTemporarilyRejected
+        }
+        NearRpcError::Timeout => NearReadinessDependencyError::Timeout,
+        NearRpcError::InvalidResponse(_) => NearReadinessDependencyError::InvalidResponse,
+        NearRpcError::InvalidSignedTransaction => {
+            NearReadinessDependencyError::InvalidSignedTransaction
+        }
+        NearRpcError::Request(_) => NearReadinessDependencyError::RpcRequest,
+    }
+}
+
+fn near_readiness_endpoint_error(
+    operation: NearReadinessOperation,
+    error: &NearRpcError,
+) -> NearReadinessEndpointError {
+    NearReadinessEndpointError {
+        operation,
+        error: classify_near_readiness_error(error),
     }
 }
 

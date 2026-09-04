@@ -305,7 +305,8 @@ export async function createMerchantApplication({
   }
 
   const checkDependencies = createReadinessCache({
-    check: () => dependencyReadiness(reader, probe, initializePaymentServer),
+    check: () =>
+      dependencyReadiness(reader, probe, initializePaymentServer, logger),
     ttlMs: readinessCacheMs,
     now,
   });
@@ -479,6 +480,7 @@ async function dependencyReadiness(
   reader,
   facilitatorProbe,
   initializePaymentServer,
+  logger = console,
 ) {
   const checkRpc = typeof reader.checkReadiness === "function"
     ? () => reader.checkReadiness()
@@ -493,12 +495,46 @@ async function dependencyReadiness(
     facilitator: facilitator.status === "fulfilled" ? "ready" : "not_ready",
     payment: payment.status === "fulfilled" ? "ready" : "not_ready",
   };
+  logReadinessDependencyFailures(logger, { rpc, facilitator, payment });
   return {
     ready: checks.rpc === "ready"
       && checks.facilitator === "ready"
       && checks.payment === "ready",
     checks,
   };
+}
+
+function logReadinessDependencyFailures(logger, results) {
+  for (const [dependency, result] of Object.entries(results)) {
+    if (result.status !== "rejected") continue;
+    logger?.warn?.({
+      event: "merchant_readiness_dependency_failure",
+      dependency,
+      dependencyError: classifyDependencyError(result.reason),
+      httpStatus: Number.isInteger(result.reason?.statusCode)
+        ? result.reason.statusCode
+        : 0,
+    });
+  }
+}
+
+function classifyDependencyError(error) {
+  if (error?.name === "AbortError") return "aborted";
+  if (Number.isInteger(error?.statusCode)) {
+    if (error.statusCode === 429) return "http_rate_limited";
+    if (error.statusCode === 503) return "http_temporarily_unavailable";
+    if (error.statusCode >= 400 && error.statusCode <= 499) {
+      return "http_client_error";
+    }
+    if (error.statusCode >= 500 && error.statusCode <= 599) {
+      return "http_server_error";
+    }
+    return "http_status";
+  }
+  if (error?.name === "FacilitatorTimeoutError") return "timeout";
+  if (error?.name === "FacilitatorResponseError") return "invalid_response";
+  if (error instanceof ChainEvidenceError) return error.code;
+  return "dependency_error";
 }
 
 function invalidInput(message) {

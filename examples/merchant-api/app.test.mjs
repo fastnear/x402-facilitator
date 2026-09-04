@@ -46,6 +46,11 @@ const activity = {
   }),
 };
 
+const silentLogger = {
+  warn() {},
+  error() {},
+};
+
 function dependencies({
   rpcReady = true,
   facilitatorReady = true,
@@ -170,6 +175,7 @@ test("health is liveness while readiness reflects both dependencies", async t =>
     config,
     activity,
     ...dependencies({ facilitatorReady: false }),
+    logger: silentLogger,
   });
   const server = await serve(application);
   t.after(server.close);
@@ -185,6 +191,56 @@ test("health is liveness while readiness reflects both dependencies", async t =>
     ready: false,
     checks: { rpc: "ready", facilitator: "not_ready", payment: "ready" },
   });
+});
+
+test("readiness logs dependency failures without raw error text", async t => {
+  const warnings = [];
+  const sentinel = "https://credentialed-rpc.invalid/path?token=never-log-this";
+  const application = await createMerchantApplication({
+    config,
+    activity,
+    reader: {
+      async checkReadiness() {
+        const error = new Error(sentinel);
+        error.statusCode = 503;
+        throw error;
+      },
+      async checkIdentity() {
+        assert.fail("readiness must use the reader capability probe");
+      },
+      async account(address) {
+        return { kind: "account", address };
+      },
+      async transaction(hash) {
+        return { kind: "transaction", hash };
+      },
+    },
+    facilitator: dependencies().facilitator,
+    facilitatorProbe: dependencies().facilitatorProbe,
+    logger: {
+      warn(event) {
+        warnings.push(event);
+      },
+      error() {},
+    },
+  });
+  const server = await serve(application);
+  t.after(server.close);
+
+  const readiness = await fetch(`${server.origin}/readyz`);
+  assert.equal(readiness.status, 503);
+  assert.deepEqual(await readiness.json(), {
+    ready: false,
+    checks: { rpc: "not_ready", facilitator: "ready", payment: "ready" },
+  });
+  assert.deepEqual(warnings, [{
+    event: "merchant_readiness_dependency_failure",
+    dependency: "rpc",
+    dependencyError: "http_temporarily_unavailable",
+    httpStatus: 503,
+  }]);
+  assert.equal(JSON.stringify(warnings).includes(sentinel), false);
+  assert.equal(JSON.stringify(warnings).includes("credentialed-rpc"), false);
 });
 
 test("health reads precomputed index metadata without searching activity", async t => {
@@ -204,6 +260,7 @@ test("health reads precomputed index metadata without searching activity", async
       entity: () => assert.fail("liveness must not inspect an entity"),
     },
     ...dependencies({ facilitatorReady: false }),
+    logger: silentLogger,
   });
   const server = await serve(application);
   t.after(server.close);
@@ -345,6 +402,7 @@ test("readiness fails closed when payment initialization is delayed and then fai
       middlewareSyncOnStart = args[3];
       return (_request, _response, next) => next();
     },
+    logger: silentLogger,
     readinessCacheMs: 0,
   });
   const server = await serve(application);
@@ -386,6 +444,7 @@ test("startup refuses to listen when payment initialization fails", async () => 
         throw new Error("facilitator capability sync failed");
       },
       paymentMiddlewareFactory: () => (_request, _response, next) => next(),
+      logger: silentLogger,
     }),
     /merchant dependencies are not ready/,
   );
