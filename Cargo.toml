@@ -3,6 +3,7 @@ resolver = "3"
 members = [
   "crates/x402-chain-eip155-provider",
   "crates/x402-chain-near",
+  "crates/x402-near-intents",
   "crates/x402-near-facilitator",
 ]
 exclude = ["fuzz"]
@@ -23,9 +24,11 @@ anyhow = "1.0"
 async-trait = "0.1"
 axum = "0.8"
 base64 = "0.23"
+bs58 = "0.5"
 borsh = "1.5"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.5", features = ["derive", "env"] }
+ed25519-dalek = { version = "2.2", default-features = false }
 hex = "0.4"
 hmac = "0.13"
 http = "1.5"
@@ -34,6 +37,7 @@ near-jsonrpc-client = { version = "=0.22.0", default-features = false, features 
 near-jsonrpc-primitives = "=0.37.3"
 near-primitives = "=0.37.3"
 rand = "0.10"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "stream"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["raw_value"] }
 sha2 = "0.11"

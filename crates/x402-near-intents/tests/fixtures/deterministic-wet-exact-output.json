@@ -1,0 +1,36 @@
+{
+  "correlationId": "fixture-correlation",
+  "timestamp": "2026-09-04T15:00:00Z",
+  "signature": "ed25519:ixnQfoAb93xjJrJjpXeLchFNxuapux8oTzG7oSTjgVncmtCmuuMmdcvbpJN6FT3mB6ZFcNJixDwq6xWvYLoMCZZ",
+  "quoteRequest": {
+    "dry": false,
+    "swapType": "EXACT_OUTPUT",
+    "slippageTolerance": 100,
+    "originAsset": "nep141:arb-usdc.omft.near",
+    "depositType": "ORIGIN_CHAIN",
+    "destinationAsset": "nep141:base-usdc.omft.near",
+    "amount": "1000000",
+    "refundTo": "facilitator.near",
+    "refundType": "INTENTS",
+    "recipient": "0xMerchantOnBase",
+    "recipientType": "DESTINATION_CHAIN",
+    "deadline": "2026-09-04T15:10:00Z",
+    "referral": "x402"
+  },
+  "quote": {
+    "depositAddress": "0x76b4c56085ED136a8744D52bE956396624a730E8",
+    "amountIn": "1005000",
+    "amountInFormatted": "1.005",
+    "amountInUsd": "1.005000000000",
+    "minAmountIn": "1000000",
+    "amountOut": "1000000",
+    "amountOutFormatted": "1.0",
+    "amountOutUsd": "1.000000000000",
+    "minAmountOut": "1000000",
+    "deadline": "2026-09-04T15:10:00Z",
+    "timeWhenInactive": "2026-09-04T15:10:00Z",
+    "timeEstimate": 120,
+    "refundFee": "0",
+    "withdrawFee": "0"
+  }
+}
