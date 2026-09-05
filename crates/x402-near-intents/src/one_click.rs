@@ -625,7 +625,145 @@ fn validate_credential(value: &str) -> Result<(), OneClickError> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::thread::{self, JoinHandle};
+    use std::time::Instant;
+
     use super::*;
+
+    const TEST_ACCEPT_TIMEOUT: Duration = Duration::from_secs(2);
+    const TEST_CREDENTIAL: &str = "test-only-credential-do-not-use";
+
+    #[derive(Debug)]
+    enum MockResponse {
+        Fixed(Vec<u8>),
+    }
+
+    fn spawn_mock_server(
+        response: MockResponse,
+        accept_timeout: Duration,
+    ) -> (Url, JoinHandle<Option<bool>>) {
+        let listener =
+            TcpListener::bind(("127.0.0.1", 0)).unwrap_or_else(|_| std::process::abort());
+        listener
+            .set_nonblocking(true)
+            .unwrap_or_else(|_| std::process::abort());
+        let address = listener
+            .local_addr()
+            .unwrap_or_else(|_| std::process::abort());
+        let url =
+            Url::parse(&format!("http://{address}/")).unwrap_or_else(|_| std::process::abort());
+        let handle = thread::spawn(move || {
+            let deadline = Instant::now() + accept_timeout;
+            loop {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let headers_read = read_request_headers(&mut stream).is_ok();
+                        let response_written = write_mock_response(&mut stream, response);
+                        return Some(headers_read && response_written);
+                    }
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                            && Instant::now() < deadline =>
+                    {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => return None,
+                }
+            }
+        });
+        (url, handle)
+    }
+
+    fn read_request_headers(stream: &mut TcpStream) -> std::io::Result<()> {
+        stream.set_read_timeout(Some(TEST_ACCEPT_TIMEOUT))?;
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        loop {
+            let read = stream.read(&mut buffer)?;
+            if read == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "request headers ended early",
+                ));
+            }
+            request.extend_from_slice(&buffer[..read]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                return Ok(());
+            }
+            if request.len() > 64 * 1024 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "request headers exceeded test bound",
+                ));
+            }
+        }
+    }
+
+    fn write_mock_response(stream: &mut TcpStream, response: MockResponse) -> bool {
+        match response {
+            MockResponse::Fixed(response) => stream
+                .write_all(&response)
+                .and_then(|()| stream.flush())
+                .is_ok(),
+        }
+    }
+
+    fn json_response(status: &str, body: &[u8]) -> Vec<u8> {
+        let mut response = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        response.extend_from_slice(body);
+        response
+    }
+
+    fn redirect_response(location: &Url) -> Vec<u8> {
+        format!(
+            "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        )
+        .into_bytes()
+    }
+
+    fn test_client(base_url: Url, authentication: Authentication<'_>) -> OneClickClient {
+        let placeholder =
+            Url::parse("https://oneclick.test.invalid/").unwrap_or_else(|_| std::process::abort());
+        let mut client = OneClickClient::new(placeholder, authentication, Duration::from_secs(2))
+            .unwrap_or_else(|_| std::process::abort());
+        // Preserve the production-built reqwest client while routing only this
+        // unit test to its loopback server.
+        client.base_url = base_url;
+        client
+    }
+
+    fn join_mock_server(handle: JoinHandle<Option<bool>>) -> Option<bool> {
+        handle.join().unwrap_or_else(|_| std::process::abort())
+    }
+
+    fn quote_request() -> QuoteRequest {
+        QuoteRequest::exact_output(
+            "nep141:arb-usdc.omft.near".to_owned(),
+            "nep141:base-usdc.omft.near".to_owned(),
+            "1000000".to_owned(),
+            "0xmerchant".to_owned(),
+            "facilitator.near".to_owned(),
+            "2026-09-04T15:10:00Z".to_owned(),
+            100,
+            None,
+            Some("x402".to_owned()),
+        )
+    }
+
+    fn invalidly_signed_quote() -> Value {
+        let mut document: Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/oneclick-production-dry-exact-output-2026-09-04.json"
+        ))
+        .unwrap_or_else(|_| std::process::abort());
+        document["signature"] = Value::String(format!("ed25519:{}", "1".repeat(64)));
+        document
+    }
 
     #[test]
     fn client_requires_an_https_origin_and_redacts_authentication() {
@@ -648,19 +786,124 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn redirect_is_refused_without_forwarding_the_credential() {
+        let (redirect_target, target_handle) = spawn_mock_server(
+            MockResponse::Fixed(json_response("200 OK", b"[]")),
+            Duration::from_millis(400),
+        );
+        let (origin, origin_handle) = spawn_mock_server(
+            MockResponse::Fixed(redirect_response(&redirect_target)),
+            TEST_ACCEPT_TIMEOUT,
+        );
+        let client = test_client(origin, Authentication::Bearer(TEST_CREDENTIAL));
+
+        assert_eq!(
+            client.tokens().await.err(),
+            Some(OneClickError::Status {
+                endpoint: "/v0/tokens",
+                status: 302,
+            })
+        );
+        assert!(join_mock_server(origin_handle).is_some());
+        assert_eq!(join_mock_server(target_handle), None);
+    }
+
+    #[tokio::test]
+    async fn streamed_response_is_rejected_after_crossing_one_mebibyte() {
+        let chunk_size = 64 * 1024;
+        let chunks = MAX_RESPONSE_BYTES / chunk_size + 2;
+        let body_chunks = (0..chunks)
+            .map(|_| Ok::<_, std::io::Error>(vec![b'x'; chunk_size]))
+            .collect::<Vec<_>>();
+        let body = reqwest::Body::wrap_stream(futures_util::stream::iter(body_chunks));
+        let response: Response = http::Response::builder()
+            .status(StatusCode::OK)
+            .body(body)
+            .unwrap_or_else(|_| std::process::abort())
+            .into();
+        assert_eq!(response.content_length(), None);
+
+        let result: Result<Vec<Token>, OneClickError> =
+            decode_response("/v0/tokens", response).await;
+        assert_eq!(
+            result.err(),
+            Some(OneClickError::ResponseTooLarge("/v0/tokens"))
+        );
+    }
+
+    #[tokio::test]
+    async fn dependency_error_omits_response_body_and_credential() {
+        let dependency_detail = "dependency-private-diagnostic";
+        let body = format!(r#"{{"message":"{dependency_detail}"}}"#);
+        let (origin, handle) = spawn_mock_server(
+            MockResponse::Fixed(json_response("500 Internal Server Error", body.as_bytes())),
+            TEST_ACCEPT_TIMEOUT,
+        );
+        let client = test_client(origin, Authentication::Bearer(TEST_CREDENTIAL));
+        assert!(!format!("{client:?}").contains(TEST_CREDENTIAL));
+
+        let Some(error) = client.tokens().await.err() else {
+            std::process::abort();
+        };
+        assert_eq!(error, OneClickError::Unavailable("/v0/tokens"));
+        for rendered in [error.to_string(), format!("{error:?}")] {
+            assert!(!rendered.contains(dependency_detail));
+            assert!(!rendered.contains(TEST_CREDENTIAL));
+        }
+        assert!(join_mock_server(handle).is_some());
+    }
+
+    #[tokio::test]
+    async fn quote_rejects_an_invalid_provider_signature() {
+        let body =
+            serde_json::to_vec(&invalidly_signed_quote()).unwrap_or_else(|_| std::process::abort());
+        let (origin, handle) = spawn_mock_server(
+            MockResponse::Fixed(json_response("200 OK", &body)),
+            TEST_ACCEPT_TIMEOUT,
+        );
+        let client = test_client(origin, Authentication::ApiKey(TEST_CREDENTIAL));
+        let verifier =
+            QuoteSignatureVerifier::production().unwrap_or_else(|_| std::process::abort());
+
+        assert_eq!(
+            client.quote(&quote_request(), &verifier).await.err(),
+            Some(OneClickError::QuoteSignature("/v0/quote"))
+        );
+        assert!(join_mock_server(handle).is_some());
+    }
+
+    #[tokio::test]
+    async fn status_rejects_an_invalid_nested_quote_signature() {
+        let document = serde_json::json!({
+            "correlationId": "status-correlation",
+            "quoteResponse": invalidly_signed_quote(),
+            "status": "SUCCESS",
+            "updatedAt": "2026-09-04T15:02:00Z",
+            "swapDetails": {},
+        });
+        let body = serde_json::to_vec(&document).unwrap_or_else(|_| std::process::abort());
+        let (origin, handle) = spawn_mock_server(
+            MockResponse::Fixed(json_response("200 OK", &body)),
+            TEST_ACCEPT_TIMEOUT,
+        );
+        let client = test_client(origin, Authentication::Bearer(TEST_CREDENTIAL));
+        let verifier =
+            QuoteSignatureVerifier::production().unwrap_or_else(|_| std::process::abort());
+
+        assert_eq!(
+            client
+                .status("deposit-address", None, &verifier)
+                .await
+                .err(),
+            Some(OneClickError::QuoteSignature("/v0/status"))
+        );
+        assert!(join_mock_server(handle).is_some());
+    }
+
     #[test]
     fn quote_request_is_closed_and_uses_current_draft_refund_model() {
-        let request = QuoteRequest::exact_output(
-            "nep141:arb-usdc.omft.near".to_owned(),
-            "nep141:base-usdc.omft.near".to_owned(),
-            "1000000".to_owned(),
-            "0xmerchant".to_owned(),
-            "facilitator.near".to_owned(),
-            "2026-09-04T15:10:00Z".to_owned(),
-            100,
-            None,
-            Some("x402".to_owned()),
-        );
+        let request = quote_request();
         let value = serde_json::to_value(&request);
         assert!(value.is_ok());
         let Some(value) = value.ok() else {
