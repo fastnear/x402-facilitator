@@ -14,11 +14,15 @@ info:
     and extension-schema maps.
 
     For NEAR, this release selects the implemented `delegate` route only when
-    `extra.assetTransferMethod` is absent on both the accepted and requirements
-    sides. Any supplied string receives the definitive protocol reason
+    `extra.assetTransferMethod` is absent. `extra.paymentFlow` may be omitted or
+    set to the equivalent direct-flow default `authorization`; either spelling
+    may appear independently on the accepted and requirements sides. For EVM,
+    the corresponding direct route permits an omitted or explicit `eip3009`
+    transfer method and an omitted or explicit `authorization` flow. Any other
+    selector receives the definitive protocol reason
     `unsupported_asset_transfer_method` before the mechanism payload is
-    interpreted. This deliberately keeps unmerged transfer-method vocabulary
-    out of the delegate route and does not rewrite request JSON.
+    interpreted. This keeps unmerged transfer-method vocabulary out of the
+    direct routes and does not rewrite request JSON.
 
     An EVM instance may enable the off-by-default `accept_v1` gate. Such an
     instance also accepts the legacy v1 request branch documented here for
@@ -538,12 +542,20 @@ components:
         implemented in this release; omit the field to use the classic
         `delegate` route. Any string receives the deterministic protocol reason
         `unsupported_asset_transfer_method`.
+    PaymentFlowSelector:
+      type: string
+      description: |
+        The implemented direct routes accept `authorization` or omission as
+        equivalent spellings. Any other string receives the deterministic
+        protocol reason `unsupported_asset_transfer_method`.
     NearPaymentExtra:
       type: object
       additionalProperties: true
       properties:
         assetTransferMethod:
           $ref: "#/components/schemas/NearAssetTransferMethod"
+        paymentFlow:
+          $ref: "#/components/schemas/PaymentFlowSelector"
     EvmNetwork:
       type: string
       enum: ["eip155:84532", "eip155:8453"]
@@ -620,10 +632,11 @@ components:
     NearPaymentRequirements:
       type: object
       description: |
-        Both `paymentPayload.accepted` and `paymentRequirements` must omit
-        `assetTransferMethod` for the currently implemented delegate route. Any
-        supplied string on either side is a definitive unsupported-method
-        protocol rejection.
+        The currently implemented delegate route requires an omitted
+        `assetTransferMethod`. `paymentFlow` may be omitted or set to
+        `authorization`, independently on `paymentPayload.accepted` and
+        `paymentRequirements`. Any other selector is a definitive
+        unsupported-method protocol rejection.
       required: [scheme, network, asset, amount, payTo, maxTimeoutSeconds]
       additionalProperties: false
       properties:
@@ -671,6 +684,12 @@ components:
       type: object
       required: [name, version]
       additionalProperties: true
+      description: |
+        EIP-712 token domain plus the optional direct-route selectors. An EVM
+        request may independently omit the selectors on either requirements
+        copy or spell the defaults as `assetTransferMethod: eip3009` and
+        `paymentFlow: authorization`. Other selector strings receive
+        `unsupported_asset_transfer_method`.
       properties:
         name:
           type: string
@@ -680,8 +699,17 @@ components:
           type: string
           minLength: 1
           description: Real token EIP-712 domain version; Base USDC uses 2
+        assetTransferMethod:
+          type: string
+          description: The implemented EVM value is `eip3009`; omission is equivalent
+        paymentFlow:
+          $ref: "#/components/schemas/PaymentFlowSelector"
     EvmPaymentRequirements:
       type: object
+      description: |
+        `paymentPayload.accepted` and `paymentRequirements` independently
+        resolve omitted direct-route selectors to `eip3009` and
+        `authorization`; explicit defaults are equivalent.
       required: [scheme, network, asset, amount, payTo, maxTimeoutSeconds, extra]
       additionalProperties: false
       properties:
@@ -705,9 +733,9 @@ components:
       type: object
       description: |
         Payload for the currently implemented NEAR `delegate` route, selected
-        only when `assetTransferMethod` is omitted. For a supplied unsupported
-        selector, the server returns the protocol rejection before interpreting
-        the mechanism-specific object.
+        when `assetTransferMethod` is omitted and `paymentFlow` is omitted or
+        `authorization`. For a supplied unsupported selector, the server returns
+        the protocol rejection before interpreting the mechanism-specific object.
       required: [signedDelegateAction]
       additionalProperties: false
       properties:
@@ -846,6 +874,9 @@ components:
           $ref: "#/components/schemas/EvmPaymentRequirements"
     LegacyEvmPaymentRequirements:
       type: object
+      description: |
+        Legacy v1 requirements may omit direct-route selectors or explicitly
+        carry the equivalent `eip3009` and `authorization` defaults in `extra`.
       required:
         - scheme
         - network

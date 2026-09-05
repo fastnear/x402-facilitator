@@ -13,6 +13,21 @@ The discriminator is still proposed vocabulary while upstream
 is under review. Do not advertise it until the upstream contract is stable and
 the implementation exists.
 
+## Adjacent 1Click `upfront` track (2026-09-04)
+
+Upstream [#3370](https://github.com/x402-foundation/x402/pull/3370) now carries
+the successor to #2102's cross-chain 1Click work. It is a distinct
+client-submitted payment-proof method: the x402 network is the origin chain,
+the client deposits into a signed 1Click quote before delivery, and settlement
+depends on the resulting destination payment. It does not supersede the
+same-network, facilitator-submitted `intents-verifier` method described here.
+
+The pre-merge implementation boundary, exact upstream and provider pins,
+unresolved contract questions, and activation checklist for that track live in
+[near-intents-upfront-design.md](near-intents-upfront-design.md). Keep the two
+tracks separate when changing routing, persistence, conformance fixtures, or
+operational claims.
+
 ## Decisions (updated 2026-07-27)
 
 1. **Implementation: one in-tree method, one binary.** `intents-verifier` is
