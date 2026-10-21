@@ -77,6 +77,21 @@ body:
     validations:
       required: true
 
+  - type: dropdown
+    id: key_delivery
+    attributes:
+      label: Key delivery
+      description: >-
+        An approved key is delivered once, age-encrypted to an `ssh-ed25519`
+        or `ssh-rsa` public key on your GitHub account
+        (`https://github.com/<you>.keys`) and posted here as ciphertext.
+        Hardware-backed (`sk-`) and ECDSA keys cannot receive age messages.
+      options:
+        - My GitHub account has, or will have, an ssh-ed25519 or ssh-rsa public key
+        - I will propose another authenticated private channel in this issue
+    validations:
+      required: true
+
   - type: checkboxes
     id: acknowledgement
     attributes:

@@ -49,6 +49,11 @@ Patch releases remain backward compatible within the current minor line.
 - Updated the pinned container base image and GitHub Actions
   (`actions/setup-node` 7.1.0, `actions/upload-artifact` 7.0.2,
   `actions/download-artifact` 8.0.2, `anchore/sbom-action` 0.24.3).
+- Documented the default credential-delivery channel for reference-instance
+  access: the approved key is age-encrypted to an SSH public key published on
+  the requester's GitHub account and posted in the request issue as
+  ciphertext (`docs/reference-access.md`, the runbook, and the access-request
+  issue template).
 
 ### Fixed
 
