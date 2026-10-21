@@ -6,6 +6,7 @@ WORKDIR /src
 COPY .cargo .cargo
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates crates
+COPY vendor vendor
 COPY migrations migrations
 COPY docs/openapi.yaml docs/openapi.yaml
 COPY docs/catalog/resources.json docs/catalog/resources.json

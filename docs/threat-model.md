@@ -44,7 +44,7 @@ transaction success by itself.
 | RPC lies, lags, or partitions | Finality, pinned blocks, typed errors, independent backup reconciliation, fail closed; protected readiness events classify only fixed snapshot causes | Failover and disagreement tests |
 | Database loss or tampering | Scheduled off-host dumps with a tested restore, least-privileged role, append-oriented journal | Dated restore drill |
 | Host compromise | Dedicated unprivileged users, systemd sandboxing, root-only credentials, immutable releases | Unit hardening review and credential-permission check |
-| Supply-chain substitution | Locked dependencies, deny/audit checks, checksums, SBOM, build provenance | Green release workflow and verified artifact install |
+| Supply-chain substitution | Locked dependencies, deny/audit checks, checksums, SBOM, build provenance; a vendored patch is only a checksum-verified copy of a published crate whose applied upstream diff is recorded in `vendor/README.md` and guarded by `scripts/check.sh` | Green release workflow and verified artifact install |
 
 ## Idempotency-specific analysis
 
