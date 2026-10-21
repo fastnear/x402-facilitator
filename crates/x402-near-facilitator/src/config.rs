@@ -734,7 +734,20 @@ fn is_within_systemd_credentials(path: &Path) -> bool {
 
 #[cfg(unix)]
 fn path_is_within(directory: &Path, path: &Path) -> bool {
-    !directory.as_os_str().is_empty() && path.starts_with(directory)
+    if directory.as_os_str().is_empty() {
+        return false;
+    }
+    // Resolve `..` components and symlinked parents on both sides before
+    // comparing; a lexical prefix test would let `$CREDENTIALS_DIRECTORY/../x`
+    // claim the exception. Fail closed when either side cannot be resolved so
+    // the caller applies the strict owner-only mode check instead.
+    let (Ok(directory), Ok(path)) = (
+        std::fs::canonicalize(directory),
+        std::fs::canonicalize(path),
+    ) else {
+        return false;
+    };
+    path.starts_with(directory)
 }
 
 #[cfg(not(unix))]
@@ -1162,23 +1175,44 @@ mod tests {
 
     #[test]
     fn systemd_credentials_directory_scopes_the_mode_exception() {
-        let creds = Path::new("/run/credentials/x402-near-facilitator@testnet.service");
-        assert!(path_is_within(creds, &creds.join("relayer-key")));
+        let root = std::env::temp_dir().join(format!(
+            "x402-near-credentials-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let creds = root.join("x402-near-facilitator@testnet.service");
+        let sibling = root.join("x402-near-facilitator@testnet.service.bak");
+        let outside = root.join("outside");
+        for directory in [&creds, &sibling, &outside] {
+            std::fs::create_dir_all(directory).unwrap_or_else(|_| std::process::abort());
+        }
+        let inside_key = creds.join("relayer-key");
+        let sibling_key = sibling.join("relayer-key");
+        let outside_key = outside.join("relayer-key");
+        for file in [&inside_key, &sibling_key, &outside_key] {
+            std::fs::write(file, b"secret\n").unwrap_or_else(|_| std::process::abort());
+        }
+
+        assert!(path_is_within(&creds, &inside_key));
         // An empty $CREDENTIALS_DIRECTORY must never disable the mode check.
-        assert!(!path_is_within(
-            Path::new(""),
-            Path::new("/run/credentials/x/relayer-key")
-        ));
+        assert!(!path_is_within(Path::new(""), &inside_key));
         // A sibling path that merely shares a name prefix is not inside.
-        assert!(!path_is_within(
-            creds,
-            Path::new("/run/credentials/x402-near-facilitator@testnet.service.bak/relayer-key")
-        ));
+        assert!(!path_is_within(&creds, &sibling_key));
         // Unrelated absolute secrets stay outside the exception.
+        assert!(!path_is_within(&creds, &outside_key));
+        // A `..` component is resolved before the comparison, so a path that
+        // only starts with the credentials directory lexically cannot escape it.
         assert!(!path_is_within(
-            creds,
-            Path::new("/etc/x402-near-facilitator/mainnet.json")
+            &creds,
+            &creds.join("..").join("outside").join("relayer-key")
         ));
+        // Anything that cannot be resolved fails closed.
+        assert!(!path_is_within(&creds, &creds.join("missing-key")));
+        assert!(!path_is_within(
+            &root.join("missing-directory"),
+            &inside_key
+        ));
+
+        std::fs::remove_dir_all(&root).unwrap_or_else(|_| std::process::abort());
     }
 
     fn private_test_file(bytes: &[u8]) -> PathBuf {
