@@ -46,7 +46,9 @@ environments or other services.
 5. Validate the configuration and credential ownership before starting the
    process.
 6. Create an API client and exact network/asset/payee policy. Transfer the raw
-   API key once over an authenticated out-of-band channel.
+   API key once over an authenticated private channel; the reference instances
+   age-encrypt it to an SSH public key on the requester's GitHub account (see
+   [reference access](reference-access.md#request-access)).
 7. Start the service on loopback, require `/readyz` to return 200, and only
    then expose it through a TLS reverse proxy.
 

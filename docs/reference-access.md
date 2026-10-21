@@ -59,8 +59,17 @@ with:
 
 The issue is public. Never include a payer or signer private key, API key,
 signed payment authorization, credentialed URL, raw transaction bytes, or
-other bearer instrument. The operator will arrange one-time credential
-delivery outside the issue if the request is approved.
+other bearer instrument. If the request is approved, the key is delivered
+once, encrypted with [age](https://age-encryption.org) to an `ssh-ed25519` or
+`ssh-rsa` public key published on the requester's GitHub account
+(`https://github.com/<user>.keys`), so publish such a key before or with the
+request; hardware-backed (`sk-`) and ECDSA keys cannot receive age messages.
+The armored ciphertext is posted in the request issue, because only the
+matching private key opens it (`age -d -i ~/.ssh/id_ed25519`), and the
+operator removes that comment once receipt is confirmed. Treat a later
+compromise of that SSH private key as exposure of the API key and request a
+rotation. A different authenticated private channel can be agreed in the
+issue instead.
 
 Requests may be declined or assigned conservative rate and sponsorship limits.
 Keys expire or are reviewed, may be revoked for abuse or inactivity, and are
@@ -83,8 +92,9 @@ is stricter than a general evaluation request. It is for one public
   budget until the verify-first gate completes.
 
 The public request never needs a funded payer, signed authorization, API key,
-or transaction. If approved, one per-instance key is delivered exactly once by
-an authenticated out-of-band channel. The operator then confirms public
+or transaction. If approved, one per-instance key is delivered exactly once,
+encrypted to a key only the requester holds (see
+[Request access](#request-access)). The operator then confirms public
 discovery and performs read-only verification before a positive settlement
 budget can be enabled.
 
@@ -110,9 +120,11 @@ own demos and merchant examples are never catalog entries.
    broadcast phase. Set a positive cap only after the read-only checks and
    settlement-approval gate; the legacy `*_yocto_near` name means the native
    atomic gas unit (wei on Base).
-3. Receive the raw key exactly once through an authenticated private channel.
-   Store it in a secret manager or mode-0600 credential file and configure the
-   resource server, not browser or payer code.
+3. Receive the raw key exactly once through an authenticated private channel
+   (by default age-encrypted to the SSH public key on your GitHub account, as
+   described under [Request access](#request-access)). Store it in a secret
+   manager or mode-0600 credential file and configure the resource server, not
+   browser or payer code.
 4. Configure canonical payment requirements. For Base mainnet use network
    `eip155:8453`, asset
    `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`, and EIP-712 domain
