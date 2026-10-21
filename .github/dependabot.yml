@@ -1,10 +1,11 @@
 version: 2
 updates:
-  # One grouped PR must cover both lockfiles: the fuzz workspace pins the same
-  # exact NEAR crates as the production workspace, so a root-only or fuzz-only
-  # bump leaves the other lockfile stale under `--locked` and fails
-  # scripts/check.sh. Verify the first weekly run produces a single PR; if it
-  # still splits, fold the queue by hand as in the 2026-10 consolidation.
+  # Every cargo PR must update both lockfiles: the fuzz workspace resolves the
+  # same path crates and exact NEAR pins as the production workspace, so a PR
+  # that changes a manifest requirement but only one lockfile fails
+  # `cargo metadata --locked` in scripts/check.sh (#203-#205 after #196).
+  # Only `group-by: dependency-name` makes Dependabot span the listed
+  # directories in one PR; a plain group still opens one PR per directory.
   - package-ecosystem: cargo
     directories:
       - /
@@ -13,8 +14,8 @@ updates:
       interval: weekly
     open-pull-requests-limit: 5
     groups:
-      rust-patch:
-        update-types: [patch]
+      rust:
+        group-by: dependency-name
   - package-ecosystem: npm
     directory: /crates/x402-chain-near/fixtures
     schedule:
