@@ -1,20 +1,19 @@
 version: 2
 updates:
+  # One grouped PR must cover both lockfiles: the fuzz workspace pins the same
+  # exact NEAR crates as the production workspace, so a root-only or fuzz-only
+  # bump leaves the other lockfile stale under `--locked` and fails
+  # scripts/check.sh. Verify the first weekly run produces a single PR; if it
+  # still splits, fold the queue by hand as in the 2026-10 consolidation.
   - package-ecosystem: cargo
-    directory: /
+    directories:
+      - /
+      - /fuzz
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
     groups:
       rust-patch:
-        update-types: [patch]
-  - package-ecosystem: cargo
-    directory: /fuzz
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 3
-    groups:
-      fuzz-rust-patch:
         update-types: [patch]
   - package-ecosystem: npm
     directory: /crates/x402-chain-near/fixtures
@@ -28,6 +27,11 @@ updates:
     open-pull-requests-limit: 3
   - package-ecosystem: npm
     directory: /examples/resource-server
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+  - package-ecosystem: npm
+    directory: /examples/merchant-api
     schedule:
       interval: weekly
     open-pull-requests-limit: 3

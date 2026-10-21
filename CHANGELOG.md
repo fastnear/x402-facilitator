@@ -13,6 +13,45 @@ Patch releases remain backward compatible within the current minor line.
 
 ## [Unreleased]
 
+### Security
+
+- Updated `proxy-addr` to 2.0.8 in both example applications to resolve
+  GHSA-jqcg-44mw-7w3h (IP spoofing through an IPv4-mapped IPv6 trusted
+  subnet).
+- Updated every pinned `@x402/*` package from 2.25.0 to 2.28.0. Upstream 2.27.0
+  closed an unpaid-access gap in the HTTP resource-server adapters where a
+  protected route could be reached by percent-encoding its path separator; the
+  pinned NEAR interoperability fixtures are unchanged under 2.28.0.
+- Updated `quinn-proto` to 0.11.19 (RUSTSEC-2026-0338, -0339, -0340, -0341,
+  -0342), `webpki-roots` and `webpki-root-certs` to 1.0.10 (RUSTSEC-2026-0381,
+  -0383), and replaced the yanked `chacha20` 0.10.1 with 0.10.2 in both
+  lockfiles.
+- Added guarded RustSec exceptions for the five advisories whose fixes need
+  `aws-lc-rs` ^1.18: RUSTSEC-2026-0285, -0346, -0348, -0349 (`rustls`, fixed
+  in 0.23.46) and RUSTSEC-2026-0382 (`rustls-webpki`, fixed in 0.103.16).
+  `near-crypto` 0.37.x pins `aws-lc-rs` =1.16.2 and `reqwest` 0.13's default
+  TLS path activates `rustls`'s `aws-lc-rs` backend, so neither lockfile can
+  take the fixes yet. All five are client-side; the `brotli` feature is off,
+  no custom session store exists, and the bundled root stores already drop
+  the emSign roots that RUSTSEC-2026-0382 concerns (hosts using the OS trust
+  store should confirm those roots are distrusted there too).
+  `scripts/check.sh` fails as soon as the resolver selects any other
+  `aws-lc-rs`, forcing the exceptions' removal.
+
+### Changed
+
+- Bumped the NEAR crate pins to 0.37.4 and refreshed the production and fuzz
+  lockfiles together (Rust patch group: `rand`, `serde_json`, `sha2`,
+  `thiserror`, `tokio`, `zeroize`, `alloy-primitives`, `alloy-sol-types`),
+  with the release SBOM assertions updated to match.
+- Dependabot now updates the production and fuzz Cargo workspaces as one
+  grouped pull request and also covers `examples/merchant-api`; CI runs the
+  full gate on `main` weekly so advisory drift surfaces without a pull
+  request.
+- Updated the pinned container base image and GitHub Actions
+  (`actions/setup-node` 7.1.0, `actions/upload-artifact` 7.0.2,
+  `actions/download-artifact` 8.0.2, `anchore/sbom-action` 0.24.3).
+
 ## [0.6.0] - 2026-07-31
 
 This backward-compatible discovery release adds public onboarding and merchant

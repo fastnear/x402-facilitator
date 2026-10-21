@@ -44,8 +44,39 @@ if command -v cargo-audit >/dev/null 2>&1; then
     echo "error: fuzz rkyv became reachable; remove the RUSTSEC-2026-0235 exception" >&2
     exit 1
   fi
-  cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0235
-  cargo audit --file fuzz/Cargo.lock --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0235
+  # rustls 0.23.42 and rustls-webpki 0.103.13 carry five open advisories whose
+  # fixes (rustls >= 0.23.46, rustls-webpki >= 0.103.16) all require
+  # aws-lc-rs ^1.18: RUSTSEC-2026-0285 (handshake messages accepted across an
+  # encryption-level change; the transcript stays authenticated),
+  # RUSTSEC-2026-0346 (derived Debug on client session values prints
+  # resumption secrets; no custom ClientSessionStore formats them here),
+  # RUSTSEC-2026-0348 (Brotli certificate decompression; the brotli feature is
+  # not enabled), RUSTSEC-2026-0349 (an unauthenticated ServerHello can pin a
+  # classical key exchange for later connections to that name), and
+  # RUSTSEC-2026-0382 (certificate paths through distrusted emSign
+  # intermediates whose private keys are public are still accepted when the
+  # trust anchors allow them; the bundled webpki root stores are on 1.0.10 and
+  # the platform verifier depends on the host's OS trust store).
+  # near-crypto 0.37.x (and 0.38.0-rc.5) pins aws-lc-rs =1.16.2 while reqwest
+  # 0.13's default TLS path (alloy, opentelemetry-http) activates rustls's
+  # aws-lc-rs backend, so neither lockfile can take the fixes yet. Keep the
+  # exceptions only while the resolver still selects that pinned version; the
+  # moment it moves, bump rustls and rustls-webpki and delete this block.
+  selected=$(cargo tree --workspace --edges normal,build -i aws-lc-rs --depth 0 --locked 2>/dev/null | head -n 1)
+  if [ "$selected" != "aws-lc-rs v1.16.2" ]; then
+    echo "error: workspace resolves '$selected'; bump rustls and rustls-webpki and remove the aws-lc-rs-blocked RustSec exceptions" >&2
+    exit 1
+  fi
+  selected=$(cargo tree --manifest-path fuzz/Cargo.toml --edges normal,build -i aws-lc-rs --depth 0 --locked 2>/dev/null | head -n 1)
+  if [ "$selected" != "aws-lc-rs v1.16.2" ]; then
+    echo "error: fuzz workspace resolves '$selected'; bump rustls and rustls-webpki and remove the aws-lc-rs-blocked RustSec exceptions" >&2
+    exit 1
+  fi
+  aws_lc_rs_blocked='--ignore RUSTSEC-2026-0285 --ignore RUSTSEC-2026-0346 --ignore RUSTSEC-2026-0348 --ignore RUSTSEC-2026-0349 --ignore RUSTSEC-2026-0382'
+  # shellcheck disable=SC2086
+  cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0235 $aws_lc_rs_blocked
+  # shellcheck disable=SC2086
+  cargo audit --file fuzz/Cargo.lock --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0235 $aws_lc_rs_blocked
 else
   echo "note: cargo-audit is not installed; CI must run this gate" >&2
 fi
