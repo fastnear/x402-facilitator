@@ -36,3 +36,7 @@ bench = false
 
 [workspace]
 members = ["."]
+
+# Mirrors the root workspace patch; see vendor/README.md.
+[patch.crates-io]
+near-crypto = { path = "../vendor/near-crypto" }

@@ -16,6 +16,39 @@ cargo package --locked --allow-dirty -p x402-chain-near
 cargo package --locked --allow-dirty -p x402-chain-eip155-provider
 python3 -m json.tool docs/catalog/resources.json >/dev/null
 
+# vendor/near-crypto is crates.io near-crypto 0.37.4 plus nearcore#16420/#16617
+# (aws-lc-rs 1.18 without the `unstable` feature), applied through
+# [patch.crates-io] so rustls and rustls-webpki can take the aws-lc-rs ^1.18
+# security releases (RUSTSEC-2026-0285/0346/0348/0349/0382). Drop the directory
+# and both [patch] entries as soon as a published near-crypto carries that
+# change. This guard refuses a pin bump that leaves the copy behind and refuses
+# a copy that the resolver is not actually using.
+if [ -d vendor/near-crypto ]; then
+  vendored=$(awk '/^\[package\]/ { p = 1 } p && /^version = / { gsub(/"/, "", $3); print $3; exit }' vendor/near-crypto/Cargo.toml)
+  pinned=$(sed -n 's/^near-crypto = "=\(.*\)"$/\1/p' Cargo.toml)
+  if [ -z "$vendored" ] || [ "$vendored" != "$pinned" ]; then
+    echo "error: near-crypto is pinned to '$pinned' but vendor/near-crypto is '$vendored'; remove the vendored patch (vendor/README.md) or re-vendor" >&2
+    exit 1
+  fi
+  grep -q '^near-crypto = { path = "vendor/near-crypto" }$' Cargo.toml || {
+    echo "error: the root [patch.crates-io] entry for vendor/near-crypto is missing" >&2
+    exit 1
+  }
+  grep -q '^near-crypto = { path = "../vendor/near-crypto" }$' fuzz/Cargo.toml || {
+    echo "error: the fuzz [patch.crates-io] entry for vendor/near-crypto is missing" >&2
+    exit 1
+  }
+  root_aws=$(cargo tree --workspace --edges normal,build -i aws-lc-rs --depth 0 --locked 2>/dev/null | sed -n 's/^aws-lc-rs v//p' | head -n 1)
+  fuzz_aws=$(cargo tree --manifest-path fuzz/Cargo.toml --edges normal,build -i aws-lc-rs --depth 0 --locked 2>/dev/null | sed -n 's/^aws-lc-rs v//p' | head -n 1)
+  for selected in "root:$root_aws" "fuzz:$fuzz_aws"; do
+    version=${selected#*:}
+    if [ -z "$version" ] || [ "$(printf '%s\n1.18.0\n' "$version" | sort -V | head -n 1)" != "1.18.0" ]; then
+      echo "error: ${selected%%:*} workspace resolves aws-lc-rs '$version'; the vendored near-crypto patch is not in effect" >&2
+      exit 1
+    fi
+  done
+fi
+
 if command -v cargo-deny >/dev/null 2>&1; then
   # RustSec is checked by cargo-audit below. Keeping the advisory scan out of
   # cargo-deny also avoids making this gate depend on cargo-deny's support for
@@ -44,39 +77,8 @@ if command -v cargo-audit >/dev/null 2>&1; then
     echo "error: fuzz rkyv became reachable; remove the RUSTSEC-2026-0235 exception" >&2
     exit 1
   fi
-  # rustls 0.23.42 and rustls-webpki 0.103.13 carry five open advisories whose
-  # fixes (rustls >= 0.23.46, rustls-webpki >= 0.103.16) all require
-  # aws-lc-rs ^1.18: RUSTSEC-2026-0285 (handshake messages accepted across an
-  # encryption-level change; the transcript stays authenticated),
-  # RUSTSEC-2026-0346 (derived Debug on client session values prints
-  # resumption secrets; no custom ClientSessionStore formats them here),
-  # RUSTSEC-2026-0348 (Brotli certificate decompression; the brotli feature is
-  # not enabled), RUSTSEC-2026-0349 (an unauthenticated ServerHello can pin a
-  # classical key exchange for later connections to that name), and
-  # RUSTSEC-2026-0382 (certificate paths through distrusted emSign
-  # intermediates whose private keys are public are still accepted when the
-  # trust anchors allow them; the bundled webpki root stores are on 1.0.10 and
-  # the platform verifier depends on the host's OS trust store).
-  # near-crypto 0.37.x (and 0.38.0-rc.5) pins aws-lc-rs =1.16.2 while reqwest
-  # 0.13's default TLS path (alloy, opentelemetry-http) activates rustls's
-  # aws-lc-rs backend, so neither lockfile can take the fixes yet. Keep the
-  # exceptions only while the resolver still selects that pinned version; the
-  # moment it moves, bump rustls and rustls-webpki and delete this block.
-  selected=$(cargo tree --workspace --edges normal,build -i aws-lc-rs --depth 0 --locked 2>/dev/null | head -n 1)
-  if [ "$selected" != "aws-lc-rs v1.16.2" ]; then
-    echo "error: workspace resolves '$selected'; bump rustls and rustls-webpki and remove the aws-lc-rs-blocked RustSec exceptions" >&2
-    exit 1
-  fi
-  selected=$(cargo tree --manifest-path fuzz/Cargo.toml --edges normal,build -i aws-lc-rs --depth 0 --locked 2>/dev/null | head -n 1)
-  if [ "$selected" != "aws-lc-rs v1.16.2" ]; then
-    echo "error: fuzz workspace resolves '$selected'; bump rustls and rustls-webpki and remove the aws-lc-rs-blocked RustSec exceptions" >&2
-    exit 1
-  fi
-  aws_lc_rs_blocked='--ignore RUSTSEC-2026-0285 --ignore RUSTSEC-2026-0346 --ignore RUSTSEC-2026-0348 --ignore RUSTSEC-2026-0349 --ignore RUSTSEC-2026-0382'
-  # shellcheck disable=SC2086
-  cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0235 $aws_lc_rs_blocked
-  # shellcheck disable=SC2086
-  cargo audit --file fuzz/Cargo.lock --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0235 $aws_lc_rs_blocked
+  cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0235
+  cargo audit --file fuzz/Cargo.lock --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0235
 else
   echo "note: cargo-audit is not installed; CI must run this gate" >&2
 fi

@@ -4,15 +4,6 @@ ignore = [
   # is not reachable from normal/build dependencies. scripts/check.sh refuses
   # this exception if the edge becomes active.
   "RUSTSEC-2026-0235",
-  # The fixed rustls (>= 0.23.46) and rustls-webpki (>= 0.103.16) need
-  # aws-lc-rs ^1.18, but near-crypto pins aws-lc-rs =1.16.2. scripts/check.sh
-  # refuses these exceptions as soon as the resolver selects any other
-  # aws-lc-rs version.
-  "RUSTSEC-2026-0285",
-  "RUSTSEC-2026-0346",
-  "RUSTSEC-2026-0348",
-  "RUSTSEC-2026-0349",
-  "RUSTSEC-2026-0382",
 ]
 
 [bans]

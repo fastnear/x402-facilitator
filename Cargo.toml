@@ -67,3 +67,9 @@ panic = "deny"
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
+
+# vendor/near-crypto is crates.io near-crypto 0.37.4 plus nearcore#16420/#16617
+# (aws-lc-rs 1.18 without the `unstable` feature); see vendor/README.md.
+# fuzz/Cargo.toml carries the same entry. Remove both with the directory.
+[patch.crates-io]
+near-crypto = { path = "vendor/near-crypto" }

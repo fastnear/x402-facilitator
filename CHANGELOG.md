@@ -26,17 +26,15 @@ Patch releases remain backward compatible within the current minor line.
   -0342), `webpki-roots` and `webpki-root-certs` to 1.0.10 (RUSTSEC-2026-0381,
   -0383), and replaced the yanked `chacha20` 0.10.1 with 0.10.2 in both
   lockfiles.
-- Added guarded RustSec exceptions for the five advisories whose fixes need
-  `aws-lc-rs` ^1.18: RUSTSEC-2026-0285, -0346, -0348, -0349 (`rustls`, fixed
-  in 0.23.46) and RUSTSEC-2026-0382 (`rustls-webpki`, fixed in 0.103.16).
-  `near-crypto` 0.37.x pins `aws-lc-rs` =1.16.2 and `reqwest` 0.13's default
-  TLS path activates `rustls`'s `aws-lc-rs` backend, so neither lockfile can
-  take the fixes yet. All five are client-side; the `brotli` feature is off,
-  no custom session store exists, and the bundled root stores already drop
-  the emSign roots that RUSTSEC-2026-0382 concerns (hosts using the OS trust
-  store should confirm those roots are distrusted there too).
-  `scripts/check.sh` fails as soon as the resolver selects any other
-  `aws-lc-rs`, forcing the exceptions' removal.
+- Vendored `near-crypto` 0.37.4 with nearcore's `aws-lc-rs` 1.18 change
+  (near/nearcore#16420 and #16617) applied through `[patch.crates-io]`
+  (`vendor/near-crypto`, provenance in `vendor/README.md`). Every published
+  `near-crypto` 0.37.x and 0.38.0 release candidate still pins
+  `aws-lc-rs =1.16.2`, which blocked the `rustls` 0.23.46 and `rustls-webpki`
+  0.103.16 releases that fix RUSTSEC-2026-0285, -0346, -0348, -0349 and
+  -0382. Both lockfiles now carry those versions and `aws-lc-rs` 1.18.2, and
+  `scripts/check.sh` refuses to move the NEAR pins while the vendored copy
+  remains, so the patch leaves with the first published fix.
 
 ### Changed
 
