@@ -52,6 +52,13 @@ Patch releases remain backward compatible within the current minor line.
   (`actions/setup-node` 7.1.0, `actions/upload-artifact` 7.0.2,
   `actions/download-artifact` 8.0.2, `anchore/sbom-action` 0.24.3).
 
+### Fixed
+
+- The systemd credentials-directory exception to the owner-only secret-file
+  mode check now canonicalizes both paths and fails closed, so a `..`
+  component or symlinked parent under `$CREDENTIALS_DIRECTORY` can no longer
+  claim the exception (reported in #182).
+
 ## [0.6.0] - 2026-07-31
 
 This backward-compatible discovery release adds public onboarding and merchant
