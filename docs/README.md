@@ -53,6 +53,9 @@ the current source tree rather than the state of a public deployment.
 - [NEAR Intents adoption gates](near-intents-adoption-gates.md) and
   [Verifier method design](near-intents-verifier-design.md) — proposed
   mainnet-only transfer method in the existing NEAR provider and service.
+- [NEAR Intents 1Click upfront design](near-intents-upfront-design.md) —
+  pre-merge implementation boundary and adoption gates for the distinct
+  client-submitted cross-chain payment-proof proposal.
 - [NEAR Intents research log](near-intents-x402-progress.md) — dated empirical
   work and open decisions.
 - [Distribution log](distribution.md) — dated registry and directory outreach.

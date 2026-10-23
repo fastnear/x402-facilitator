@@ -303,6 +303,55 @@ mod tests {
     }
 
     #[test]
+    fn legacy_wire_cannot_select_near_intents_upfront() {
+        let mut request = v1_request();
+        request["paymentRequirements"]["extra"] = serde_json::json!({
+            "assetTransferMethod": "near-intents",
+            "paymentFlow": "upfront",
+        });
+        request["paymentPayload"]["payload"] = serde_json::json!({
+            "txHash": "origin-transaction",
+        });
+        let config = crate::config::PaymentIdentifierConfig::default();
+        let parsed = crate::protocol::parse_request(
+            &serde_json::to_vec(&request).unwrap_or_default(),
+            &config,
+            true,
+        );
+        let Ok(parsed) = parsed else {
+            std::process::abort();
+        };
+        assert_eq!(
+            parsed.meta.settlement_route,
+            crate::protocol::SettlementRoute::Unsupported
+        );
+        assert!(parsed.meta.signed_delegate_action.is_none());
+    }
+
+    #[test]
+    fn legacy_wire_accepts_explicit_direct_eip3009_defaults() {
+        let mut request = v1_request();
+        request["paymentRequirements"]["extra"]["assetTransferMethod"] =
+            Value::String("eip3009".to_owned());
+        request["paymentRequirements"]["extra"]["paymentFlow"] =
+            Value::String("authorization".to_owned());
+        let config = crate::config::PaymentIdentifierConfig::default();
+        let parsed = crate::protocol::parse_request(
+            &serde_json::to_vec(&request).unwrap_or_default(),
+            &config,
+            true,
+        );
+        let Ok(parsed) = parsed else {
+            std::process::abort();
+        };
+        assert_eq!(
+            parsed.meta.settlement_route,
+            crate::protocol::SettlementRoute::Direct
+        );
+        assert!(parsed.meta.signed_delegate_action.is_none());
+    }
+
+    #[test]
     fn translation_rejects_unknown_keys_at_every_level() {
         let mut unknown_top = v1_request();
         unknown_top["unexpected"] = Value::Bool(true);
