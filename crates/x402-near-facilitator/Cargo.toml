@@ -35,7 +35,7 @@ near-crypto.workspace = true
 near-primitives.workspace = true
 opentelemetry = { version = "0.32", features = ["metrics", "trace"] }
 opentelemetry-otlp = { version = "0.32", default-features = false, features = ["http-proto", "metrics", "reqwest-rustls", "trace"] }
-opentelemetry_sdk = { version = "0.32", features = ["metrics", "trace"] }
+opentelemetry_sdk = { version = "0.33", features = ["metrics", "trace"] }
 rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
