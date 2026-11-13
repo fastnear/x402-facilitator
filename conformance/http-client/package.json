@@ -3,8 +3,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "check": "node --check check.mjs",
-    "conformance": "node check.mjs"
+    "check": "node --check check.mjs && node --check merchant-preflight.mjs && node --test merchant-preflight.test.mjs",
+    "conformance": "node check.mjs",
+    "preflight": "node merchant-preflight.mjs"
   },
   "dependencies": {
     "@x402/core": "2.30.0"

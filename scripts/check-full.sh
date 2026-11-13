@@ -61,6 +61,7 @@ rm -f "$database_url_file"
 database_url_file=
 
 npm --prefix conformance/http-client ci
+npm --prefix conformance/http-client run check
 
 X402_FACILITATOR_TEST_DATABASE_URL="$database_url" \
 X402_RUN_NODE_CLIENT_CONFORMANCE=1 \

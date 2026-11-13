@@ -13,6 +13,15 @@ Patch releases remain backward compatible within the current minor line.
 
 ## [Unreleased]
 
+### Added
+
+- An offline merchant-offer preflight in the HTTP conformance harness. It
+  checks captured unsigned x402 v2 offers against independently reviewed exact
+  terms, the canonical NEAR/Base USDC profiles, the strict forwarded-field
+  boundary, and the pinned official schema/matcher. It neither contacts a
+  merchant/facilitator nor accepts a credential or payment authorization.
+  The full local and CI/release gates run its regression tests.
+
 ## [0.7.0] - 2026-11-13
 
 ### Security
