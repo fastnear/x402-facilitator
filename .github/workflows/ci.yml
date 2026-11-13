@@ -90,7 +90,9 @@ jobs:
             migrate --database-url-file "$database_url_file"
 
       - name: Install official HTTP client conformance dependency
-        run: npm --prefix conformance/http-client ci
+        run: |
+          npm --prefix conformance/http-client ci
+          npm --prefix conformance/http-client run check
 
       - name: Run repository checks
         run: ./scripts/check.sh

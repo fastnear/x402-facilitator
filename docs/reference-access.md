@@ -129,7 +129,12 @@ own demos and merchant examples are never catalog entries.
    `eip155:8453`, asset
    `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`, and EIP-712 domain
    `USD Coin` / `2`. Use the exact payee approved in the access request.
-5. Start with `/verify`, which never broadcasts. Confirm malformed and invalid
+5. Before private verification, run the
+   [offline offer preflight](../conformance/http-client/README.md#merchant-offer-preflight)
+   against the captured unsigned v2 challenge and independently reviewed
+   terms. A passing snapshot is one contract check; it does not establish live
+   availability, recipient control, credential approval, or catalog eligibility.
+   Start with `/verify`, which never broadcasts. Confirm malformed and invalid
    requests fail closed. The public request never contains a signed
    authorization; any valid verification occurs privately only after the
    out-of-band key delivery and policy review. Do not enable `/settle` until

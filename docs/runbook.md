@@ -124,6 +124,15 @@ policy, and confirmation depth.
 `/healthz` proves only process liveness. Route paid traffic only while
 `/readyz` returns 200.
 
+## Review an inbound integration
+
+Use the [offline offer preflight](../conformance/http-client/README.md#merchant-offer-preflight)
+with a captured unsigned challenge and independently reviewed terms before
+private verification. It checks a static offer's compatibility; live endpoint
+checks, recipient control, authenticated key delivery and the access-policy
+gates remain separate. Keep applicant code and supplied commands out of this
+operator check. Record dated observations without signed payment material.
+
 ## Routine checks
 
 At least daily, and after every restart or provider incident:
