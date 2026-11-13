@@ -79,8 +79,11 @@ Never describe a promotion or canary as complete without a dated record under
 
 Dependency maintenance must pass the current advisory gates as well as the
 functional tests. The [2026-11-13 update](evidence/2026-11-13-dependency-updates.md)
-retains a reachable crypto-bigint advisory as a release blocker; passing tests
-do not clear it. The guarded SQLx SQLite exception is limited to its inactive
+removes the reachable crypto-bigint advisory through a temporary, source-verified
+Alloy API migration to published k256 0.14. Release checks verify the vendor
+copies and both dependency graphs; do not remove the patches or enable optional
+signer backends until their upstream migration is reviewed. The guarded SQLx
+SQLite exception is limited to its inactive
 optional driver and must be removed if SQLite becomes a built dependency.
 
 Migration `0003` has one deliberate post-transaction maintenance step. After

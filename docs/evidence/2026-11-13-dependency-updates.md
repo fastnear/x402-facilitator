@@ -21,6 +21,15 @@ release, deployment, funded payment, or completed partner integration.
 - Both Cargo lockfiles resolve ctutils 0.4.8, zstd 0.13.5, zstd-safe 7.4.1,
   zstd-sys 2.1.3+zstd.1.5.7, and quinn-udp 0.5.16. Their package/version
   sets match apart from the fuzz harness and libfuzzer-sys.
+- Resolves the reachable signer advisory using published k256 0.14.0,
+  elliptic-curve 0.14.3, ecdsa 0.17.0 and crypto-bigint 0.7.11. Five
+  checksum-verified Alloy copies adapt dependency APIs; the small complete
+  [patch](../../vendor/alloy-k256.patch),
+  [provenance](../../vendor/alloy-k256-provenance.json) and
+  [scope/removal instructions](../../vendor/README.md) are checked in.
+- Prepares lockstep v0.7.0 because exposed Rust signer types change. External
+  consumers must align the k256 types and apply the same Cargo patches; Cargo
+  does not propagate patches through a registry dependency.
 
 The canonical v2 contract, v1 gate, database schema, configuration, production
 Node independence, and Rust 1.94.1 minimum remain unchanged. A rollback is the
@@ -50,15 +59,31 @@ previous source commit and its paired lockfiles; no data migration is needed.
   signatures and 10 attestations. These checks establish registry integrity
   and published provenance, not an audit of every upstream source line.
 
-## Release blocker retained
+## Signer blocker resolved
 
-[RUSTSEC-2026-0387](https://rustsec.org/advisories/RUSTSEC-2026-0387) remains
-on reachable crypto-bigint 0.5.5. Alloy 2.5.0 requires elliptic-curve/k256
-0.13, whose crypto-bigint requirement is `^0.5`; the advisory's patched
-line is `>=0.7.6`. This is not an optional-driver-only dependency. Both audit
-gates continue to fail on it, and no exception is added for it. A compatible
-upstream fix or a separately reviewed cryptographic dependency migration is
-required before treating this maintenance branch as release-ready.
+The initial #226 commit `d1cb78f4` deliberately retained
+[RUSTSEC-2026-0387](https://rustsec.org/advisories/RUSTSEC-2026-0387) on
+reachable crypto-bigint 0.5.5, so its first CI run correctly failed. Alloy
+2.5.0 still pins the old k256 family. Upstream tracks the issue in
+[alloy#4445](https://github.com/alloy-rs/alloy/issues/4445); the core migration
+[core#1147](https://github.com/alloy-rs/core/pull/1147) is unmerged as reviewed
+on this date. No compatible published Alloy fix was available.
+
+The follow-up applies narrow manifest/API adapters to published Alloy sources,
+reaching the published patched RustCrypto stack. It does not implement
+cryptographic arithmetic, modify upstream x402 verification or add an advisory
+exception. The source guard compares every vendored file with checksum-pinned
+original archives, verifies root and fuzz resolution, and rejects vulnerable
+crypto-bigint and unreviewed optional signer backends. Both release SBOMs must
+contain k256 0.14.0 / crypto-bigint 0.7.11 and no older crypto-bigint.
+
+A detached baseline at `d1cb78f4` recorded 256 deterministic prehash signatures
+and one expired, non-authorizing EIP-1559 envelope using the existing unfunded
+scalar-one test key. The upgraded signer byte-matches those values. Regression
+coverage also checks recovery of the old envelope, high-S parity preservation
+on unchecked paths, high-S rejection on checked paths, public-key verification,
+wrong-message rejection and invalid-scalar rejection. This establishes tested
+functional compatibility, not a timing proof or an independent crypto audit.
 
 The published NEAR 0.38.1 line includes the aws-lc-rs fix we currently vendor,
 but near-jsonrpc-client 0.23.0 requires Rust 1.95 and the NEAR line changes
@@ -71,8 +96,14 @@ zstd releases used here, so those security fixes do not require that migration.
 - `./scripts/check-full.sh` exercised ephemeral PostgreSQL migrations,
   Clippy with warnings denied, workspace tests, official TypeScript client
   conformance, rustdoc, locked fuzz metadata, provider packaging, and
-  dependency source/license checks. Those stages passed. It then stopped
-  at the retained crypto-bigint advisory; the full gate did **not** pass.
+  dependency source/license checks. The initial run stopped at the retained
+  crypto-bigint advisory. The follow-up `./scripts/check-full.sh` run passes
+  end to end with the signer migration: 203 Rust tests, PostgreSQL recovery
+  and concurrency tests, official Node HTTP-client conformance, Clippy,
+  rustdoc, provider packaging, both lockfile audits, source/license checks,
+  configuration, 37 release-guard tests, monitoring and documentation checks.
+- The vendor guard passes for both workspaces and a deliberate unrecorded
+  source edit is rejected by its positive control. `git diff --check` passes.
 - Both example `npm run check` suites pass: 97 merchant tests and 23 resource
   tests, plus TypeScript checking, import checking, and catalog validation.
 - `npm run check` passes for the NEAR fixtures and HTTP harness. The NEAR
@@ -87,9 +118,8 @@ zstd releases used here, so those security fixes do not require that migration.
   Each live `accepts` entry deep-matched the requirements built by the new
   2.30.0 packages and was accepted by their matcher. No payment signature,
   credential, verification request, settlement, or broadcast was sent.
-- Config JSON parsing, 37 release-guard tests, monitoring checks, documentation
-  checks, and `git diff --check` are run separately because the retained
-  advisory stops `check.sh` before its final non-Rust checks.
+- Config JSON parsing, release-guard tests, monitoring checks, documentation
+  checks, and `git diff --check` are required by the full gate.
 
 No API key, signer, account, policy row, sponsorship allowance, deployed
 service, or public catalog entry was created or changed.

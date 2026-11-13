@@ -1,0 +1,91 @@
+[
+  {
+    "name": "alloy-primitives",
+    "version": "1.7.3",
+    "sha256": "d5e9dbd49258ac3ab893a481d46be29b58be7f734dcac46cd80b6b13ee36566c",
+    "changes": {
+      "Cargo.toml": {
+        "original_sha256": "452c09018d3cd93b999cc98e7fc95a020f77b64e3e74409c4e80b52ac5da468a",
+        "patched_sha256": "cc482bdf4b027ff52cfd3816530b52ae50b9f1380f28ac7abec044ba008ff42d"
+      },
+      "src/bits/address.rs": {
+        "original_sha256": "1ff5e22e0825f5fd0c034ded8dd522ac8f92827539ff9e0a22d9e3affec6a472",
+        "patched_sha256": "63d7f3f981718ccba01fd2ea86b08eac96f8e308a042e532c7bd1510c01bb59e"
+      },
+      "src/hex_literal.rs": {
+        "original_sha256": "520609dad7956b0acb61169ffadc65730eb1c5d045b5195948ba53400f5ee37d",
+        "patched_sha256": "18916c20b8805101f804c7877676f3f3cdbb097ec83fce6501fa342f2a491b8f"
+      }
+    },
+    "repository": "https://github.com/alloy-rs/core",
+    "upstream_commit": "87080853083c909b34f8c8cff3622570c114985d"
+  },
+  {
+    "name": "alloy-signer",
+    "version": "2.5.0",
+    "sha256": "e7de6fd34b5ba1789d482fa800dd97219b34765d6b07633a989a24d2dace770e",
+    "changes": {
+      "Cargo.toml": {
+        "original_sha256": "3625174ebcdc90ff3d7a4b04062ef34b5e5e1c9ddc9fe254c2863f7935667823",
+        "patched_sha256": "996c0513177b656e6700c3520e01f027b76de094626734a526d3fce3b9ed30a4"
+      },
+      "src/utils.rs": {
+        "original_sha256": "24f0899627a4aef1ed821a1006385f1f278c84d8ccf262e132e4b3ad85a48164",
+        "patched_sha256": "cff498490e444cd62eac8ec8945fe591f13083f8a865ca6b28d49e64fb2b63af"
+      }
+    },
+    "repository": "https://github.com/alloy-rs/alloy",
+    "upstream_commit": "59174912873b337ea5868c295cefa70997596f29"
+  },
+  {
+    "name": "alloy-signer-local",
+    "version": "2.5.0",
+    "sha256": "d6909c09d586c7b55eced688754d57dde8a6bcbae2b83e69a9b9250e74cfd79e",
+    "changes": {
+      "Cargo.toml": {
+        "original_sha256": "b6bc9db0cd077d1ae66312c2f8d8884f279bcf9b9240b74f45a35e98566b2695",
+        "patched_sha256": "c89a2313dd55216d64962059857c874ce234369c400fb33e24e996d02235db12"
+      },
+      "src/private_key.rs": {
+        "original_sha256": "dab1eafe3859ab8eac23439b7e59bd826fc4616c9747b783ff8f904ec6564cad",
+        "patched_sha256": "0c871d5431c0432cc7d8809afa7bd1f2aa027fd9d822b59816981f5c20159d96"
+      }
+    },
+    "repository": "https://github.com/alloy-rs/alloy",
+    "upstream_commit": "59174912873b337ea5868c295cefa70997596f29"
+  },
+  {
+    "name": "alloy-consensus",
+    "version": "2.5.0",
+    "sha256": "727016fed834c2392d014dd697ea473f3e47bcec31ba31ccffa9c1d18ed904e5",
+    "changes": {
+      "Cargo.toml": {
+        "original_sha256": "b25072ac09034f45e5d0b5a2c00e71738f3b7c41ef66124efb6690e073b01a86",
+        "patched_sha256": "034733ca382ec2dd463bbce039c6a1d2a6973ad44b1abca819dce67c812f5eac"
+      },
+      "src/crypto.rs": {
+        "original_sha256": "ec276b26131ef698bf3af2bab7dcf821720e01e359cb3655db425f2473ff6982",
+        "patched_sha256": "26734ddff381d47833c2087ebfb72ac71249eef2f3c9fc51685b344ae5edc5eb"
+      },
+      "src/transaction/envelope.rs": {
+        "original_sha256": "1e657f4555a8dfc29499ebd3c941982b433574bd3432557b96ed518d3fbdc822",
+        "patched_sha256": "96bf9b6ee10be88596a5aedffa505e895b6c83fe09a5902882d53278a71ccac6"
+      }
+    },
+    "repository": "https://github.com/alloy-rs/alloy",
+    "upstream_commit": "59174912873b337ea5868c295cefa70997596f29"
+  },
+  {
+    "name": "alloy-eip7702",
+    "version": "0.6.3",
+    "sha256": "2919c5a56a1007492da313e7a3b6d45ef5edc5d33416fdec63c0d7a2702a0d20",
+    "changes": {
+      "Cargo.toml": {
+        "original_sha256": "035c2bdb4574a88bd2ddbea5c9da8362eef213f74d040628c15d7091bedc4ebf",
+        "patched_sha256": "650180cd5f1649625fdb22ad57e0c3974b7dd78b041e3a8dc40081d233cd34b7"
+      }
+    },
+    "repository": "https://github.com/alloy-rs/eips",
+    "upstream_commit": "6e469eff444ae73b07dc7c93536db0948f480cfe"
+  }
+]

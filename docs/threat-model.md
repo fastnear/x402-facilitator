@@ -44,7 +44,7 @@ transaction success by itself.
 | RPC lies, lags, or partitions | Finality, pinned blocks, typed errors, independent backup reconciliation, fail closed; protected readiness events classify only fixed snapshot causes | Failover and disagreement tests |
 | Database loss or tampering | Scheduled off-host dumps with a tested restore, least-privileged role, append-oriented journal | Dated restore drill |
 | Host compromise | Dedicated unprivileged users, systemd sandboxing, root-only credentials, immutable releases | Unit hardening review and credential-permission check |
-| Supply-chain substitution | Locked dependencies, deny/audit checks, checksums, SBOM, build provenance; a vendored patch is only a checksum-verified copy of a published crate whose applied upstream diff is recorded in `vendor/README.md` and guarded by `scripts/check.sh` | Green release workflow and verified artifact install |
+| Supply-chain substitution | Locked dependencies, deny/audit checks, checksums, SBOM, build provenance; a vendored patch is only a checksum-verified copy of a published crate whose applied diff and provenance are recorded under `vendor/` and guarded by `scripts/check.sh` | Green release workflow and verified artifact install |
 
 ## Idempotency-specific analysis
 
@@ -118,11 +118,17 @@ its own infrastructure threat review.
   production binary, and the reference resource server neither holds payer
   keys nor signs payments. CI fails on high-severity npm findings and this
   low-severity exception must be re-evaluated whenever `@x402/near` changes.
-- The November dependency update still resolves reachable `crypto-bigint`
-  0.5.5 through the Alloy/k256 signer tree. RUSTSEC-2026-0387 has no patched
-  version compatible with that tree; audit remains a release blocker and is
-  not waived. See the [dated review](evidence/2026-11-13-dependency-updates.md).
-  The separate SQLite advisory exception applies only while SQLx's optional
+- RUSTSEC-2026-0387 is addressed by published k256 0.14.0 /
+  elliptic-curve 0.14.3 / crypto-bigint 0.7.11, reached through temporary API
+  adapters in five checksum-pinned Alloy crates. The local patch is not a
+  published Alloy release or a cryptographic audit. CI verifies its complete
+  source inventory, rejects bypassed patches and vulnerable crypto-bigint,
+  and rejects unreviewed optional signer backends. Deterministic signatures,
+  old transaction bytes, low/high-S policy, invalid signatures, and recovery
+  are regression-tested. Remove this maintenance burden when upstream Alloy
+  ships a compatible migration; see the
+  [dated review](evidence/2026-11-13-dependency-updates.md).
+  The SQLite advisory exception applies only while SQLx's optional
   SQLite driver is absent from normal/build dependencies in both Cargo
   workspaces on every target; `scripts/check.sh` enforces that condition.
 

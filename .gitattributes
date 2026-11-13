@@ -4,3 +4,6 @@
 *.toml text eol=lf
 *.yaml text eol=lf
 *.yml text eol=lf
+
+# Unified diff context lines intentionally contain a single prefix space.
+vendor/alloy-k256.patch -whitespace

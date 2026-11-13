@@ -561,7 +561,13 @@ jobs:
             any(.components[]?;
               .name == "x402-types" and .version == "2.0.2") and
             any(.components[]?;
-              .name == "near-primitives" and .version == "0.37.4")
+              .name == "near-primitives" and .version == "0.37.4") and
+            any(.components[];
+              .name == "k256" and .version == "0.14.0") and
+            any(.components[];
+              .name == "crypto-bigint" and .version == "0.7.11") and
+            all(.components[];
+              .name != "crypto-bigint" or .version == "0.7.11")
           ' "$sbom" >/dev/null
           cp "$sbom" \
             "dist/${{ steps.stage.outputs.directory }}/SBOM.cdx.json"
@@ -825,7 +831,13 @@ jobs:
             any(.components[]?;
               .name == "x402-types" and .version == "2.0.2") and
             any(.components[]?;
-              .name == "near-primitives" and .version == "0.37.4")
+              .name == "near-primitives" and .version == "0.37.4") and
+            any(.components[];
+              .name == "k256" and .version == "0.14.0") and
+            any(.components[];
+              .name == "crypto-bigint" and .version == "0.7.11") and
+            all(.components[];
+              .name != "crypto-bigint" or .version == "0.7.11")
           ' "$sbom" >/dev/null
           (
             cd dist
@@ -1068,13 +1080,25 @@ jobs:
             any(.components[]?;
               .name == "x402-types" and .version == "2.0.2") and
             any(.components[]?;
-              .name == "near-primitives" and .version == "0.37.4")
+              .name == "near-primitives" and .version == "0.37.4") and
+            any(.components[];
+              .name == "k256" and .version == "0.14.0") and
+            any(.components[];
+              .name == "crypto-bigint" and .version == "0.7.11") and
+            all(.components[];
+              .name != "crypto-bigint" or .version == "0.7.11")
           ' "dist/${NATIVE_SBOM}" >/dev/null
           jq -e '
             any(.components[]?;
               .name == "x402-types" and .version == "2.0.2") and
             any(.components[]?;
-              .name == "near-primitives" and .version == "0.37.4")
+              .name == "near-primitives" and .version == "0.37.4") and
+            any(.components[];
+              .name == "k256" and .version == "0.14.0") and
+            any(.components[];
+              .name == "crypto-bigint" and .version == "0.7.11") and
+            all(.components[];
+              .name != "crypto-bigint" or .version == "0.7.11")
           ' "dist/${oci_prefix}.cdx.json" >/dev/null
           test "$(
             cat "dist/${oci_prefix}.digest"

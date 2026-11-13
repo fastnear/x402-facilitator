@@ -730,11 +730,93 @@ mod tests {
         assert_eq!(first.signer_address, signer.address());
         assert_eq!(first.account_nonce, 7);
 
+        // Recorded with the published k256 0.13.4 stack at d1cb78f4. DO NOT
+        // FUND: scalar one, expired authorization, deliberately invalid payer
+        // signature. These bytes cannot authorize a token transfer. The new
+        // signer must preserve both signed bytes and journal recovery.
+        let previous_rlp = hex::decode(concat!(
+            "02f9019483014a3407843b9aca0084773594008301d4c094036cbd53842c5426634e7929541ec2318f3dcf7e80b90124e3ee160e",
+            "00000000000000000000000011111111111111111111111111111111111111110000000000000000000000002222222222222222",
+            "22222222222222222222222200000000000000000000000000000000000000000000000000000000000f42400000000000000000",
+            "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+            "0000000100000000000000000000000000000000000000000000000000000000000000aa00000000000000000000000000000000",
+            "0000000000000000000000000000001b111111111111111111111111111111111111111111111111111111111111111122222222",
+            "22222222222222222222222222222222222222222222222222222222c080a07f6447e43e997c6ce95907057247df80fafe6e19e5",
+            "c888ec85b8813c91c6f6c6a017c732f1bec36928710b4b9390ea90fe35957bcee6bd982c41e4617b14e312b0",
+        ))?;
+        assert_eq!(first.signed_tx_rlp(), previous_rlp);
+        assert_eq!(
+            first.tx_hash,
+            b256!("2ea5ac8917c25f0b62ad3bb39f536478e811bf5c90928fdd8ab18a97f3a2b28f")
+        );
+        let previous = TxEnvelope::decode_2718(&mut previous_rlp.as_slice())?;
+        assert_eq!(previous.recover_signer()?, signer.address());
+
         // The durable RLP decodes to a valid signed EIP-1559 transaction whose
         // hash matches what we journaled and whose signer recovers to us.
         let decoded = TxEnvelope::decode_2718(&mut first.signed_tx_rlp())?;
         assert_eq!(*decoded.tx_hash(), first.tx_hash);
         assert_eq!(decoded.recover_signer()?, signer.address());
+        Ok(())
+    }
+
+    #[test]
+    fn signer_migration_preserves_rfc6979_vectors_and_recovery_policy()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use alloy_consensus::crypto::secp256k1::{
+            recover_signer, recover_signer_unchecked, verify_and_compute_signer,
+            verify_and_compute_signer_unchecked,
+        };
+        use alloy_primitives::Signature;
+
+        // DO NOT FUND: reuse the existing scalar-one test signer. These are
+        // synthetic prehashes, never payment authorizations. The digest was
+        // recorded with published k256 0.13.4 at d1cb78f4 before migration.
+        let signer = test_signer()?;
+        let mut signatures = Vec::new();
+        for byte in 0..=255 {
+            let hash = keccak256([byte; 32]);
+            let signature = signer.sign_hash_sync(&hash)?;
+            assert_eq!(
+                signature.recover_address_from_prehash(&hash)?,
+                signer.address()
+            );
+            assert_eq!(recover_signer(&signature, hash)?, signer.address());
+            signatures.extend_from_slice(&signature.as_bytes());
+        }
+        assert_eq!(
+            keccak256(&signatures),
+            b256!("8156abc4f81f9d92d30e6cf85fdc06db989603774d37bec61815dc366fceab09"),
+        );
+
+        let hash = keccak256(b"DO NOT FUND: migration recovery policy");
+        let signature = signer.sign_hash_sync(&hash)?;
+        let order = U256::from_be_bytes(
+            b256!("fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141").0,
+        );
+        let high_s = Signature::new(signature.r(), order - signature.s(), !signature.v());
+        let mut public_key = [0_u8; 65];
+        public_key[0] = 4;
+        public_key[1..].copy_from_slice(signer.public_key().as_slice());
+        assert_eq!(
+            verify_and_compute_signer(&public_key, &signature, hash)?,
+            signer.address()
+        );
+        assert_eq!(recover_signer_unchecked(&high_s, hash)?, signer.address());
+        assert_eq!(
+            verify_and_compute_signer_unchecked(&public_key, &high_s, hash)?,
+            signer.address()
+        );
+        assert_eq!(
+            high_s.recover_address_from_prehash(&hash)?,
+            signer.address()
+        );
+        assert!(recover_signer(&high_s, hash).is_err());
+        assert!(verify_and_compute_signer(&public_key, &high_s, hash).is_err());
+        assert!(verify_and_compute_signer(&public_key, &signature, keccak256(b"changed")).is_err());
+        let invalid = Signature::new(U256::ZERO, U256::ZERO, false);
+        assert!(recover_signer_unchecked(&invalid, hash).is_err());
+        assert!(verify_and_compute_signer_unchecked(&public_key, &invalid, hash).is_err());
         Ok(())
     }
 
