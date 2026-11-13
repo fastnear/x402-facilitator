@@ -8,7 +8,7 @@ members = [
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 rust-version = "1.94.1"
 license = "Apache-2.0"
@@ -70,6 +70,13 @@ strip = "symbols"
 
 # vendor/near-crypto is crates.io near-crypto 0.37.4 plus nearcore#16420/#16617
 # (aws-lc-rs 1.18 without the `unstable` feature); see vendor/README.md.
-# fuzz/Cargo.toml carries the same entry. Remove both with the directory.
+# Five Alloy copies adapt the production signer to published k256 0.14 /
+# crypto-bigint 0.7.11 (RUSTSEC-2026-0387); provenance and exact diff in vendor/.
+# fuzz/Cargo.toml carries the same patches. Remove both with their directories.
 [patch.crates-io]
 near-crypto = { path = "vendor/near-crypto" }
+alloy-primitives = { path = "vendor/alloy-primitives" }
+alloy-signer = { path = "vendor/alloy-signer" }
+alloy-signer-local = { path = "vendor/alloy-signer-local" }
+alloy-consensus = { path = "vendor/alloy-consensus" }
+alloy-eip7702 = { path = "vendor/alloy-eip7702" }

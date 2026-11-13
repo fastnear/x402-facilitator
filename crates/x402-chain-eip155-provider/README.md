@@ -44,6 +44,16 @@ listed in the workspace
 [changelog](https://github.com/fastnear/x402-facilitator/blob/main/CHANGELOG.md).
 Patch releases remain backward compatible.
 
+Version 0.7 uses k256 0.14 / elliptic-curve 0.14 through temporary, reviewed
+Alloy patches in the source workspace. Cargo does not propagate a dependency's
+`[patch.crates-io]` entries: external Rust consumers must carry the same patches
+until the upstream Alloy migration is published. The source workspace is the
+supported production build; independently resolving the registry package does
+not inherit this security fix. See
+[vendor provenance](https://github.com/fastnear/x402-facilitator/blob/main/vendor/README.md).
+Optional mnemonic, keystore, HSM, and alternate signer backends are not supported
+by this temporary patch.
+
 The minimum supported Rust version is declared in the workspace manifest and
 pinned by `rust-toolchain.toml`.
 

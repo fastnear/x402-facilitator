@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { x402ResourceServer } from "@x402/core/server";
+import { ExactEvmScheme } from "@x402/evm/exact/server";
 
 import {
   buildUnpaidHintBody,
@@ -77,10 +79,9 @@ test("the hint body points at the v2 header and never claims to be v1", () => {
 });
 
 // The v2 requirements object exactly as index.mjs injects it as `accepted`,
-// and as @x402/core@2.19.0 buildPaymentRequirements computes it for the
-// route (server/index.js:1080-1092): core keys scheme, network, amount,
-// asset, payTo, maxTimeoutSeconds — deep-equality checked by the matcher at
-// server/index.js:1847 — plus extra as a superset of the route's extra.
+// and as the pinned @x402/core buildPaymentRequirements computes it for the
+// route. The contract test below compares the serialized value and invokes
+// the upstream matcher so dependency upgrades cannot leave this shape stale.
 const requirementsV2 = Object.freeze({
   scheme: "exact",
   network: "eip155:8453",
@@ -112,6 +113,55 @@ const v1Payment = Object.freeze({
       nonce: `0x${"cd".repeat(32)}`,
     }),
   }),
+});
+
+test("legacy accepted bytes match the pinned official requirements and matcher", async () => {
+  for (const profile of [
+    baseInputs,
+    {
+      ...baseInputs,
+      network: "eip155:84532",
+      asset: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+      extra: { name: "USDC", version: "2" },
+    },
+  ]) {
+    const server = new x402ResourceServer({
+      async getSupported() {
+        return {
+          kinds: [{ x402Version: 2, scheme: "exact", network: profile.network }],
+          extensions: [],
+          signers: {},
+        };
+      },
+    }).register(profile.network, new ExactEvmScheme());
+    await server.initialize();
+    const [official] = await server.buildPaymentRequirements({
+      scheme: "exact",
+      network: profile.network,
+      price: { asset: profile.asset, amount: profile.amount },
+      payTo: profile.payTo,
+      extra: profile.extra,
+    });
+    const accepted = {
+      ...requirementsV2,
+      network: profile.network,
+      asset: profile.asset,
+      extra: profile.extra,
+    };
+    const translated = translateV1PaymentToV2(
+      { ...v1Payment, network: v1NetworkName(profile.network) },
+      { requirementsV2: accepted, resourceObject },
+    );
+    assert.equal(JSON.stringify(translated.accepted), JSON.stringify(official));
+    assert.equal(server.findMatchingRequirements([official], translated), official);
+    assert.equal(
+      server.findMatchingRequirements([official], {
+        ...translated,
+        accepted: { ...accepted, amount: "1001" },
+      }),
+      undefined,
+    );
+  }
 });
 
 test("translateV1PaymentToV2 emits the v2 wire shape with the inner payload verbatim", () => {
