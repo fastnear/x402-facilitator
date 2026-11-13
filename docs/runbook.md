@@ -77,6 +77,12 @@ promotion:
 Never describe a promotion or canary as complete without a dated record under
 `docs/evidence/`.
 
+Dependency maintenance must pass the current advisory gates as well as the
+functional tests. The [2026-11-13 update](evidence/2026-11-13-dependency-updates.md)
+retains a reachable crypto-bigint advisory as a release blocker; passing tests
+do not clear it. The guarded SQLx SQLite exception is limited to its inactive
+optional driver and must be removed if SQLite becomes a built dependency.
+
 Migration `0003` has one deliberate post-transaction maintenance step. After
 dropping the legacy full EVM authorization column, `x402-near-admin migrate`
 runs `VACUUM (FULL, ANALYZE) settlements` while the service is stopped so the

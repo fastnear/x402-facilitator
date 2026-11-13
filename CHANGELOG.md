@@ -15,6 +15,16 @@ Patch releases remain backward compatible within the current minor line.
 
 ### Security
 
+- Updated all pinned `@x402/*` packages together from 2.28.0 to 2.30.0,
+  resolving GHSA-mrhx-c7xc-m3w5 through Zod 4.6.7 without leaving older
+  nested core packages in either example application. Both applications also
+  resolve `body-parser` 2.4.0 (GHSA-27r3-jxmh-p828) and `qs` 6.17.1.
+- Updated both Cargo lockfiles to `ctutils` 0.4.8, `zstd` 0.13.5,
+  `zstd-safe` 7.4.1, `zstd-sys` 2.1.3, and `quinn-udp` 0.5.16. The
+  remaining reachable `crypto-bigint` advisory RUSTSEC-2026-0387 is still
+  enforced by the audit gate; this change does not waive it. The inactive
+  optional SQLite driver has a guarded RUSTSEC-2026-0459 exception, checked
+  against normal/build dependencies in both workspaces on all targets.
 - Updated `proxy-addr` to 2.0.8 in both example applications to resolve
   GHSA-jqcg-44mw-7w3h (IP spoofing through an IPv4-mapped IPv6 trusted
   subnet).
@@ -38,6 +48,16 @@ Patch releases remain backward compatible within the current minor line.
 
 ### Changed
 
+- Updated the OpenTelemetry API, SDK, HTTP/proto layers, and OTLP exporters
+  together to 0.33.1 with `tracing-opentelemetry` 0.34.0, and the Alloy 2.x
+  crates together to 2.5.0, in both Cargo workspaces. Updated Express to
+  5.3.0, the merchant's viem pin to 2.57.13, and the resource server's test
+  tooling pins. The NEAR pins, Rust minimum version, public wire contract,
+  configuration, and database schema are unchanged.
+- Added an executable legacy-v1 matcher contract against the pinned official
+  x402 packages for Base mainnet and Sepolia. The November dependency review
+  and release blocker are recorded in
+  [dated evidence](docs/evidence/2026-11-13-dependency-updates.md).
 - Bumped the NEAR crate pins to 0.37.4 and refreshed the production and fuzz
   lockfiles together (Rust patch group: `rand`, `serde_json`, `sha2`,
   `thiserror`, `tokio`, `zeroize`, `alloy-primitives`, `alloy-sol-types`),

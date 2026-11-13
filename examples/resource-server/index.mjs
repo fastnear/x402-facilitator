@@ -148,7 +148,7 @@ routes[route].settlementFailedResponseBody = (context, failure) => ({
 // legacy v1 payments as `accepted`. The middleware deep-equals the accepted
 // core (scheme, network, amount, asset, payTo, maxTimeoutSeconds) against
 // what it computes from `routes` and requires its extra to be a subset of
-// this one (@x402/core@2.19.0 server/index.js:1080-1092, :1847), so this
+// this one (checked against the pinned upstream matcher in legacy-v1.test.mjs), so this
 // object is built from the same constants as `routes` and must stay
 // byte-identical to the accepts entry in the emitted PAYMENT-REQUIRED
 // header.

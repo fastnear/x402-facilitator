@@ -19,7 +19,8 @@ pinned version move while the copy is still present.
   feature to `1.18.2`, and `src/signature.rs` imports the ML-DSA items from
   `aws_lc_rs::signature` instead of `aws_lc_rs::unstable::signature`. Upstream
   states the API is otherwise identical.
-- Why: every published `near-crypto` 0.37.x and 0.38.0 release candidate still
+- Why: at the time this copy was introduced, every published `near-crypto`
+  0.37.x and 0.38.0 release candidate still
   pins `aws-lc-rs =1.16.2`, while the `rustls` and `rustls-webpki` releases that
   fix RUSTSEC-2026-0285, -0346, -0348, -0349 and -0382 require `aws-lc-rs ^1.18`.
   Cargo allows one `aws-lc-rs` 1.x in the graph, so the pin blocked those fixes.
@@ -28,3 +29,10 @@ pinned version move while the copy is still present.
 - Remove when a published `near-crypto` that this workspace can pin carries the
   change: delete this directory, both `[patch.crates-io]` entries, and the
   guard in `scripts/check.sh`, then bump the NEAR pins.
+
+The 2026-11-13 review found the fix in published NEAR 0.38.1. Moving the full
+NEAR RPC family also requires Rust 1.95 and near-account-id 3.x, so removal is
+deferred to that compiler/public-type migration. The current NEAR pins and
+vendored copy remain paired; both lockfiles can take the patched zstd releases
+without that migration. See the
+[dependency review](../docs/evidence/2026-11-13-dependency-updates.md).

@@ -111,13 +111,20 @@ its own infrastructure threat review.
   denial of service is mitigated only by the host's network.
 - Telemetry export is disabled at launch. If an OTLP backend is enabled
   later, field allowlisting and sanitized-event review are required first.
-- The pinned official `@x402/near@2.19.0` development/reference dependency
+- The pinned official `@x402/near@2.30.0` development/reference dependency
   transitively includes `elliptic`, for which
   [GHSA-848j-6mx2-7j84](https://github.com/advisories/GHSA-848j-6mx2-7j84)
   currently has no patched release. It is not linked into either Rust
   production binary, and the reference resource server neither holds payer
   keys nor signs payments. CI fails on high-severity npm findings and this
   low-severity exception must be re-evaluated whenever `@x402/near` changes.
+- The November dependency update still resolves reachable `crypto-bigint`
+  0.5.5 through the Alloy/k256 signer tree. RUSTSEC-2026-0387 has no patched
+  version compatible with that tree; audit remains a release blocker and is
+  not waived. See the [dated review](evidence/2026-11-13-dependency-updates.md).
+  The separate SQLite advisory exception applies only while SQLx's optional
+  SQLite driver is absent from normal/build dependencies in both Cargo
+  workspaces on every target; `scripts/check.sh` enforces that condition.
 
 ## EVM (eip155) and legacy-v1 delta
 

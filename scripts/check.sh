@@ -77,8 +77,21 @@ if command -v cargo-audit >/dev/null 2>&1; then
     echo "error: fuzz rkyv became reachable; remove the RUSTSEC-2026-0235 exception" >&2
     exit 1
   fi
-  cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0235
-  cargo audit --file fuzz/Cargo.lock --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0235
+  # sqlx's inactive optional SQLite driver also contributes lockfile metadata.
+  # This service uses PostgreSQL only. Refuse the SQLite advisory exception if
+  # either workspace ever starts building that driver on any target.
+  sqlite_tree=$(cargo tree --workspace --edges normal,build --target all -i libsqlite3-sys 2>/dev/null)
+  if printf '%s\n' "$sqlite_tree" | grep -q '^libsqlite3-sys v'; then
+    echo "error: SQLite became reachable; remove the RUSTSEC-2026-0459 exception" >&2
+    exit 1
+  fi
+  sqlite_tree=$(cargo tree --manifest-path fuzz/Cargo.toml --edges normal,build --target all -i libsqlite3-sys 2>/dev/null)
+  if printf '%s\n' "$sqlite_tree" | grep -q '^libsqlite3-sys v'; then
+    echo "error: fuzz SQLite became reachable; remove the RUSTSEC-2026-0459 exception" >&2
+    exit 1
+  fi
+  cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0235 --ignore RUSTSEC-2026-0459
+  cargo audit --file fuzz/Cargo.lock --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0235 --ignore RUSTSEC-2026-0459
 else
   echo "note: cargo-audit is not installed; CI must run this gate" >&2
 fi
