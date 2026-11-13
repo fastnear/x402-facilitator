@@ -364,3 +364,11 @@ the frozen 2026-07-24 record above. The living source of truth remains
    closed provider enum, and the same facilitator binary and durable engine.
    Operators may isolate the mainnet-only method in a separately configured
    process or hostname, but there will be no copied sibling implementation.
+10. **The 1Click successor is now a separate active track.** Upstream
+    [#3370](https://github.com/x402-foundation/x402/pull/3370) supersedes
+    #2102's cross-chain exploration with a proposed `near-intents` asset
+    transfer method using the `upfront` payment flow. That client-submitted
+    proof design belongs above the closed NEAR/EVM provider seam and does not
+    change the `intents-verifier` decisions recorded here. Its pinned draft,
+    provider contract, unresolved questions, and implementation gates are in
+    [near-intents-upfront-design.md](near-intents-upfront-design.md).

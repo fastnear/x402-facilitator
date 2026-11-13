@@ -10,10 +10,15 @@ use crate::v1_compat::{self, WireVersion};
 
 pub const PAYMENT_IDENTIFIER_EXTENSION: &str = "payment-identifier";
 const REQUEST_FINGERPRINT_DOMAIN: &[u8] = b"x402-near/request/v1\0";
+const AUTHORIZATION_FLOW: &str = "authorization";
+const EIP3009_METHOD: &str = "eip3009";
+const NEAR_INTENTS_METHOD: &str = "near-intents";
+const UPFRONT_FLOW: &str = "upfront";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum NearAssetTransferMethod {
-    Delegate,
+pub enum SettlementRoute {
+    Direct,
+    NearIntentsUpfrontDisabled,
     Unsupported,
 }
 
@@ -51,10 +56,10 @@ pub struct RequestMeta {
     /// NEAR only: the base64 `SignedDelegateAction`. `None` for eip155, whose
     /// mechanism payload is an ERC-3009 authorization plus the payer signature.
     pub signed_delegate_action: Option<String>,
-    /// NEAR only: the current route classification. An absent
-    /// `extra.assetTransferMethod` selects classic `delegate`; any supplied
-    /// selector remains unsupported until its upstream contract is stable.
-    pub near_asset_transfer_method: Option<NearAssetTransferMethod>,
+    /// Closed route classification performed before mechanism payload parsing.
+    /// The draft NEAR Intents `upfront` route is recognized across origin
+    /// networks but remains disabled until its upstream contract is merged.
+    pub settlement_route: SettlementRoute,
     pub payment_identifier: Option<String>,
 }
 
@@ -69,10 +74,7 @@ impl fmt::Debug for RequestMeta {
             .field("amount", &"<redacted>")
             .field("pay_to", &"<redacted>")
             .field("signed_delegate_action", &"<redacted>")
-            .field(
-                "near_asset_transfer_method",
-                &self.near_asset_transfer_method,
-            )
+            .field("settlement_route", &self.settlement_route)
             .field("payment_identifier", &"<redacted>")
             .finish()
     }
@@ -315,8 +317,8 @@ pub fn parse_request(
     required_decimal_string(accepted, "amount", "paymentPayload.accepted.amount")?;
     required_string(accepted, "payTo", "paymentPayload.accepted.payTo")?;
 
-    let (signed_delegate_action, near_asset_transfer_method) =
-        parse_routed_mechanism_payload(accepted, requirements, mechanism_payload, &network)?;
+    let (signed_delegate_action, settlement_route) =
+        parse_routed_mechanism_payload(accepted, requirements, mechanism_payload, &network, wire)?;
 
     let payment_identifier = extract_payment_identifier(payload, identifier_policy)?;
     let raw = proto::VerifyRequest::from(serde_json::value::to_raw_value(&value)?);
@@ -332,7 +334,7 @@ pub fn parse_request(
             amount,
             pay_to,
             signed_delegate_action,
-            near_asset_transfer_method,
+            settlement_route,
             payment_identifier,
         },
     })
@@ -343,45 +345,76 @@ fn parse_routed_mechanism_payload(
     requirements: &Map<String, Value>,
     mechanism_payload: &Map<String, Value>,
     network: &str,
-) -> Result<(Option<String>, Option<NearAssetTransferMethod>), RequestError> {
-    if !network.starts_with("near:") {
-        return Ok((parse_mechanism_payload(mechanism_payload, network)?, None));
-    }
-
-    let accepted_method = parse_near_asset_transfer_method(
+    wire: WireVersion,
+) -> Result<(Option<String>, SettlementRoute), RequestError> {
+    let accepted_selector = parse_settlement_selector(
         accepted,
         "paymentPayload.accepted.extra.assetTransferMethod",
+        "paymentPayload.accepted.extra.paymentFlow",
     )?;
-    let requirements_method = parse_near_asset_transfer_method(
+    let requirements_selector = parse_settlement_selector(
         requirements,
         "paymentRequirements.extra.assetTransferMethod",
+        "paymentRequirements.extra.paymentFlow",
     )?;
-    let method = if accepted_method.is_none() && requirements_method.is_none() {
-        NearAssetTransferMethod::Delegate
+
+    let draft_selector_seen = [accepted_selector, requirements_selector]
+        .into_iter()
+        .any(|(method, flow)| method == Some(NEAR_INTENTS_METHOD) || flow == Some(UPFRONT_FLOW));
+    let route = if draft_selector_seen {
+        let exact_draft_pair = accepted_selector == (Some(NEAR_INTENTS_METHOD), Some(UPFRONT_FLOW))
+            && requirements_selector == accepted_selector;
+        if exact_draft_pair && wire == WireVersion::V2 {
+            SettlementRoute::NearIntentsUpfrontDisabled
+        } else {
+            SettlementRoute::Unsupported
+        }
+    } else if direct_selector_supported(network, accepted_selector)
+        && direct_selector_supported(network, requirements_selector)
+    {
+        SettlementRoute::Direct
     } else {
-        NearAssetTransferMethod::Unsupported
+        SettlementRoute::Unsupported
     };
-    let signed_delegate = if method == NearAssetTransferMethod::Delegate {
+    let signed_delegate = if route == SettlementRoute::Direct {
         parse_mechanism_payload(mechanism_payload, network)?
     } else {
         None
     };
-    Ok((signed_delegate, Some(method)))
+    Ok((signed_delegate, route))
 }
 
-fn parse_near_asset_transfer_method<'a>(
-    requirements: &'a Map<String, Value>,
-    path: &'static str,
-) -> Result<Option<&'a str>, RequestError> {
-    let Some(extra) = requirements.get("extra") else {
-        return Ok(None);
-    };
-    let extra = extra.as_object().ok_or(RequestError::Field(path))?;
-    match extra.get("assetTransferMethod") {
-        None => Ok(None),
-        Some(Value::String(method)) => Ok(Some(method)),
-        Some(_) => Err(RequestError::Field(path)),
+fn direct_selector_supported(network: &str, (method, flow): (Option<&str>, Option<&str>)) -> bool {
+    if network.starts_with("near:") {
+        method.is_none() && matches!(flow, None | Some(AUTHORIZATION_FLOW))
+    } else if network.starts_with("eip155:") {
+        matches!(method, None | Some(EIP3009_METHOD))
+            && matches!(flow, None | Some(AUTHORIZATION_FLOW))
+    } else {
+        method.is_none() && flow.is_none()
     }
+}
+
+fn parse_settlement_selector<'a>(
+    requirements: &'a Map<String, Value>,
+    method_path: &'static str,
+    flow_path: &'static str,
+) -> Result<(Option<&'a str>, Option<&'a str>), RequestError> {
+    let Some(extra) = requirements.get("extra") else {
+        return Ok((None, None));
+    };
+    let extra = extra.as_object().ok_or(RequestError::Field(method_path))?;
+    let method = match extra.get("assetTransferMethod") {
+        None => Ok(None),
+        Some(Value::String(method)) => Ok(Some(method.as_str())),
+        Some(_) => Err(RequestError::Field(method_path)),
+    }?;
+    let flow = match extra.get("paymentFlow") {
+        None => Ok(None),
+        Some(Value::String(flow)) => Ok(Some(flow.as_str())),
+        Some(_) => Err(RequestError::Field(flow_path)),
+    }?;
+    Ok((method, flow))
 }
 
 /// Validate the chain-specific mechanism payload (`paymentPayload.payload`) and
@@ -868,6 +901,71 @@ mod tests {
     }
 
     #[test]
+    fn direct_eip155_accepts_only_its_default_or_explicit_selectors() {
+        let policy = PaymentIdentifierConfig::default();
+        let selectors = [
+            (None, None),
+            (Some("eip3009"), None),
+            (None, Some("authorization")),
+            (Some("eip3009"), Some("authorization")),
+        ];
+        for (accepted_selector, requirements_selector) in
+            selectors.into_iter().flat_map(|accepted| {
+                selectors
+                    .into_iter()
+                    .map(move |requirements| (accepted, requirements))
+            })
+        {
+            let mut request = eip155_request_value();
+            for (pointer, (method, flow)) in [
+                ("/paymentPayload/accepted/extra", accepted_selector),
+                ("/paymentRequirements/extra", requirements_selector),
+            ] {
+                let Some(extra) = request.pointer_mut(pointer) else {
+                    std::process::abort();
+                };
+                if let Some(method) = method {
+                    extra["assetTransferMethod"] = Value::String(method.to_owned());
+                }
+                if let Some(flow) = flow {
+                    extra["paymentFlow"] = Value::String(flow.to_owned());
+                }
+            }
+            let Ok(parsed) = parse_request(&encoded(&request), &policy, false) else {
+                std::process::abort();
+            };
+            assert_eq!(parsed.meta.settlement_route, SettlementRoute::Direct);
+        }
+    }
+
+    #[test]
+    fn direct_eip155_rejects_unknown_or_mismatched_selectors_before_payload_parsing() {
+        let policy = PaymentIdentifierConfig::default();
+        for (accepted_method, requirements_method) in [
+            (Some("permit2"), Some("permit2")),
+            (Some("future"), Some("future")),
+            (Some("permit2"), None),
+            (None, Some("permit2")),
+        ] {
+            let mut request = eip155_request_value();
+            if let Some(method) = accepted_method {
+                request["paymentPayload"]["accepted"]["extra"]["assetTransferMethod"] =
+                    Value::String(method.to_owned());
+            }
+            if let Some(method) = requirements_method {
+                request["paymentRequirements"]["extra"]["assetTransferMethod"] =
+                    Value::String(method.to_owned());
+            }
+            request["paymentPayload"]["payload"] = serde_json::json!({"txHash": "proof"});
+            let Ok(parsed) = parse_request(&encoded(&request), &policy, false) else {
+                std::process::abort();
+            };
+            assert_eq!(parsed.meta.settlement_route, SettlementRoute::Unsupported);
+            assert!(parsed.meta.signed_delegate_action.is_none());
+        }
+    }
+
+    #[test]
     fn near_payload_still_requires_signed_delegate() {
         let policy = PaymentIdentifierConfig::default();
         let Ok(parsed) = parse_request(&encoded(&request_value()), &policy, false) else {
@@ -877,10 +975,7 @@ mod tests {
             parsed.meta.signed_delegate_action.as_deref(),
             Some("c2lnbmVkLWRlbGVnYXRl")
         );
-        assert_eq!(
-            parsed.meta.near_asset_transfer_method,
-            Some(NearAssetTransferMethod::Delegate)
-        );
+        assert_eq!(parsed.meta.settlement_route, SettlementRoute::Direct);
     }
 
     #[test]
@@ -900,10 +995,22 @@ mod tests {
             std::process::abort();
         };
         assert_eq!(defaulted.value, absent);
-        assert_eq!(
-            defaulted.meta.near_asset_transfer_method,
-            Some(NearAssetTransferMethod::Delegate)
-        );
+        assert_eq!(defaulted.meta.settlement_route, SettlementRoute::Direct);
+    }
+
+    #[test]
+    fn near_delegate_accepts_explicit_authorization_flow() {
+        let policy = PaymentIdentifierConfig::default();
+        let mut request = request_value();
+        request["paymentPayload"]["accepted"]["extra"]["paymentFlow"] =
+            Value::String("authorization".to_owned());
+        request["paymentRequirements"]["extra"]["paymentFlow"] =
+            Value::String("authorization".to_owned());
+        let Ok(parsed) = parse_request(&encoded(&request), &policy, false) else {
+            std::process::abort();
+        };
+        assert_eq!(parsed.meta.settlement_route, SettlementRoute::Direct);
+        assert!(parsed.meta.signed_delegate_action.is_some());
     }
 
     #[test]
@@ -944,10 +1051,7 @@ mod tests {
                 std::process::abort();
             };
             assert_eq!(parsed.value, input);
-            assert_eq!(
-                parsed.meta.near_asset_transfer_method,
-                Some(NearAssetTransferMethod::Unsupported)
-            );
+            assert_eq!(parsed.meta.settlement_route, SettlementRoute::Unsupported);
             assert_eq!(parsed.meta.signed_delegate_action.as_deref(), None);
         }
     }
@@ -970,11 +1074,85 @@ mod tests {
         let Ok(parsed) = parse_request(&encoded(&request), &policy, false) else {
             std::process::abort();
         };
-        assert_eq!(
-            parsed.meta.near_asset_transfer_method,
-            Some(NearAssetTransferMethod::Unsupported)
-        );
+        assert_eq!(parsed.meta.settlement_route, SettlementRoute::Unsupported);
         assert_eq!(parsed.meta.signed_delegate_action, None);
+    }
+
+    #[test]
+    fn near_intents_upfront_is_recognized_before_origin_payload_parsing() {
+        let policy = PaymentIdentifierConfig::default();
+        for network in ["near:mainnet", "eip155:8453", "solana:mainnet"] {
+            let mut request = request_value();
+            request["paymentPayload"]["accepted"]["network"] = Value::String(network.to_owned());
+            request["paymentRequirements"]["network"] = Value::String(network.to_owned());
+            request["paymentPayload"]["accepted"]["extra"] = serde_json::json!({
+                "assetTransferMethod": "near-intents",
+                "paymentFlow": "upfront",
+            });
+            request["paymentRequirements"]["extra"] = serde_json::json!({
+                "assetTransferMethod": "near-intents",
+                "paymentFlow": "upfront",
+            });
+            request["paymentPayload"]["payload"] = serde_json::json!({
+                "txHash": "provider-specific-origin-transaction",
+            });
+
+            let Ok(parsed) = parse_request(&encoded(&request), &policy, false) else {
+                std::process::abort();
+            };
+            assert_eq!(
+                parsed.meta.settlement_route,
+                SettlementRoute::NearIntentsUpfrontDisabled
+            );
+            assert!(parsed.meta.signed_delegate_action.is_none());
+        }
+    }
+
+    #[test]
+    fn near_intents_upfront_requires_the_exact_selector_pair() {
+        let policy = PaymentIdentifierConfig::default();
+        for (accepted_flow, requirements_flow) in [
+            (Some("upfront"), None),
+            (None, Some("upfront")),
+            (Some("authorization"), Some("authorization")),
+        ] {
+            let mut request = eip155_request_value();
+            request["paymentPayload"]["accepted"]["extra"] = serde_json::json!({
+                "assetTransferMethod": "near-intents",
+            });
+            request["paymentRequirements"]["extra"] = serde_json::json!({
+                "assetTransferMethod": "near-intents",
+            });
+            if let Some(flow) = accepted_flow {
+                request["paymentPayload"]["accepted"]["extra"]["paymentFlow"] =
+                    Value::String(flow.to_owned());
+            }
+            if let Some(flow) = requirements_flow {
+                request["paymentRequirements"]["extra"]["paymentFlow"] =
+                    Value::String(flow.to_owned());
+            }
+            request["paymentPayload"]["payload"] = serde_json::json!({"txHash": "proof"});
+
+            let Ok(parsed) = parse_request(&encoded(&request), &policy, false) else {
+                std::process::abort();
+            };
+            assert_eq!(parsed.meta.settlement_route, SettlementRoute::Unsupported);
+            assert!(parsed.meta.signed_delegate_action.is_none());
+        }
+
+        let mut malformed = eip155_request_value();
+        malformed["paymentPayload"]["accepted"]["extra"]["assetTransferMethod"] =
+            Value::String("near-intents".to_owned());
+        malformed["paymentRequirements"]["extra"]["assetTransferMethod"] =
+            Value::String("near-intents".to_owned());
+        malformed["paymentPayload"]["accepted"]["extra"]["paymentFlow"] = Value::Bool(true);
+        malformed["paymentRequirements"]["extra"]["paymentFlow"] = Value::Bool(true);
+        assert!(matches!(
+            parse_request(&encoded(&malformed), &policy, false),
+            Err(RequestError::Field(
+                "paymentPayload.accepted.extra.paymentFlow"
+            ))
+        ));
     }
 
     #[test]
@@ -1166,7 +1344,7 @@ mod tests {
             amount: "sensitive-amount-1000".to_owned(),
             pay_to: "sensitive-payee.testnet".to_owned(),
             signed_delegate_action: Some("sensitive-signed-delegate".to_owned()),
-            near_asset_transfer_method: Some(NearAssetTransferMethod::Delegate),
+            settlement_route: SettlementRoute::Direct,
             payment_identifier: Some("sensitive_identifier_1234".to_owned()),
         };
         let debug = format!("{meta:?}");

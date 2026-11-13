@@ -654,6 +654,45 @@ fn http_request(
     Ok(builder.body(Body::from(body))?)
 }
 
+async fn assert_disabled_transfer_method(
+    router: &Router,
+    key: &str,
+    request: &Value,
+) -> TestResult {
+    assert_protocol_failure_reason(router, key, request, "unsupported_asset_transfer_method").await
+}
+
+async fn assert_protocol_failure_reason(
+    router: &Router,
+    key: &str,
+    request: &Value,
+    expected_reason: &str,
+) -> TestResult {
+    for path in ["/verify", "/settle"] {
+        let response = call(
+            router,
+            http_request(
+                Method::POST,
+                path,
+                serde_json::to_vec(request)?,
+                Some("application/json"),
+                Some(key),
+                None,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status, StatusCode::OK);
+        let response = response.json()?;
+        let reason = if path == "/verify" {
+            &response["invalidReason"]
+        } else {
+            &response["errorReason"]
+        };
+        assert_eq!(reason, expected_reason);
+    }
+    Ok(())
+}
+
 struct TestResponse {
     status: StatusCode,
     headers: HeaderMap,
@@ -1140,6 +1179,34 @@ async fn assert_protected_contract(
         json!({"isValid": true, "payer": TEST_PAYER})
     );
 
+    for (nonce, accepted_side) in [(56, true), (57, false)] {
+        let mut one_sided_authorization = valid_request(payer, nonce, None)?;
+        if accepted_side {
+            one_sided_authorization["paymentPayload"]["accepted"]["extra"] =
+                json!({"paymentFlow": "authorization"});
+        } else {
+            one_sided_authorization["paymentRequirements"]["extra"] =
+                json!({"paymentFlow": "authorization"});
+        }
+        let response = call(
+            &application.router,
+            http_request(
+                Method::POST,
+                "/verify",
+                serde_json::to_vec(&one_sided_authorization)?,
+                Some("application/json"),
+                Some(&key),
+                None,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status, StatusCode::OK);
+        assert_eq!(
+            response.json()?,
+            json!({"isValid": true, "payer": TEST_PAYER})
+        );
+    }
+
     let mut unsupported_method = valid_request(payer, 51, None)?;
     unsupported_method["paymentPayload"]["accepted"]["extra"] =
         json!({"assetTransferMethod": "intents-verifier"});
@@ -1194,6 +1261,52 @@ async fn assert_protected_contract(
             "transaction": "",
             "network": "near:testnet",
         })
+    );
+    assert_eq!(
+        application.rpc.sends.load(Ordering::SeqCst),
+        sends_before_unsupported
+    );
+
+    let journal_before_draft = database.store.journal_summary().await?;
+    let mut disabled_upfront = valid_request(payer, 55, None)?;
+    disabled_upfront["paymentPayload"]["accepted"]["extra"] = json!({
+        "assetTransferMethod": "near-intents",
+        "paymentFlow": "upfront",
+    });
+    disabled_upfront["paymentRequirements"]["extra"] = json!({
+        "assetTransferMethod": "near-intents",
+        "paymentFlow": "upfront",
+    });
+    disabled_upfront["paymentPayload"]["payload"] = json!({
+        "txHash": "origin-transaction-proof",
+    });
+    application.readiness.set_rpc(false);
+    assert_disabled_transfer_method(&application.router, &key, &disabled_upfront).await?;
+    let mut wrong_network_upfront = disabled_upfront.clone();
+    wrong_network_upfront["paymentPayload"]["accepted"]["network"] = json!("near:mainnet");
+    wrong_network_upfront["paymentRequirements"]["network"] = json!("near:mainnet");
+    assert_protocol_failure_reason(
+        &application.router,
+        &key,
+        &wrong_network_upfront,
+        "invalid_network",
+    )
+    .await?;
+    ready(&application.readiness);
+    let journal_after_draft = database.store.journal_summary().await?;
+    assert_eq!(
+        (
+            journal_after_draft.reserved,
+            journal_after_draft.prepared,
+            journal_after_draft.submitted,
+            journal_after_draft.oldest_created_at,
+        ),
+        (
+            journal_before_draft.reserved,
+            journal_before_draft.prepared,
+            journal_before_draft.submitted,
+            journal_before_draft.oldest_created_at,
+        )
     );
     assert_eq!(
         application.rpc.sends.load(Ordering::SeqCst),
@@ -1815,6 +1928,30 @@ async fn assert_base_protocol_contract(database: &TestDatabase, metrics: Metrics
         settle_response.json()?["errorReason"],
         "invalid_x402_version"
     );
+
+    let mut disabled_upfront = base_invalid_version_request();
+    disabled_upfront["x402Version"] = json!(2);
+    disabled_upfront["paymentPayload"]["x402Version"] = json!(2);
+    disabled_upfront["paymentPayload"]["accepted"]["extra"] = json!({
+        "assetTransferMethod": "near-intents",
+        "paymentFlow": "upfront",
+    });
+    disabled_upfront["paymentRequirements"]["extra"] = json!({
+        "assetTransferMethod": "near-intents",
+        "paymentFlow": "upfront",
+    });
+    disabled_upfront["paymentPayload"]["payload"] = json!({
+        "txHash": "eip155-origin-transaction-proof",
+    });
+    assert_disabled_transfer_method(&application.router, &key, &disabled_upfront).await?;
+
+    let mut unknown_selector = base_invalid_version_request();
+    unknown_selector["x402Version"] = json!(2);
+    unknown_selector["paymentPayload"]["x402Version"] = json!(2);
+    unknown_selector["paymentPayload"]["accepted"]["extra"]["assetTransferMethod"] =
+        json!("future");
+    unknown_selector["paymentRequirements"]["extra"]["assetTransferMethod"] = json!("future");
+    assert_disabled_transfer_method(&application.router, &key, &unknown_selector).await?;
 
     let scenario = json!({
         "mode": "protocol",
