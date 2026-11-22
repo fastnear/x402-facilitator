@@ -8,6 +8,6 @@
     "preflight": "node merchant-preflight.mjs"
   },
   "dependencies": {
-    "@x402/core": "2.30.0"
+    "@x402/core": "2.31.0"
   }
 }
